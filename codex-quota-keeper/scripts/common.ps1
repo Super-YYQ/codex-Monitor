@@ -706,11 +706,13 @@ function Resolve-ExecutableLaunchSpec {
             if (-not $comspec) { $comspec = "$env:SystemRoot\System32\cmd.exe" }
             # cmd.exe quote rules + .NET argument escaping do not compose through
             # ArgumentList, so the launcher emits a raw command line instead:
-            #   cmd /d /s /c ""C:\path\x.cmd" "arg1" "arg2""
-            # /s strips the outer quotes, leaving a correctly quoted command.
-            $inner = '"' + $Executable + '"'
-            foreach ($a in $ArgumentList) { $inner += ' "' + ("$a" -replace '"', '') + '"' }
-            $raw = '/d /s /c ""' + $inner + '""'
+            #   cmd /d /s /c ""E:\path\x.cmd" "arg1" "arg2""
+            # With /s, cmd strips the first and last quote of the string after /c,
+            # leaving a correctly quoted command. Empirically verified: one leading
+            # quote (or three) breaks the launch.
+            $raw = '/d /s /c ""' + $Executable + '"'
+            foreach ($a in $ArgumentList) { $raw += ' "' + ("$a" -replace '"', '') + '"' }
+            $raw += '""'
             return @{ exe = $comspec; args = @(); rawArgs = $raw }
         }
         default {
