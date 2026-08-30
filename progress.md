@@ -185,6 +185,9 @@ R5. **CQK-008 Global Backoff**（本次 commit）
       清除后恢复正常、coordination 关闭时惰性。
     - 全量 11 个测试文件回归通过。
 
+R5b. runner.test.ps1 适配集群退避：429/auth 场景后推送过期记录清除全局退避；
+     429 段断言改为 GLOBAL_BACKOFF_SKIP 并验证接管不绕过。全量 11 文件回归通过。
+
 ### 下一步
 - CQK-009/010：history 改为不可变事件文件（history/<date>/<machineId>/<ts>_<EVENT>_<eventId>.json）、
   durable outbox（runtime/outbox + sync-state），失败重试与 CAS 冲突不丢数据。
