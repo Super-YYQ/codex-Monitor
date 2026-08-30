@@ -66,11 +66,13 @@ codex-quota-keeper/
 
 | 参数 | 默认 | 说明 |
 |------|------|------|
-| `pollIntervalMinutes` | 15 | 额度查询周期，最低 5 |
+| `poll.intervalMinutes` | 15 | 额度查询周期（允许 5/10/15/30/60） |
 | `leader.leaseTtlMinutes` | 45 | 租约 TTL（≈轮询周期 3 倍） |
 | `leader.graceMinutes` | 5 | 时钟漂移/网络延迟容忍 |
 | `leader.takeoverOnExpiry` | true | 过期后允许他人接管 |
-| `github.enabled` | true | 开启多机必须有共享协调点 |
+| `github.coordination.enabled` | true | 租约协调（false = LOCAL_ONLY，多机不安全） |
+| `github.historySync.push` | true | history 分支推送开关 |
+| `logging.includeMachineLabel` | false | 隐私开关：machineLabel 是否进 history |
 
 ## 状态机
 

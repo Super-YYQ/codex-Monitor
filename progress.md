@@ -235,6 +235,17 @@ R9. **CQK-015/016 并发与故障注入测试**（本次 commit）
       history 推送竞争：两台机器的不可变事件文件并存且各自 outbox 排空。
     - 全量 12 个测试文件回归通过。
 
+R10. **CQK-017/018/019 工程化 + 版本 0.9.0-beta**（本次 commit）
+     - .github/workflows/test-windows.yml：pwsh-tests（PS7 全量）、ps51-tests（Windows PowerShell 5.1
+       全量）、contract-tests（官方 schema fixtures）；security.yml：PSScriptAnalyzer（Error 阻断）+
+       自定义 secret scan（sk-/ghp_/gho_/ghu_/ghs_/ghr_/github_pat_/私钥/明文口令模式）。
+     - PSScriptAnalyzerSettings.psd1（豁免控制台输出等用例）。
+     - 根 README（一句话定位/快速开始/多机/AutoAnchor 风险/支持矩阵/Troubleshooting）、
+       LICENSE（MIT）、SECURITY.md、CHANGELOG.md（0.9.0-beta + 升级说明）、
+       docs/architecture.md、docs/operations.md、docs/security-model.md。
+     - 版本升至 0.9.0-beta；codex-quota-keeper/README 配置表对齐 v2 schema。
+     - 本机双运行时验证：PS7 与 PS5.1 下 12 个测试文件全部通过。
+     - CQK-020（双机 soak test 数天运行）属部署验收，需真实两机环境，交付时由部署方执行。
+
 ### 下一步
-- CQK-017/018/019：GitHub Actions（PS7/PS5.1/契约测试/PSScriptAnalyzer/secret scan）、
-  根 README/LICENSE/SECURITY/CHANGELOG、版本 0.9.0-beta。
+- 第二轮整改完成。执行 git push 推送远端。

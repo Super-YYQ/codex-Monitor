@@ -1,0 +1,34 @@
+name: test-windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pwsh-tests:
+    name: PowerShell 7 unit + integration tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run full test suite (PowerShell 7)
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File codex-quota-keeper/tests/run-all.ps1
+
+  ps51-tests:
+    name: Windows PowerShell 5.1 compatibility
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run full test suite (Windows PowerShell 5.1)
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File codex-quota-keeper/tests/run-all.ps1
+
+  contract-tests:
+    name: Official quota schema contract tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parser contract fixtures (v2 schema)
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File codex-quota-keeper/tests/quota-client.test.ps1
