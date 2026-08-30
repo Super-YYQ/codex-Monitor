@@ -16,7 +16,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $scriptDir = Split-Path -Parent $PSCommandPath
-foreach ($mod in @('common', 'logger', 'quota-client', 'state-machine', 'github-sync', 'leader-lease', 'preflight')) {
+foreach ($mod in @('common', 'logger', 'quota-client', 'state-machine', 'github-sync', 'leader-lease', 'global-backoff', 'preflight')) {
     . (Join-Path $scriptDir "$mod.ps1")
 }
 if (Test-Path (Join-Path $scriptDir 'auto-anchor.ps1')) {
@@ -100,6 +100,25 @@ try {
         exit 0
     }
 
+    # ---- global backoff (audit plan §7): lease handover must not bypass it ---
+    if ($election.role -eq 'LEADER') {
+        $gb = Get-GlobalBackoff -Config $cfg -KeeperRoot $KeeperRoot
+        if ($gb.active) {
+            # Leader only renews the lease; no Codex access during cluster backoff.
+            if ($election.remoteReachable) {
+                $renewed = Renew-LeaderLease -Config $cfg -KeeperRoot $KeeperRoot -Machine $machine
+                if ($renewed.role -eq 'LEADER' -and $renewed.lease) {
+                    Save-LocalLeaseView -Root $KeeperRoot -State $state -Election $renewed
+                }
+            }
+            $state.role = 'BACKOFF'
+            $state.heartbeat = @{ ts = (Get-IsoTimestamp); role = 'BACKOFF' }
+            Save-KeeperState -Root $KeeperRoot -State $state
+            Write-RunnerLog -Event 'GLOBAL_BACKOFF_SKIP' -Error "until $($gb.until.ToString('yyyy-MM-ddTHH:mm:sszzz')) ($($gb.reason), set by $($gb.sourceOwnerId))"
+            exit 0
+        }
+    }
+
     # LEADER or DEGRADED: perform the read-only quota poll.
     $read = Invoke-CodexRateLimitsRead -Config $cfg -CodexPath $pf.codexPath
     $events = @()
@@ -119,10 +138,12 @@ try {
         $state.lastError = [string]$read.message
         if ($read.errorKind -eq 'AUTH_ERROR') {
             Set-Backoff -Root $KeeperRoot -Minutes 120 -Reason 'auth error'
+            $null = Set-GlobalBackoff -Config $cfg -KeeperRoot $KeeperRoot -Minutes 120 -Reason 'auth_error' -Machine $machine
         } elseif ("$($read.message)" -match '(?i)429|usage.?limit|rate.?limit') {
             Set-Backoff -Root $KeeperRoot -Minutes 60 -Reason '429'
+            $null = Set-GlobalBackoff -Config $cfg -KeeperRoot $KeeperRoot -Minutes 60 -Reason '429' -Machine $machine
         }
-        Write-RunnerLog -Event 'READ_FAILED' -Level 'ERROR' -Error $read.message
+        Write-RunnerLog -Event 'READ_FAILED' -Level 'ERROR' -Error $read.message -ErrorKind ([string]$read.errorKind)
     }
     $state.lastReadAt = Get-IsoTimestamp
 

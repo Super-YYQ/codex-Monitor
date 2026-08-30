@@ -175,5 +175,16 @@ R4. **CQK-004 统一外部命令启动器**（本次 commit）
     - npm codex.cmd 端到端测试通过（mock-appserver.cmd 包装器，PS7 下验证）。
     - 全量 10 个测试文件回归通过。
 
+R5. **CQK-008 Global Backoff**（本次 commit）
+    - 新增 scripts/global-backoff.ps1：coordination/backoff.json {schema, until, reason, sourceOwnerId, setAt}，
+      Get-GlobalBackoff/Set-GlobalBackoff（CAS push，best-effort 失败不影响主流程）。
+    - Runner：Leader 选举后、额度读取前检查全局退避——生效时 Leader 只续租不访问 Codex（GLOBAL_BACKOFF_SKIP）；
+      429 → 全局 60 分钟、AUTH_ERROR → 全局 120 分钟（与本地退避同时设置）。
+    - tests/global-backoff.test.ps1：6 组全过——marker 推读、过期失活、Leader 跳读、
+      租约接管后不得绕过退避（第二台机器接管后仍被全局退避拦截、零查询）、退避期租约续持、
+      清除后恢复正常、coordination 关闭时惰性。
+    - 全量 11 个测试文件回归通过。
+
 ### 下一步
-- CQK-008：Global Backoff 写入 coordination/backoff.json；Leader 选举后、读取前检查；退避期只续租不查询。
+- CQK-009/010：history 改为不可变事件文件（history/<date>/<machineId>/<ts>_<EVENT>_<eventId>.json）、
+  durable outbox（runtime/outbox + sync-state），失败重试与 CAS 冲突不丢数据。
