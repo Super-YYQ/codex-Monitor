@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "mode": "MonitorOnly",
+  "pollIntervalMinutes": 15,
+  "minimumPollIntervalMinutes": 5,
+
+  "leader": {
+    "enabled": true,
+    "leaseTtlMinutes": 45,
+    "graceMinutes": 5,
+    "takeoverOnExpiry": true,
+    "label": "Home PC"
+  },
+
+  "codex": {
+    "command": "auto",
+    "queryTimeoutSeconds": 20,
+    "autoAnchor": false,
+    "anchorPrompt": "Reply exactly OK.",
+    "maxAnchorsPerDay": 6,
+    "minimumAnchorGapMinutes": 60
+  },
+
+  "github": {
+    "enabled": true,
+    "repoPath": "D:/tools/codex-quota-history",
+    "coordinationBranch": "coordination",
+    "historyBranch": "history",
+    "syncEventsOnly": true,
+    "push": true
+  },
+
+  "logging": {
+    "retentionDays": 90,
+    "includeMachineLabel": true
+  }
+}

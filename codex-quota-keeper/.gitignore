@@ -1,0 +1,26 @@
+# 运行时本地状态（每台机器私有，禁止进仓库/推送）
+runtime/
+runtimes/
+
+# 本地配置（含仓库路径等本机信息；用 config.example.json 作模板）
+config.json
+
+# 历史日志（净化数据，是否同步到专用 Private 仓库由部署决定；默认忽略本地副本）
+history/
+
+# 临时 app-server / 调试产物
+*.tmp
+*.log
+app-server-output/
+
+# Windows / 编辑器
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.user
+*.suo
+
+# 测试产物
+tests/*.out
+TestResults/
