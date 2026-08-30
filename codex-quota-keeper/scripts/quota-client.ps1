@@ -134,9 +134,190 @@ function Get-RateLimitReachedType {
     return $null
 }
 
+# ---------------------------------------------------------------------------
+# QuotaSnapshot model (CQK-001, audit plan v1.0 §4)
+#
+#   snapshot := @{
+#     ok; sourceSchemaVersion; accountPlanType; buckets[];
+#     rateLimitReachedType?; credits?; spendControlReached?; rawMetadata;
+#     schemaUnknown; errorKind; message
+#   }
+#   bucket := @{ bucketId; bucketName?; planType?; windows[] }
+#   window := @{ windowType; usable; windowDurationMins?; usedPercent?; resetsAt? }
+#
+# Parsing is whitelist-based (primary/secondary window keys only). Unknown
+# metadata keys are preserved in rawMetadata and never reach reset logic or
+# the AutoAnchor guard. Optional/null fields degrade the window instead of
+# failing the whole response.
+
+$script:CQK_WINDOW_KEYS = @('primary', 'secondary')
+$script:CQK_RATELIMITS_META_KEYS = @(
+    'primary', 'secondary', 'limitId', 'limitName', 'planType', 'credits',
+    'spendControlReached', 'rateLimitReachedType', 'individualLimit'
+)
+
+function Get-QuotaSnapshotWindow {
+    # $null -> window absent. Hashtable -> usable (fields may be null/partial).
+    # Anything else -> unusable window, response is degraded, not a crash.
+    param([string]$WindowType, $Window)
+    if ($null -eq $Window) { return $null }
+    if ($Window -isnot [hashtable]) {
+        return @{ windowType = $WindowType; usable = $false; unusableReason = 'window-not-an-object';
+                  windowDurationMins = $null; usedPercent = $null; resetsAt = $null }
+    }
+    $duration = if (Test-NumericValue $Window['windowDurationMins']) { ConvertTo-Numeric $Window['windowDurationMins'] } else { $null }
+    $used = $null
+    if (Test-NumericValue $Window['usedPercent']) {
+        if ($Window['usedPercent'] -is [double] -or $Window['usedPercent'] -is [decimal]) { $used = [double]$Window['usedPercent'] }
+        else { $used = [double](ConvertTo-Numeric $Window['usedPercent']) }
+    }
+    $resets = if (Test-NumericValue $Window['resetsAt']) { ConvertTo-Numeric $Window['resetsAt'] } else { $null }
+    return @{ windowType = [string]$WindowType; usable = $true; unusableReason = $null;
+              windowDurationMins = $duration; usedPercent = $used; resetsAt = $resets }
+}
+
+function Get-QuotaSnapshotBucket {
+    param([string]$BucketId, $Bucket)
+    $windows = @()
+    $allUsable = $false
+    if ($Bucket -is [hashtable]) {
+        $allUsable = $true
+        foreach ($name in $script:CQK_WINDOW_KEYS) {
+            $w = Get-QuotaSnapshotWindow -WindowType $name -Window $Bucket[$name]
+            if ($null -ne $w) { $windows += ,$w }
+        }
+    }
+    $meta = @{}
+    if ($Bucket -is [hashtable]) {
+        foreach ($k in @('limitName', 'planType', 'limitId')) {
+            if ($Bucket.ContainsKey($k) -and $null -ne $Bucket[$k]) { $meta[$k] = $Bucket[$k] }
+        }
+    }
+    return @{
+        bucketId   = [string]$BucketId
+        bucketName = $(if ($meta.ContainsKey('limitName')) { [string]$meta.limitName } else { $null })
+        planType   = $(if ($meta.ContainsKey('planType')) { [string]$meta.planType } else { $null })
+        windows    = $windows
+        usable     = ($allUsable -and @($windows).Count -gt 0)
+    }
+}
+
+function Get-FlattenedQuotaWindows {
+    # Convenience view: every bucket window as one flat record. Derived data only.
+    param($Buckets)
+    $flat = @()
+    foreach ($b in @($Buckets)) {
+        foreach ($w in @($b.windows)) {
+            $flat += ,@{
+                name               = [string]$w.windowType
+                bucketId           = [string]$b.bucketId
+                minutes            = $w.windowDurationMins
+                usedPercent        = $w.usedPercent
+                resetsAt           = $w.resetsAt
+                usable             = [bool]$w.usable
+            }
+        }
+    }
+    return ,$flat
+}
+
+function ConvertFrom-QuotaSnapshotResult {
+    # Normalizes an app-server result object into a QuotaSnapshot.
+    # SCHEMA_UNKNOWN only when the root is unrecognizable or nothing usable
+    # (no usable window AND no known metadata) remains (audit plan §4.2).
+    param($Result)
+    $out = @{
+        ok                   = $true
+        sourceSchemaVersion  = $null
+        accountPlanType      = $null
+        buckets              = @()
+        windows              = @()
+        rateLimitReachedType = $null
+        credits              = $null
+        spendControlReached  = $null
+        rawMetadata          = @{}
+        schemaUnknown        = $false
+        errorKind            = $null
+        message              = $null
+    }
+
+    if ($Result -isnot [hashtable]) {
+        $out.ok = $false; $out.schemaUnknown = $true; $out.errorKind = 'SCHEMA_UNKNOWN'
+        $out.message = 'response result is not an object'
+        return $out
+    }
+
+
+    $rl = $null
+    if ($Result.ContainsKey('rateLimits')) { $rl = $Result.rateLimits }
+    $byId = $null
+    if ($Result.ContainsKey('rateLimitsByLimitId')) { $byId = $Result.rateLimitsByLimitId }
+    $recognized = $false
+
+    if ($byId -is [hashtable] -and @($byId.Keys).Count -gt 0) {
+        $recognized = $true
+        $out.sourceSchemaVersion = 'v2'
+        foreach ($limitId in @($byId.Keys | Sort-Object)) {
+            $b = $byId[$limitId]
+            if ($b -is [hashtable]) { $out.buckets += ,(Get-QuotaSnapshotBucket -BucketId ([string]$limitId) -Bucket $b) }
+        }
+    }
+
+    if ($rl -is [hashtable]) {
+        $recognized = $true
+        if (-not $out.sourceSchemaVersion) { $out.sourceSchemaVersion = 'v2' }
+        # Known metadata, whitelisted (never parsed as windows).
+        if ($rl.ContainsKey('planType') -and $null -ne $rl.planType) { $out.accountPlanType = [string]$rl.planType }
+        elseif ($Result.ContainsKey('planType') -and $null -ne $Result.planType) { $out.accountPlanType = [string]$Result.planType }
+        if (-not $out.rateLimitReachedType) { $out.rateLimitReachedType = Get-RateLimitReachedType $Result }
+        if ($rl.ContainsKey('credits') -and $null -ne $rl.credits) { $out.credits = $rl.credits }
+        elseif ($Result.ContainsKey('credits') -and $null -ne $Result.credits) { $out.credits = $Result.credits }
+        if ($rl.ContainsKey('spendControlReached') -and $null -ne $rl.spendControlReached) { $out.spendControlReached = $rl.spendControlReached }
+        elseif ($Result.ContainsKey('spendControlReached') -and $null -ne $Result.spendControlReached) { $out.spendControlReached = $Result.spendControlReached }
+
+        if ($rl.ContainsKey('limitId') -or $rl.ContainsKey('primary') -or $rl.ContainsKey('secondary')) {
+            # No rateLimitsByLimitId -> rateLimits itself is the single default bucket.
+            if (-not ($byId -is [hashtable] -and @($byId.Keys).Count -gt 0)) {
+                $bucketId = 'default'
+                if ($rl.ContainsKey('limitId') -and $rl.limitId) { $bucketId = [string]$rl.limitId }
+                $out.buckets += ,(Get-QuotaSnapshotBucket -BucketId $bucketId -Bucket $rl)
+            }
+        }
+
+        # Unknown metadata preserved verbatim (primitives only), never parsed as windows.
+        foreach ($k in @($rl.Keys)) {
+            if ($script:CQK_RATELIMITS_META_KEYS -ccontains $k) { continue }
+            $v = $rl[$k]
+            if ($null -eq $v) { continue }
+            if ($v -is [hashtable] -or $v -is [System.Collections.IEnumerable] -and $v -isnot [string] -and $v -isnot [byte[]]) { continue }
+            $out.rawMetadata[$k] = $v
+        }
+    }
+
+    if (-not $recognized) {
+        $out.ok = $false; $out.schemaUnknown = $true; $out.errorKind = 'SCHEMA_UNKNOWN'
+        $out.windows = @(); $out.buckets = @()
+        $out.message = 'no rateLimits-like structure recognized; failing closed'
+        return $out
+    }
+
+    $hasUsableWindow = $false
+    foreach ($b in @($out.buckets)) { foreach ($w in @($b.windows)) { if ($w.usable) { $hasUsableWindow = $true } } }
+    $hasMetadata = ($null -ne $out.accountPlanType -or $null -ne $out.rateLimitReachedType -or
+        $null -ne $out.credits -or $null -ne $out.spendControlReached -or @($out.rawMetadata.Keys).Count -gt 0)
+    if (-not $hasUsableWindow -and -not $hasMetadata) {
+        $out.ok = $false; $out.schemaUnknown = $true; $out.errorKind = 'SCHEMA_UNKNOWN'
+        $out.windows = @(); $out.buckets = @()
+        $out.message = 'structure recognized but no usable window or metadata; failing closed'
+        return $out
+    }
+
+    $out.windows = Get-FlattenedQuotaWindows $out.buckets
+    return $out
+}
+
 function ConvertFrom-RateLimitsResponse {
-    # Normalizes the app-server response into windows keyed by windowDurationMins.
-    # Unknown structures yield schemaUnknown=true so callers fail closed.
+    # JSON-RPC response -> QuotaSnapshot. Error responses are classified here.
     param($Response)
     if ($Response -is [hashtable] -and $Response.ContainsKey('error') -and $Response.error) {
         $errText = ''
@@ -150,73 +331,15 @@ function ConvertFrom-RateLimitsResponse {
         $combined = "$errCode $errText"
         $kind = 'PROTOCOL_ERROR'
         if ($combined -match '(?i)auth|login|unauthor|401|403|not\s+logged') { $kind = 'AUTH_ERROR' }
-        return @{ ok = $false; windows = @(); rateLimitReachedType = $null; schemaUnknown = $false;
-                  errorKind = $kind; message = (Hide-SensitiveText "app-server error ($errCode): $errText") }
+        return @{ ok = $false; buckets = @(); windows = @(); sourceSchemaVersion = $null; accountPlanType = $null;
+                  rateLimitReachedType = $null; credits = $null; spendControlReached = $null; rawMetadata = @{};
+                  schemaUnknown = $false; errorKind = $kind;
+                  message = (Hide-SensitiveText "app-server error ($errCode): $errText") }
     }
 
     $result = $null
     if ($Response -is [hashtable] -and $Response.ContainsKey('result')) { $result = $Response.result }
-    if ($result -isnot [hashtable]) {
-        return @{ ok = $false; windows = @(); rateLimitReachedType = $null; schemaUnknown = $true;
-                  errorKind = 'SCHEMA_UNKNOWN'; message = 'response result is not an object' }
-    }
-
-    $rl = $null
-    if ($result.ContainsKey('rateLimits')) { $rl = $result.rateLimits }
-    if ($rl -isnot [hashtable]) {
-        return @{ ok = $false; windows = @(); rateLimitReachedType = $null; schemaUnknown = $true;
-                  errorKind = 'SCHEMA_UNKNOWN'; message = 'rateLimits object missing' }
-    }
-
-    # Some plans/periods return only one window, and rateLimits may carry extra
-    # non-window fields (rateLimitReachedType). Validate only keys actually present;
-    # 'primary'/'secondary' keep their canonical order, the rest follow alphabetically.
-    $present = @($rl.Keys)
-    $names = @()
-    foreach ($n in @('primary', 'secondary')) {
-        if ($present -ccontains $n) { $names += $n }
-    }
-    $names += @($present | Where-Object { $_ -ne 'primary' -and $_ -ne 'secondary' -and $_ -ne 'rateLimitReachedType' } | Sort-Object)
-
-    $windows = @()
-    $schemaUnknown = $false
-    foreach ($name in $names) {
-        $w = $rl[$name]
-        if ($w -isnot [hashtable]) { $schemaUnknown = $true; continue }
-        if (-not (Test-NumericValue $w['windowDurationMins']) -or
-            -not (Test-NumericValue $w['usedPercent']) -or
-            -not (Test-NumericValue $w['resetsAt'])) {
-            $schemaUnknown = $true
-            continue
-        }
-        $usedRaw = $w['usedPercent']
-        $used = [double]0
-        if ($usedRaw -is [double] -or $usedRaw -is [decimal]) { $used = [double]$usedRaw }
-        else { $used = [double](ConvertTo-Numeric $usedRaw) }
-        $windows += ,@{
-            name        = [string]$name
-            minutes     = ConvertTo-Numeric $w['windowDurationMins']
-            usedPercent = $used
-            resetsAt    = ConvertTo-Numeric $w['resetsAt']
-        }
-    }
-
-    if ($schemaUnknown -or @($windows).Count -eq 0) {
-        # Fail closed: an unrecognized structure must never reach the state machine
-        # or AutoAnchor. Well-formed unknown window *names* were kept above; only
-        # entries missing required fields land here.
-        return @{ ok = $false; windows = @(); rateLimitReachedType = $null; schemaUnknown = $true;
-                  errorKind = 'SCHEMA_UNKNOWN'; message = 'rateLimits structure not recognized; failing closed' }
-    }
-
-    return @{
-        ok                   = $true
-        windows              = $windows
-        rateLimitReachedType = Get-RateLimitReachedType $result
-        schemaUnknown        = $false
-        errorKind            = $null
-        message              = $null
-    }
+    return ConvertFrom-QuotaSnapshotResult $result
 }
 
 function Invoke-CodexRateLimitsRead {
@@ -227,7 +350,9 @@ function Invoke-CodexRateLimitsRead {
         [string]$CodexPath = '',
         [int]$TimeoutSeconds = 0
     )
-    $empty = { @{ ok = $false; windows = @(); rateLimitReachedType = $null; schemaUnknown = $false; errorKind = $null; message = $null } }
+    $empty = { @{ ok = $false; buckets = @(); windows = @(); sourceSchemaVersion = $null; accountPlanType = $null;
+                  rateLimitReachedType = $null; credits = $null; spendControlReached = $null; rawMetadata = @{};
+                  schemaUnknown = $false; errorKind = $null; message = $null } }
     $out = & $empty
 
     if (-not $TimeoutSeconds -or $TimeoutSeconds -le 0) { $TimeoutSeconds = [int]$Config.codex.queryTimeoutSeconds }

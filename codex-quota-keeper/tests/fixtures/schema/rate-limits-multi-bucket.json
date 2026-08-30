@@ -1,0 +1,16 @@
+{
+  "rateLimitsByLimitId": {
+    "bucket-a": {
+      "limitId": "bucket-a",
+      "limitName": "Bucket A",
+      "planType": "pro",
+      "primary": { "usedPercent": 10, "windowDurationMins": 300, "resetsAt": 1788062400 }
+    },
+    "bucket-b": {
+      "limitId": "bucket-b",
+      "limitName": "Bucket B",
+      "planType": "pro",
+      "secondary": { "usedPercent": 33, "windowDurationMins": 10080, "resetsAt": 1788667200 }
+    }
+  }
+}

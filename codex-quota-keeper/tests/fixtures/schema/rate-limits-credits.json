@@ -1,0 +1,9 @@
+{
+  "rateLimits": {
+    "limitId": "codex-default",
+    "planType": "plus",
+    "primary": { "usedPercent": 10, "windowDurationMins": 300, "resetsAt": 1788062400 },
+    "credits": { "hasCredits": true, "balance": 42.5 },
+    "spendControlReached": false
+  }
+}

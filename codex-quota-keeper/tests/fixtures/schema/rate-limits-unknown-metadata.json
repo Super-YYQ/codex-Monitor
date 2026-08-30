@@ -1,0 +1,11 @@
+{
+  "rateLimits": {
+    "limitId": "codex-default",
+    "planType": "plus",
+    "primary": { "usedPercent": 10, "windowDurationMins": 300, "resetsAt": 1788062400 },
+    "secondary": { "usedPercent": 20, "windowDurationMins": 10080, "resetsAt": 1788667200 },
+    "individualLimit": { "concurrentSessions": 3 },
+    "futureField": 123,
+    "someFlag": "value"
+  }
+}

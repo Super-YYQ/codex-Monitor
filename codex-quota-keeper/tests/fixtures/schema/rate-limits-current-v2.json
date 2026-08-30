@@ -1,0 +1,9 @@
+{
+  "rateLimits": {
+    "limitId": "codex-default",
+    "limitName": "Codex",
+    "planType": "plus",
+    "primary": { "usedPercent": 25, "windowDurationMins": 300, "resetsAt": 1788062400 },
+    "secondary": { "usedPercent": 18, "windowDurationMins": 10080, "resetsAt": 1788667200 }
+  }
+}

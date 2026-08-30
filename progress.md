@@ -126,6 +126,21 @@
 
 
 
-## 下一步
-- 开发任务全部完成。后续使用：复制 config.example.json → config.json 后运行 install.cmd；
-  AutoAnchor 保持关闭，除非用户明确接受 doc/04 §11 风险清单。
+## 第二轮：仓库审查整改（依据 doc/codex-Monitor_仓库审查与开发计划_v1.0.docx，基线 5594c1c）
+
+### 完成记录
+R1. **CQK-001/002 quota v2 解析器重构 + 官方 schema 契约 fixtures**（本次 commit）
+    - QuotaSnapshot 模型：buckets[]（bucketId/bucketName/planType/windows[]）+ sourceSchemaVersion +
+      accountPlanType + rateLimitReachedType/credits/spendControlReached + rawMetadata。
+    - 解析改为白名单制：仅 primary/secondary 视为窗口键；未知键进入 rawMetadata（仅原始类型），
+      不再遍历所有键当窗口；rateLimitsByLimitId 多 bucket 优先，rateLimits 兼容为单 bucket。
+    - 可选/空字段降级窗口信息而不判失败（windowDurationMins/resetsAt 允许 null）；
+      仅根层级无法识别、或无任何可用窗口且无任何已知元数据时才 SCHEMA_UNKNOWN fail-closed。
+    - tests/fixtures/schema/ 7 个官方契约 fixture（current-v2/secondary-null/null-window-fields/
+      multi-bucket/credits/unknown-metadata/unrecognized-root）全部通过；
+      mock app-server 升级 v2 形状并新增 multi-bucket/secondary-null/null-fields/credits/
+      unknown-meta/unrecognized-root 模式；保留 windows 扁平视图供消费者过渡使用。
+
+### 下一步
+- CQK-003：状态机窗口键升级 bucketId+windowType、eventId v2（SHA-256(bucketId|windowType|duration|prevResetsAt|reset)）、
+  null 字段容错（跳过 reset 判断但保留 partial 状态）、processedEventIds 明确为本地去重。
