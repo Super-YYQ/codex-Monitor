@@ -1,10 +1,12 @@
-# Runs every *.test.ps1 in tests/ and exits non-zero on any failure.
+# Runs every *.test.ps1 in tests/, each in its own PowerShell process for scope
+# isolation, and exits non-zero if any file fails.
 # Usage: pwsh tests/run-all.ps1   (or: powershell -File tests/run-all.ps1)
 
 $ErrorActionPreference = 'Stop'
 $testsDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-. (Join-Path $testsDir 'test-helper.ps1')
+$pwsh = (Get-Process -Id $PID).Path
+if (-not $pwsh) { $pwsh = "$PSHOME\pwsh.exe" }
 
 $testFiles = Get-ChildItem -LiteralPath $testsDir -Filter '*.test.ps1' | Sort-Object Name
 if (-not $testFiles) {
@@ -12,32 +14,26 @@ if (-not $testFiles) {
     exit 1
 }
 
-$totalFailures = 0
-$totalChecks = 0
-$failedFiles = @()
+$passed = @()
+$failed = @()
 
 foreach ($file in $testFiles) {
     Write-Host ''
     Write-Host "== $($file.Name) ==" -ForegroundColor Yellow
-    $before = Get-TestResult
-    try {
-        & $file.FullName
-    } catch {
-        Write-Host "  FAIL: test script threw: $($_.Exception.Message)" -ForegroundColor Red
-        $script:TestFailures++
+    $out = & $pwsh -NoProfile -ExecutionPolicy Bypass -File $file.FullName 2>&1
+    $out | ForEach-Object { Write-Host "$_" }
+    if ($LASTEXITCODE -eq 0) {
+        $passed += $file.Name
+    } else {
+        $failed += $file.Name
+        Write-Host "  -> FAILED (exit $LASTEXITCODE)" -ForegroundColor Red
     }
-    $after = Get-TestResult
-    $fileFails = $after.failures - $before.failures
-    $fileChecks = $after.checks - $before.checks
-    $totalFailures += $fileFails
-    $totalChecks += $fileChecks
-    if ($fileFails -gt 0) { $failedFiles += $file.Name }
 }
 
 Write-Host ''
-if ($totalFailures -gt 0) {
-    Write-Host "RESULT: $totalFailures failure(s) out of $totalChecks checks. Failed: $($failedFiles -join ', ')" -ForegroundColor Red
+if ($failed.Count -gt 0) {
+    Write-Host "RESULT: $($passed.Count) passed, $($failed.Count) failed. Failed: $($failed -join ', ')" -ForegroundColor Red
     exit 1
 }
-Write-Host "RESULT: all $totalChecks checks passed." -ForegroundColor Green
+Write-Host "RESULT: all $($passed.Count) test file(s) passed." -ForegroundColor Green
 exit 0

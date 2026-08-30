@@ -130,6 +130,16 @@ function Get-DatePartUtc {
     return $Value.ToUniversalTime().ToString('yyyy-MM-dd')
 }
 
+function ConvertTo-IsoString {
+    # PS7's ConvertFrom-Json parses ISO strings into [DateTime]; re-stringifying
+    # those with [string] produces a locale format. Always normalize to ISO.
+    param($Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [DateTime]) { return $Value.ToString('yyyy-MM-ddTHH:mm:sszzz') }
+    if ($Value -is [DateTimeOffset]) { return $Value.ToString('yyyy-MM-ddTHH:mm:sszzz') }
+    return [string]$Value
+}
+
 # ---------------------------------------------------------------------------
 # Hashing (event id per doc: SHA-256("300|1788062400|reset"))
 
@@ -449,7 +459,8 @@ function Invoke-External {
         [string[]]$ArgumentList = @(),
         [int]$TimeoutSeconds = 30,
         [string]$WorkingDirectory = $null,
-        [string]$StdinText = $null
+        [string]$StdinText = $null,
+        [hashtable]$Environment = $null
     )
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $FilePath
@@ -461,6 +472,9 @@ function Invoke-External {
     $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
     $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
     if ($WorkingDirectory) { $psi.WorkingDirectory = $WorkingDirectory }
+    if ($Environment) {
+        foreach ($k in $Environment.Keys) { $psi.EnvironmentVariables[[string]$k] = [string]$Environment[$k] }
+    }
     # ArgumentList exists on PS7 (.NET Core); PS 5.1 must fall back to a quoted command line.
     if ($psi.PSObject.Properties['ArgumentList']) {
         foreach ($a in $ArgumentList) { [void]$psi.ArgumentList.Add([string]$a) }

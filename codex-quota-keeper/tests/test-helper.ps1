@@ -101,3 +101,41 @@ function Write-TestConfigFile {
     [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding($false)))
     return $Path
 }
+
+# ---- git test repos (local bare origin + working clone) --------------------
+
+function Invoke-TestGit {
+    param([string]$RepoPath, [string[]]$ArgumentList)
+    $git = (Get-Command git -ErrorAction SilentlyContinue).Source
+    $args = @()
+    if ($RepoPath) { $args += @('-C', $RepoPath) }
+    $args += $ArgumentList
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $git
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+    $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+    if ($psi.PSObject.Properties['ArgumentList']) {
+        foreach ($a in $args) { [void]$psi.ArgumentList.Add([string]$a) }
+    } else {
+        $psi.Arguments = ($args | ForEach-Object { '"' + ("$_" -replace '"', '\"') + '"' }) -join ' '
+    }
+    $p = New-Object System.Diagnostics.Process
+    $p.StartInfo = $psi
+    [void]$p.Start()
+    if (-not $p.WaitForExit(30000)) { try { $p.Kill() } catch { }; return @{ ok = $false } }
+    return @{ ok = ($p.ExitCode -eq 0); stdout = $p.StandardOutput.ReadToEnd(); stderr = $p.StandardError.ReadToEnd() }
+}
+
+function New-TestOriginAndClone {
+    # Creates <workspace>/origin.git (bare) and <workspace>/repo (clone).
+    param([string]$Workspace)
+    $origin = Join-Path $Workspace 'origin.git'
+    $clone = Join-Path $Workspace 'repo'
+    $null = Invoke-TestGit -RepoPath $null -ArgumentList @('init', '--bare', '-q', $origin)
+    $null = Invoke-TestGit -RepoPath $null -ArgumentList @('clone', '-q', $origin, $clone)
+    return @{ origin = $origin; clone = $clone }
+}

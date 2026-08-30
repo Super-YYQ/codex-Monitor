@@ -34,7 +34,7 @@
      Test-ShouldAnchor 幂等守卫：mode+autoAnchor 双开关、Leader 租约、未处理 eventId、
      最小间隔、每日上限、无 429/认证/未知 schema 错误、远程不可达 fail-closed。
    - `tests/state-machine.test.ps1`：11 组全过（含 eventId 与文档示例格式一致、守卫 9 种拒绝路径）。
-5. **步骤5 logger.ps1 + 测试**（本次 commit）
+5. `f91c693` **步骤5 logger.ps1 + 测试**
    - `scripts/logger.ps1`：runtime/logs/keeper-YYYY-MM-DD.jsonl（03 文档 §11 schema：ts/level/event/
      machineId/role/mode/windows/anchor/error，错误文本入库前脱敏）；history/events-*.jsonl 净化白名单记录
      （prompt/会话/凭证字段一律丢弃）；history/summary-YYYY-MM-DD.json 每日滚动汇总（counts 累积/anchor/错误计数/
@@ -42,7 +42,26 @@
      Get-RecentErrors 供 status.ps1 读取最近 ERROR。
    - `tests/logger.test.ps1`：6 组全过（schema 字段存在性、脱敏、history 白名单、汇总累积、保留期、最近错误排序）。
    - 修复 common.ps1 深转换函数单元素数组被 PowerShell unroll 的问题（`return ,$list`），并全量回归通过。
+6. **步骤6 preflight + leader-lease + github-sync + 测试**（本次 commit）
+   - `scripts/github-sync.ps1`：git plumbing（临时 GIT_INDEX_FILE + hash-object/update-index/commit-tree/push）
+     实现 CAS 推送，完全不触碰日志仓库的检出工作区；push 被拒（non-FF）= 抢占失败；
+     repoPath 白名单（必须与 keeper 项目目录互不嵌套、必须是 git 仓库）；stderr 脱敏；
+     Sync-HistoryToGitHub 推送净化事件文件，失败绝不影响主流程。
+   - `scripts/leader-lease.ps1`：coordination 分支 lease.json 读写；TTL+grace 判活；
+     Invoke-LeaderElection 完整实现文档 §10 伪代码（抢租约/续租/被动让位/过期接管/takeoverOnExpiry 开关/
+     push 竞争失败转 PASSIVE）；远程不可达 → DEGRADED（fail-closed，绝不自称 Leader）；github 关闭 → LocalOnly。
+   - `scripts/preflight.ps1`：配置校验、codex 可执行解析、git 可用性、repoPath 白名单、runtime 可写、
+     机器标识生成；可选 -ProbeCodex 只读额度探测（安装器用）。
+   - `scripts/common.ps1`：Invoke-External 支持 -Environment；新增 ConvertTo-IsoString
+     （PS7 ConvertFrom-Json 会把 ISO 字符串转 DateTime，直接 [string] 化会变本地化格式）。
+   - tests：github-sync（白名单/根提交推送/stale-parent 被拒/missing branch/端到端同步/失败隔离）、
+     leader-lease（判活 grace/获取/让位/续租保 acquiredAt/过期接管/禁止接管/CAS 竞争唯一赢家/不可达降级/local-only）、
+     preflight（happy/probe 成功/probe 失败/缺 codex/坏配置/坏仓库）。
+   - 修复 tests/run-all.ps1：改为每个测试文件独立 pwsh 子进程运行（原方案子 scope 计数器不互通）；
+     7 个测试文件全过。
+
 
 
 ## 下一步
-- 步骤6：`scripts/preflight.ps1` + `scripts/leader-lease.ps1`（Git 租约 CAS）+ `scripts/github-sync.ps1` + 测试。
+- 步骤7：`scripts/runner.ps1` 主流程（本地互斥 → preflight → 选举 → 额度读取 → 事件 → 持久化 →
+  可选 anchor → 续租 → 同步）+ runner.test.ps1。
