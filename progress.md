@@ -227,6 +227,14 @@ R8. **CQK-013/014 AutoAnchor 分布式 Claim 重构**（本次 commit）
     - Push-RepoBlobs 支持 -RemovePaths（测试清理用）且空 Blobs + RemovePaths 不再提前返回。
     - 全量 11 个测试文件回归通过。
 
+R9. **CQK-015/016 并发与故障注入测试**（本次 commit）
+    - 新增 tests/concurrency.test.ps1（两台模拟机器 + 一个 bare origin）：
+      双机抢租约唯一赢家；双机并发 Claim 同一 reset 仅一个 CLAIMED 且赢家=租约持有者；
+      Claim 后租约易手 → 重验证失败 → 事件标 EXPIRED → 全机禁执行（at-most-once）；
+      exec 成功但 COMPLETED push 失败（marker 篡改注入）→ 事件留 CLAIMED → 他机拒绝重试；
+      history 推送竞争：两台机器的不可变事件文件并存且各自 outbox 排空。
+    - 全量 12 个测试文件回归通过。
+
 ### 下一步
-- CQK-015/016：双机并发 Claim 故障注入测试、backoff/接管并发测试补充；
-  CQK-017~019：CI 与工程化。
+- CQK-017/018/019：GitHub Actions（PS7/PS5.1/契约测试/PSScriptAnalyzer/secret scan）、
+  根 README/LICENSE/SECURITY/CHANGELOG、版本 0.9.0-beta。
