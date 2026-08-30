@@ -161,6 +161,128 @@ function Push-RepoBlobs {
     }
 }
 
+function Get-OutboxDir { param([string]$Root) Join-Path (Get-RuntimeDir $Root) 'outbox' }
+function Get-SyncStatePath { param([string]$Root) Join-Path (Get-RuntimeDir $Root) 'sync-state.json' }
+
+function Write-OutboxEvent {
+    # Durable outbox (audit plan v1.0 §8.2 / CQK-010): a significant event is
+    # written to runtime/outbox/<id>.json BEFORE any push is attempted. The file
+    # only leaves the outbox after a successful push, so CAS conflicts, network
+    # failures and credential errors can never lose a pending event.
+    # Reset events reuse their deterministic eventId; other events get a
+    # timestamp+runId id. Remote paths are unique per machine, so concurrent
+    # machines never overwrite each other's history.
+    param(
+        [string]$Root,
+        [hashtable]$Record,
+        [string]$MachineId,
+        [string]$RunId = '',
+        [switch]$IncludeMachineLabel,
+        [DateTime]$When = (Get-Date)
+    )
+    $record.event = [string]$Record.event
+    $record.schema = 1
+    $record.recordedAt = $When.ToString('yyyy-MM-ddTHH:mm:sszzz')
+    $record.machineId = [string]$MachineId
+    $record.runId = $RunId
+    $record.version = $script:CQK_VERSION
+
+    $id = [string]$Record.eventId
+    if ([string]::IsNullOrEmpty($id)) {
+        $id = $When.ToLocalTime().ToString('yyyyMMddTHHmmss') + '_' + $RunId + '_' + [guid]::NewGuid().ToString('N').Substring(0, 6)
+    }
+    $path = Join-Path (Get-OutboxDir $Root) ($id + '.json')
+    Write-JsonFileAtomic $path $record
+    return @{ id = $id; path = $path; when = $When }
+}
+
+function Sync-OutboxToGitHub {
+    # Drains the durable outbox onto the immutable remote history layout:
+    #   history/<date>/<machineId>/<stamp>_<EVENT>_<id>.json
+    #   summary/<date>/<machineId>.json
+    # Every remote path is unique, so a leader switch can never overwrite
+    # another machine's audit data (CQK-009). Push failure keeps everything
+    # pending for the next run (CQK-010).
+    param(
+        [hashtable]$Config,
+        [string]$KeeperRoot,
+        [hashtable]$Machine,
+        [string]$RunId = '',
+        [string]$CommitMessage = 'quota: daily summary',
+        [string[]]$SummaryFiles = @()
+    )
+    $result = @{ ok = $false; reason = $null; detail = $null; pushed = 0; pending = 0 }
+    $hist = Get-HistorySyncConfig $Config
+    $coord = Get-CoordinationConfig $Config
+    if ($hist.enabled -ne $true) { $result.reason = 'disabled'; return $result }
+    if ($hist.push -ne $true) { $result.reason = 'push-disabled'; return $result }
+    if (-not (Test-GitAvailable)) { $result.reason = 'git-unavailable'; return $result }
+
+    $repoPath = [System.IO.Path]::GetFullPath($coord.repoPath)
+    $issues = Test-LogRepoAllowed -RepoPath $repoPath -KeeperRoot $KeeperRoot
+    if ($issues.Count -gt 0) {
+        $result.reason = 'repo-not-allowed'; $result.detail = ($issues -join '; '); return $result
+    }
+
+    $pending = @(Get-ChildItem -LiteralPath (Get-OutboxDir $KeeperRoot) -Filter '*.json' -File -ErrorAction SilentlyContinue)
+    $result.pending = @($pending).Count
+    if ($pending.Count -eq 0) { $result.reason = 'nothing-to-sync'; return $result }
+
+    $machineId = [string]$Machine.machineId
+    $blobs = @{}
+    foreach ($file in $pending) {
+        $rec = ConvertFrom-JsonSafe ([System.IO.File]::ReadAllText($file.FullName))
+        if ($rec -isnot [hashtable]) { continue }
+        $when = [DateTime]::Now
+        if ($rec.recordedAt) {
+            $parsed = [DateTime]::MinValue
+            if ([DateTime]::TryParse([string]$rec.recordedAt, [ref]$parsed)) { $when = $parsed }
+        }
+        $stamp = $when.ToLocalTime().ToString('yyyyMMddTHHmmss')
+        $date = $when.ToLocalTime().ToString('yyyy-MM-dd')
+        $remotePath = 'history/' + $date + '/' + $machineId + '/' + $stamp + '_' + $rec.event + '_' + $file.BaseName + '.json'
+        $blobs[$remotePath] = [System.IO.File]::ReadAllText($file.FullName)
+    }
+    foreach ($summaryFile in $SummaryFiles) {
+        if (-not (Test-Path -LiteralPath $summaryFile)) { continue }
+        $name = [System.IO.Path]::GetFileName($summaryFile)   # summary-YYYY-MM-DD.json
+        $date = $name -replace '^summary-', ''
+        $date = $date -replace '\.json$', ''
+        $blobs['summary/' + $date + '/' + $machineId + '.json'] = [System.IO.File]::ReadAllText($summaryFile)
+    }
+    if ($blobs.Count -eq 0) { $result.reason = 'nothing-to-sync'; return $result }
+
+    $branch = $hist.branch
+    $remote = Get-RemoteBranchBlob -RepoPath $repoPath -Branch $branch -PathInRepo 'history/.keeper'
+    if (-not $remote.ok) { $result.reason = 'unreachable'; $result.detail = $remote.detail; return $result }
+    $parent = $null
+    if ($remote.commit) { $parent = $remote.commit }
+
+    $push = Push-RepoBlobs -RepoPath $repoPath -Branch $branch -Blobs $blobs -ParentCommit $parent `
+        -CommitMessage $CommitMessage -MachineId $machineId
+    if (-not $push.ok) {
+        $result.reason = $push.reason; $result.detail = $push.stderr
+        return $result
+    }
+
+    # Push succeeded: mark sent and drain the outbox.
+    $state = Read-JsonFile (Get-SyncStatePath $KeeperRoot)
+    if ($state -isnot [hashtable]) { $state = @{ schema = 1; sent = @(); sentCount = 0 } }
+    $state.lastSyncAt = Get-IsoTimestamp
+    $state.sentCount = [int]$state.sentCount + $blobs.Count
+    $recent = @($state.sent)
+    foreach ($file in $pending) {
+        $recent += ,@{ id = $file.BaseName; sentAt = $state.lastSyncAt; path = 'outbox/' + $file.Name }
+        Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
+    }
+    if ($recent.Count -gt 100) { $recent = @($recent | Select-Object -Last 100) }
+    $state.sent = $recent
+    Write-JsonFileAtomic (Get-SyncStatePath $KeeperRoot) $state
+
+    $result.ok = $true; $result.reason = 'pushed'; $result.pushed = $blobs.Count
+    return $result
+}
+
 function Sync-HistoryToGitHub {
     # Pushes sanitized event/summary files from local history/ onto the history
     # branch. Failures NEVER propagate: local logs stay and the next run retries.

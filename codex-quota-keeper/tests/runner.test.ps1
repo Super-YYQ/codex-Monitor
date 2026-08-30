@@ -105,9 +105,10 @@ try {
     Assert-True (Test-Path $histFile) 'history event file written'
     Assert-True ("$([System.IO.File]::ReadAllText($histFile))" -match 'WINDOW_RESET_OBSERVED') 'reset in history'
 
-    $remote = Get-RemoteBranchBlob -RepoPath $repos.clone -Branch 'cqk/history' -PathInRepo 'history/events-2026-08-30.jsonl'
-    Assert-True $remote.ok 'remote history readable'
-    Assert-True ("$($remote.content)" -match 'WINDOW_RESET_OBSERVED') 'reset synced to remote history branch'
+    $paths = Invoke-TestGit -RepoPath $repos.clone -ArgumentList @('ls-tree', '-r', '--name-only', 'origin/cqk/history')
+    $resetPaths = @(($paths.stdout -split "`n") | Where-Object { $_ -match 'WINDOW_RESET' })
+    Assert-True (@($resetPaths).Count -ge 1) 'immutable reset event file on remote history branch'
+    Assert-True ("$($resetPaths[0])" -match '^history/\d{4}-\d{2}-\d{2}/[^/]+/\d{8}T\d{6}_[A-Z_]+_[0-9a-f]{16,}\.json$') "remote path is unique/immutable (got $($resetPaths[0]))"
     $env:CQK_MOCK_MODE = 'normal'
 
     Start-TestGroup 'runner: passive machine does not query Codex'
@@ -245,9 +246,41 @@ try {
     Assert-Equal 0 $rp2.exitCode 'push=false reset run ok'
     $coordBranch = Get-RemoteBranchBlob -RepoPath $freshClone -Branch 'cqk/coordination' -PathInRepo 'coordination/lease.json'
     Assert-True ($coordBranch.ok -and $coordBranch.reason -eq 'ok') 'coordination push still happens (independent of historySync.push)'
-    $histBranch = Get-RemoteBranchBlob -RepoPath $freshClone -Branch 'cqk/history' -PathInRepo 'history/.x'
-    Assert-False ($histBranch.ok -and $histBranch.reason -eq 'ok') 'no history push when historySync.push=false (CQK-005)'
+    $histPaths = Invoke-TestGit -RepoPath $freshClone -ArgumentList @('ls-tree', '-r', '--name-only', 'origin/cqk/history')
+    Assert-False ("$($histPaths.stdout)" -match 'WINDOW_RESET') 'no history push when historySync.push=false (CQK-005)'
+    $outboxPending = @(Get-ChildItem -LiteralPath (Join-Path $keeperRoot4 'runtime\outbox') -Filter '*.json' -File -ErrorAction SilentlyContinue)
+    Assert-True (@($outboxPending).Count -ge 1) 'outbox retains pending event for retry (CQK-010)'
     Assert-True (Test-Path (Join-Path $keeperRoot4 'history')) 'local history files still written for later retry'
+
+    Start-TestGroup 'runner: outbox drains on a later successful run (CQK-010)'
+
+    $cfgFile4b = Join-Path $keeperRoot4 'config-fixed.json'
+    $cfgFixed = New-TestConfig @{
+        github = @{
+            coordination = @{ enabled = $true; repoPath = $repos.clone; branch = 'cqk/coordination' }
+            historySync = @{ enabled = $true; push = $true; branch = 'cqk/history'; eventsOnly = $true }
+        }
+        codex = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = $false }
+    }
+    $null = Write-TestConfigFile $cfgFile4b $cfgFixed
+    $blob4 = Get-RemoteBranchBlob -RepoPath $repos.clone -Branch 'cqk/coordination' -PathInRepo 'coordination/lease.json'
+    $stale4 = @{ schema = 1; ownerId = 'GHOST'; ownerLabel = 'ghost'
+                 acquiredAt = (Get-Date).AddMinutes(-120).ToString('yyyy-MM-ddTHH:mm:sszzz')
+                 renewedAt = (Get-Date).AddMinutes(-120).ToString('yyyy-MM-ddTHH:mm:sszzz')
+                 expiresAt = (Get-Date).AddMinutes(-10).ToString('yyyy-MM-ddTHH:mm:sszzz')
+                 mode = 'MonitorOnly'; version = '0.9.0' }
+    $null = Push-RepoBlobs -RepoPath $repos.clone -Branch 'cqk/coordination' `
+        -Blobs @{ 'coordination/lease.json' = (ConvertTo-Json -InputObject $stale4 -Depth 6) } `
+        -ParentCommit $blob4.commit -CommitMessage 'lease: expire for outbox drain' -MachineId 't'
+    $env:CQK_MOCK_MODE = 'normal'
+    $rp4 = Invoke-Runner -KeeperRoot $keeperRoot4 -ConfigFile $cfgFile4b
+    Assert-Equal 0 $rp4.exitCode 'retry run ok'
+    $outboxAfter = @(Get-ChildItem -LiteralPath (Join-Path $keeperRoot4 'runtime\outbox') -Filter '*.json' -File -ErrorAction SilentlyContinue)
+    Write-Host ("  DEBUG pending after rp4: " + (($outboxAfter | ForEach-Object { $_.Name }) -join ', '))
+    foreach ($f in $outboxAfter) { Write-Host ("  DEBUG content: " + ($f.FullName | Out-String) + (Get-Content $f.FullName -Raw)) }
+    Write-Host ("  DEBUG rp4 events: " + ((Get-LogEventNames $keeperRoot4 | Select-Object -Last 6) -join ','))
+    Assert-Equal 0 @($outboxAfter).Count 'outbox drained after successful push'
+    Assert-True (Test-Path (Join-Path $keeperRoot4 'runtime\sync-state.json')) 'sync-state ledger written'
 
     # retentionDays: runner cleans stale local files at completion (CQK-007)
     $old = (Get-Date).AddDays(-200)
@@ -257,6 +290,17 @@ try {
     $oldHist = Join-Path (Get-HistoryDir $keeperRoot) 'events-2026-01-01.jsonl'
     [System.IO.File]::WriteAllText($oldHist, '{}')
     (Get-Item $oldHist).LastWriteTime = $old
+    # keeperRoot4 renewed the lease during its drain; expire it so keeperRoot
+    # can take over and reach the retention stage.
+    $blob5 = Get-RemoteBranchBlob -RepoPath $repos.clone -Branch 'cqk/coordination' -PathInRepo 'coordination/lease.json'
+    $stale5 = @{ schema = 1; ownerId = 'GHOST2'; ownerLabel = 'ghost'
+                 acquiredAt = (Get-Date).AddMinutes(-120).ToString('yyyy-MM-ddTHH:mm:sszzz')
+                 renewedAt = (Get-Date).AddMinutes(-120).ToString('yyyy-MM-ddTHH:mm:sszzz')
+                 expiresAt = (Get-Date).AddMinutes(-10).ToString('yyyy-MM-ddTHH:mm:sszzz')
+                 mode = 'MonitorOnly'; version = '0.9.0' }
+    $null = Push-RepoBlobs -RepoPath $repos.clone -Branch 'cqk/coordination' `
+        -Blobs @{ 'coordination/lease.json' = (ConvertTo-Json -InputObject $stale5 -Depth 6) } `
+        -ParentCommit $blob5.commit -CommitMessage 'lease: expire for retention' -MachineId 't'
     $env:CQK_MOCK_MODE = 'normal'
     $rp3 = Invoke-Runner -KeeperRoot $keeperRoot -ConfigFile $cfgFile
     Assert-Equal 0 $rp3.exitCode 'retention run ok'

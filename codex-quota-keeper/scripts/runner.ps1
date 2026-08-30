@@ -154,14 +154,12 @@ try {
     if ($lcEvent) { $events += $lcEvent }
 
     # ---- AutoAnchor hook (experimental; module optional, default disabled) ---
-    $anchorHistory = @()
     $isLeader = ($election.role -eq 'LEADER' -and $null -ne $election.lease)
     if ($cfg.mode -eq 'AutoAnchor' -and (Test-AutoAnchorEnabled $cfg)) {
         if (Get-Command Invoke-AutoAnchorIfNeeded -ErrorAction SilentlyContinue) {
             $anchorOutcome = Invoke-AutoAnchorIfNeeded -Config $cfg -KeeperRoot $KeeperRoot `
                 -State $state -Events $events -IsLeader $isLeader -Machine $machine -Election $election
             if ($anchorOutcome -and $anchorOutcome.events) { $events += @($anchorOutcome.events) }
-            if ($anchorOutcome -and $anchorOutcome.historyFiles) { $anchorHistory = @($anchorOutcome.historyFiles) }
         } else {
             Write-RunnerLog -Event 'ANCHOR_UNAVAILABLE' -Level 'ERROR' -Error 'autoAnchor enabled but auto-anchor module missing'
         }
@@ -194,9 +192,9 @@ try {
     $significant = @($events | Where-Object {
             $_ -and $_.event -in @('WINDOW_RESET_OBSERVED', 'LIMIT_REACHED', 'AUTH_ERROR', 'SCHEMA_UNKNOWN', 'LEADER_CHANGED', 'ANCHOR_EXECUTED', 'ANCHOR_ABORTED')
         })
-    $historyFiles = @($anchorHistory)
     foreach ($ev in $significant) {
         $record = @{
+            eventId      = $ev.eventId
             event        = [string]$ev.event
             machineId    = [string]$machine.machineId
             machineLabel = [string]$machine.label
@@ -205,11 +203,15 @@ try {
             mode         = [string]$cfg.mode
             windows      = $read.windows
             anchor       = $ev.anchor
-            errorKind    = $ev.kind
+            errorKind    = $(if ($ev.kind) { $ev.kind } else { $ev.errorKind })
             error        = $(if ($ev.message) { $ev.message } else { $ev.reason })
         }
-        $historyFiles += (Write-HistoryEvent -Root $KeeperRoot -Record $record `
-            -IncludeMachineLabel:([bool]$script:CqkLogging.includeMachineLabel) -When $now)
+        # Durable outbox first: the event survives any later sync failure.
+        $null = Write-OutboxEvent -Root $KeeperRoot -Record $record -MachineId ([string]$machine.machineId) `
+            -RunId $script:CqkRunId -IncludeMachineLabel:([bool]$script:CqkLogging.includeMachineLabel) -When $now
+        # Local human-readable JSONL audit copy.
+        $null = Write-HistoryEvent -Root $KeeperRoot -Record $record `
+            -IncludeMachineLabel:([bool]$script:CqkLogging.includeMachineLabel) -When $now
     }
 
     $counts = @{}
@@ -219,8 +221,9 @@ try {
         if (-not $counts.ContainsKey($k)) { $counts[$k] = 0 }
         $counts[$k] = $counts[$k] + 1
     }
+    $summaryFiles = @()
     if ($counts.Count -gt 0) {
-        $historyFiles += (Update-DailySummary -Root $KeeperRoot -Date $now.ToString('yyyy-MM-dd') `
+        $summaryFiles += (Update-DailySummary -Root $KeeperRoot -Date $now.ToString('yyyy-MM-dd') `
                 -EventCounts $counts -Windows $read.windows -MachineId ([string]$machine.machineId))
     }
 
@@ -243,9 +246,9 @@ try {
         } elseif (@($significant | Where-Object { $_.event -eq 'LEADER_CHANGED' }).Count -gt 0) {
             $commitMessage = 'keeper: leader changed'
         }
-        $sync = Sync-HistoryToGitHub -Config $cfg -KeeperRoot $KeeperRoot -FilePaths $historyFiles `
-            -CommitMessage $commitMessage -MachineId ([string]$machine.machineId)
-        if (-not $sync.ok -and $sync.reason -notin @('disabled', 'nothing-to-sync', 'git-unavailable')) {
+        $sync = Sync-OutboxToGitHub -Config $cfg -KeeperRoot $KeeperRoot -Machine $machine -RunId $script:CqkRunId `
+            -CommitMessage $commitMessage -SummaryFiles $summaryFiles
+        if (-not $sync.ok -and $sync.reason -notin @('disabled', 'push-disabled', 'nothing-to-sync', 'git-unavailable')) {
             Write-RunnerLog -Event 'SYNC_FAILED' -Error "$($sync.reason): $($sync.detail)"
         }
     }

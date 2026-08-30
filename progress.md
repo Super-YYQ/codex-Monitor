@@ -188,6 +188,20 @@ R5. **CQK-008 Global Backoff**（本次 commit）
 R5b. runner.test.ps1 适配集群退避：429/auth 场景后推送过期记录清除全局退避；
      429 段断言改为 GLOBAL_BACKOFF_SKIP 并验证接管不绕过。全量 11 文件回归通过。
 
+R6. **CQK-009/010 不可变 history + durable outbox**（本次 commit）
+    - 新增 Write-OutboxEvent：重大事件先落 runtime/outbox/<id>.json（reset 用确定性 eventId，
+      其他事件用 时间戳+runId+随机后缀），任何 push 尝试之前持久化。
+    - 新增 Sync-OutboxToGitHub：扫描 pending outbox → 推送为不可变远程布局
+      history/<date>/<machineId>/<stamp>_<EVENT>_<id>.json + summary/<date>/<machineId>.json；
+      路径按机器隔离，Leader 切换绝不覆盖他机审计数据（CQK-009）。
+    - push 成功后才写 runtime/sync-state.json（sent 台账，保留最近 100 条）并清空 outbox；
+      CAS 冲突/网络失败/凭证失败均保留 pending 下轮重试（CQK-010）。
+    - auto-anchor 事件也走 outbox；runner 的同步阶段替换为 outbox 驱动；
+      Sync-HistoryToGitHub 保留用于旧流程兼容。
+    - 测试：远端不可变路径格式断言、push=false 时 outbox 保留 pending、
+      修复配置后下一轮自动排空 outbox 并写 sync-state（故障注入重试闭环）。
+    - 全量 11 个测试文件回归通过。
+
 ### 下一步
-- CQK-009/010：history 改为不可变事件文件（history/<date>/<machineId>/<ts>_<EVENT>_<eventId>.json）、
-  durable outbox（runtime/outbox + sync-state），失败重试与 CAS 冲突不丢数据。
+- CQK-011/012：专用日志仓库 marker（.codex-quota-keeper-repository.json + repoId + origin 指纹 +
+  分支名防护）与脱敏加固（ghp_/github_pat_ 系列 + URL userinfo）。

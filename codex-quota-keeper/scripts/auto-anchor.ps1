@@ -90,7 +90,7 @@ function Invoke-AutoAnchorIfNeeded {
         [hashtable]$Election,
         [string]$CodexPath = ''
     )
-    $out = @{ anchored = $false; events = @(); historyFiles = @() }
+    $out = @{ anchored = $false; events = @() }
     $now = Get-Date
 
     $guard = Test-ShouldAnchor -Config $Config -State $State -Events $Events -IsLeader $IsLeader -Now $now
@@ -173,18 +173,24 @@ function Invoke-AutoAnchorIfNeeded {
     # Remote marker (best effort; a failure here cannot undo the exec).
     $null = Add-RemoteProcessedEventIds -Config $Config -KeeperRoot $KeeperRoot -EventIds $pending -Machine $Machine
 
-    # History record with before/after snapshots (doc 01 §6).
+    # History record with before/after snapshots (doc 01 §6): durable outbox
+    # entry + local JSONL audit copy.
     $logging = Get-LoggingConfig $Config
-    $hist = Write-HistoryEvent -Root $KeeperRoot -Record @{
-        event   = $(if ($verified -and $exec.ok) { 'ANCHOR_EXECUTED' } else { 'ANCHOR_ABORTED' })
-        machineId = [string]$Machine.machineId
+    $anchorRecord = @{
+        eventId      = [string]$pending[0]
+        event        = $(if ($verified -and $exec.ok) { 'ANCHOR_EXECUTED' } else { 'ANCHOR_ABORTED' })
+        machineId    = [string]$Machine.machineId
         machineLabel = [string]$Machine.label
-        role    = 'LEADER'
-        mode    = [string]$Config.mode
-        windows = $anchorInfo.after
-        anchor  = $anchorInfo
-        error   = $anchorInfo.reason
-    } -IncludeMachineLabel:([bool]$logging.includeMachineLabel)
-    $out.historyFiles += $hist
+        role         = 'LEADER'
+        mode         = [string]$Config.mode
+        windows      = $anchorInfo.after
+        anchor       = $anchorInfo
+        error        = $anchorInfo.reason
+    }
+    $null = Write-OutboxEvent -Root $KeeperRoot -Record $anchorRecord -MachineId ([string]$Machine.machineId) `
+        -RunId $(if ($Election.runId) { [string]$Election.runId } else { '' }) `
+        -IncludeMachineLabel:([bool]$logging.includeMachineLabel) -When $now
+    $null = Write-HistoryEvent -Root $KeeperRoot -Record $anchorRecord `
+        -IncludeMachineLabel:([bool]$logging.includeMachineLabel) -When $now
     return $out
 }
