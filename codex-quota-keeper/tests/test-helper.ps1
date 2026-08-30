@@ -1,0 +1,103 @@
+# Minimal assertion helpers + temp workspace management for the keeper test suite.
+# No Pester dependency so the suite runs anywhere PowerShell runs.
+
+$script:TestFailures = 0
+$script:TestChecks = 0
+
+function New-TestWorkspace {
+    $path = Join-Path ([System.IO.Path]::GetTempPath()) ("cqk-test-" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $path -Force | Out-Null
+    return $path
+}
+
+function Remove-TestWorkspace {
+    param([string]$Path)
+    if ($Path -and (Test-Path -LiteralPath $Path)) {
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Assert-True {
+    param([bool]$Condition, [string]$Message = 'expected true')
+    $script:TestChecks++
+    if (-not $Condition) {
+        $script:TestFailures++
+        Write-Host "  FAIL: $Message" -ForegroundColor Red
+    }
+}
+
+function Assert-False {
+    param([bool]$Condition, [string]$Message = 'expected false')
+    Assert-True (-not $Condition) $Message
+}
+
+function Assert-Equal {
+    param($Expected, $Actual, [string]$Message = 'values differ')
+    $script:TestChecks++
+    $e = "$Expected"; $a = "$Actual"
+    if ($e -ne $a) {
+        $script:TestFailures++
+        Write-Host "  FAIL: $Message (expected [$e], got [$a])" -ForegroundColor Red
+    }
+}
+
+function Assert-Null {
+    param($Value, [string]$Message = 'expected null')
+    Assert-True ($null -eq $Value) $Message
+}
+
+function Assert-NotNull {
+    param($Value, [string]$Message = 'expected non-null')
+    Assert-True ($null -ne $Value) $Message
+}
+
+function Assert-Contains {
+    param($Collection, $Item, [string]$Message = 'collection does not contain item')
+    $script:TestChecks++
+    $found = $false
+    foreach ($x in @($Collection)) { if ("$x" -eq "$Item") { $found = $true } }
+    if (-not $found) {
+        $script:TestFailures++
+        Write-Host "  FAIL: $Message (missing [$Item])" -ForegroundColor Red
+    }
+}
+
+function Start-TestGroup {
+    param([string]$Name)
+    Write-Host "- $Name" -ForegroundColor Cyan
+}
+
+function Get-TestResult {
+    return @{ failures = $script:TestFailures; checks = $script:TestChecks }
+}
+
+# Default-merged valid config for tests.
+function New-TestConfig {
+    param([hashtable]$Override = @{})
+    $base = @{
+        schemaVersion = 1
+        mode = 'MonitorOnly'
+        pollIntervalMinutes = 15
+        minimumPollIntervalMinutes = 5
+        leader = @{ enabled = $true; leaseTtlMinutes = 45; graceMinutes = 5; takeoverOnExpiry = $true; label = 'Test PC' }
+        codex = @{ command = 'auto'; queryTimeoutSeconds = 20; autoAnchor = $false; anchorPrompt = 'Reply exactly OK.'; maxAnchorsPerDay = 6; minimumAnchorGapMinutes = 60 }
+        github = @{ enabled = $true; repoPath = ''; coordinationBranch = 'coordination'; historyBranch = 'history'; syncEventsOnly = $true; push = $true }
+        logging = @{ retentionDays = 90; includeMachineLabel = $true }
+        task = @{ name = 'CodexQuotaKeeper.Check'; startWithWindows = $true; runIfNetworkAvailable = $true; wakeToRun = $false }
+    }
+    foreach ($k in $Override.Keys) {
+        if ($base[$k] -is [hashtable] -and $Override[$k] -is [hashtable]) {
+            foreach ($k2 in $Override[$k].Keys) { $base[$k][$k2] = $Override[$k][$k2] }
+        } else {
+            $base[$k] = $Override[$k]
+        }
+    }
+    return $base
+}
+
+function Write-TestConfigFile {
+    param([string]$Path, [hashtable]$Config)
+    $json = ConvertTo-Json -InputObject $Config -Depth 12
+    [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding($false)))
+    return $Path
+}
