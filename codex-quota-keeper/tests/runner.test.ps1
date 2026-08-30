@@ -6,6 +6,7 @@ $testsDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $scriptDir = Join-Path (Split-Path -Parent $testsDir) 'scripts'
 . (Join-Path $scriptDir 'common.ps1')
 . (Join-Path $scriptDir 'github-sync.ps1')
+. (Join-Path $scriptDir 'global-backoff.ps1')
 
 $pwsh = (Get-Process -Id $PID).Path
 $runnerPath = Join-Path $scriptDir 'runner.ps1'
@@ -26,6 +27,19 @@ function Get-RunnerLogLines {
         $lines += [System.IO.File]::ReadAllLines($_.FullName)
     }
     return $lines
+}
+
+function Clear-GlobalBackoff {
+    # The 429/auth paths now push a cluster-level backoff; tests clear it by
+    # pushing an already-expired record.
+    param([string]$ClonePath)
+    $blob = Get-RemoteBranchBlob -RepoPath $ClonePath -Branch 'cqk/coordination' -PathInRepo 'coordination/backoff.json'
+    if ($blob.ok -and $blob.reason -eq 'ok') {
+        $past = @{ schema = 1; until = '2000-01-01T00:00:00+00:00'; reason = 'cleared'; sourceOwnerId = 'test'; setAt = '2000-01-01T00:00:00+00:00' }
+        $null = Push-RepoBlobs -RepoPath $ClonePath -Branch 'cqk/coordination' `
+            -Blobs @{ 'coordination/backoff.json' = (ConvertTo-Json -InputObject $past -Depth 6) } `
+            -ParentCommit $blob.commit -CommitMessage 'test: clear global backoff' -MachineId 'test'
+    }
 }
 
 function Get-LogEventNames {
@@ -126,13 +140,14 @@ try {
 
     $stateBefore = Read-JsonFile (Join-Path $keeperRoot 'runtime\state.json')
     $env:CQK_MOCK_MODE = 'normal'
+    Clear-Backoff $keeperRoot   # local backoff cleared; cluster backoff must still block
     $r6 = Invoke-Runner -KeeperRoot $keeperRoot -ConfigFile $cfgFile
     Assert-Equal 0 $r6.exitCode 'backoff run exits 0'
     $evts6 = Get-LogEventNames $keeperRoot
-    Assert-Contains $evts6 'BACKOFF_SKIP' 'backoff skip logged'
+    Assert-Contains $evts6 'GLOBAL_BACKOFF_SKIP' 'global backoff skip logged (cluster-level)'
     $stateAfter = Read-JsonFile (Join-Path $keeperRoot 'runtime\state.json')
     Assert-Equal "$($stateBefore.lastReadAt)" "$($stateAfter.lastReadAt)" 'no new quota read during backoff'
-    Clear-Backoff $keeperRoot
+    Clear-GlobalBackoff -ClonePath $repos.clone
 
     Start-TestGroup 'runner: auth error backs off 120 minutes'
 
@@ -143,6 +158,7 @@ try {
     Assert-NotNull $backoff7 'auth backoff recorded'
     Assert-Equal 'auth error' $backoff7.reason 'auth reason'
     Clear-Backoff $keeperRoot
+    Clear-GlobalBackoff -ClonePath $repos.clone
     $env:CQK_MOCK_MODE = 'normal'
 
     Start-TestGroup 'runner: read failure keeps previous windows marked stale'
