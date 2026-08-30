@@ -25,7 +25,7 @@
    - `tests/quota-client.test.ps1`：13 组全过（连跑两次稳定）。
    - 排障记录：①子进程 stdin 编码必须用 `UTF8Encoding($false)`，`[Encoding]::UTF8` 会写 BOM 破坏 JSON-RPC 首行；
      ②rateLimits 只校验实际存在的键（单窗口合法），`rateLimitReachedType` 是合法非窗口字段。
-4. **步骤4 state-machine.ps1 + 测试**（本次 commit）
+4. `eabd90e` **步骤4 state-machine.ps1 + 测试**
    - `scripts/state-machine.ps1`：runtime/state.json 读写（New/Load/Save，旧文件缺键自动补默认值，
      processedEventIds 上限 200）；事件识别（03 文档 §7 全部 7 类 + READ_FAILED）——
      QUOTA_SNAPSHOT_CHANGED 每轮最多聚合 1 条、WINDOW_RESET_OBSERVED 判定=旧 resetsAt 已过期且新窗口更新
@@ -34,6 +34,15 @@
      Test-ShouldAnchor 幂等守卫：mode+autoAnchor 双开关、Leader 租约、未处理 eventId、
      最小间隔、每日上限、无 429/认证/未知 schema 错误、远程不可达 fail-closed。
    - `tests/state-machine.test.ps1`：11 组全过（含 eventId 与文档示例格式一致、守卫 9 种拒绝路径）。
+5. **步骤5 logger.ps1 + 测试**（本次 commit）
+   - `scripts/logger.ps1`：runtime/logs/keeper-YYYY-MM-DD.jsonl（03 文档 §11 schema：ts/level/event/
+     machineId/role/mode/windows/anchor/error，错误文本入库前脱敏）；history/events-*.jsonl 净化白名单记录
+     （prompt/会话/凭证字段一律丢弃）；history/summary-YYYY-MM-DD.json 每日滚动汇总（counts 累积/anchor/错误计数/
+     最后快照）；Invoke-LogRetention 按 retentionDays 清理本地 runtime/logs 与 history（不动远程 Git 历史）；
+     Get-RecentErrors 供 status.ps1 读取最近 ERROR。
+   - `tests/logger.test.ps1`：6 组全过（schema 字段存在性、脱敏、history 白名单、汇总累积、保留期、最近错误排序）。
+   - 修复 common.ps1 深转换函数单元素数组被 PowerShell unroll 的问题（`return ,$list`），并全量回归通过。
+
 
 ## 下一步
-- 步骤5：`scripts/logger.ps1`（JSONL 日志 schema、净化、retentionDays 保留期清理）+ 测试。
+- 步骤6：`scripts/preflight.ps1` + `scripts/leader-lease.ps1`（Git 租约 CAS）+ `scripts/github-sync.ps1` + 测试。

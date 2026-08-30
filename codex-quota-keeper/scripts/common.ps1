@@ -62,7 +62,9 @@ function ConvertTo-HashtableDeep {
     if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string] -and $Value -isnot [byte[]]) {
         $list = @()
         foreach ($item in $Value) { $list += ,(ConvertTo-HashtableDeep $item) }
-        return $list
+        # Unary comma: without it PowerShell unrolls a single-element array into
+        # the element itself and callers lose the "is this an array?" contract.
+        return ,$list
     }
     return $Value
 }
