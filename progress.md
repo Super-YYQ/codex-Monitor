@@ -152,7 +152,7 @@ R2. `0c6d1b7` **CQK-003 状态机升级 bucket/window 模型**
     - 又一次函数返回单元素数组被 unroll（ConvertTo-StateBuckets 漏加逗号）——已在函数注释中标注此约束。
     - 全量 10 个测试文件回归通过。
 
-R3. **CQK-005/006/007 配置语义重构 + 行为验收**（本次 commit）
+R3. `48d50e9` **CQK-005/006/007 配置语义重构 + 行为验收**
     - 配置 v2 schema（§6.1）：poll{intervalMinutes,minimumIntervalMinutes}、
       github{coordination{enabled,repoPath,branch},historySync{enabled,push,branch,eventsOnly}}、
       codex.autoAnchor{enabled,prompt,maxPerDay,minimumGapMinutes}、logging.includeMachineLabel 默认 false。
@@ -167,5 +167,13 @@ R3. **CQK-005/006/007 配置语义重构 + 行为验收**（本次 commit）
     - 修复 runner 的 AutoAnchor 门控仍比较旧布尔键的问题。
     - 全量 10 个测试文件回归通过。
 
+R4. **CQK-004 统一外部命令启动器**（本次 commit）
+    - Resolve-ExecutableLaunchSpec：.exe 直接运行；.ps1 经 pwsh/powershell -NoProfile；.cmd/.bat 经
+      %ComSpec% /d /s /c；裸命令名走 PATH 解析后按扩展名递归。quota-client、auto-anchor、mock 全部走它。
+    - cmd/bat 采用原始参数串 `/d /s /c ""exe" "args""`（/s 剥外层引号）——.NET ArgumentList 的
+      \" 转义与 cmd 引号规则不兼容，会损坏命令行（实测踩坑）；Invoke-External 增加 -RawArguments。
+    - npm codex.cmd 端到端测试通过（mock-appserver.cmd 包装器，PS7 下验证）。
+    - 全量 10 个测试文件回归通过。
+
 ### 下一步
-- CQK-004：Resolve-ExecutableLaunchSpec 统一外部命令启动（exe/ps1/cmd/bat），npm codex.cmd 场景修复。
+- CQK-008：Global Backoff 写入 coordination/backoff.json；Leader 选举后、读取前检查；退避期只续租不查询。

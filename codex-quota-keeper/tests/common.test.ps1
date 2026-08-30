@@ -205,6 +205,28 @@ $epoch = ConvertTo-EpochSeconds $now
 $round = ConvertFrom-EpochSeconds $epoch
 Assert-True ([Math]::Abs(($round - $now).TotalSeconds) -lt 2) 'epoch roundtrip within 2s'
 
+Start-TestGroup 'launcher: Resolve-ExecutableLaunchSpec (CQK-004)'
+
+$testsDir2 = Split-Path -Parent $MyInvocation.MyCommand.Path
+$spec = Resolve-ExecutableLaunchSpec -Executable 'C:\Tools\codex.exe' -ArgumentList @('app-server')
+Assert-Equal 'C:\Tools\codex.exe' $spec.exe 'exe runs directly'
+Assert-Equal 'app-server' $spec.args[0] 'exe args preserved'
+
+$spec = Resolve-ExecutableLaunchSpec -Executable 'C:\Tools\mock.ps1' -ArgumentList @('app-server')
+Assert-True ("$($spec.exe)" -match 'pwsh|powershell') 'ps1 runs through powershell'
+Assert-True ($spec.args -contains '-NoProfile') 'ps1 launched with -NoProfile'
+Assert-True ($spec.args -contains 'C:\Tools\mock.ps1') 'ps1 script path in args'
+
+$spec = Resolve-ExecutableLaunchSpec -Executable 'C:\Tools\codex.cmd' -ArgumentList @('app-server')
+Assert-True ("$($spec.exe)" -match 'cmd\.exe$') 'cmd wrapped in ComSpec'
+Assert-Equal '/d /s /c ""C:\Tools\codex.cmd" "app-server""' "$($spec.rawArgs)" 'cmd raw command line double-quoted for /s'
+
+$spec = Resolve-ExecutableLaunchSpec -Executable 'pwsh' -ArgumentList @('-NoProfile')
+Assert-NotNull $spec 'PATH-resolved executable'
+Assert-True ("$($spec.exe)" -match 'pwsh') 'PATH resolution recursed to exe'
+
+Assert-Null (Resolve-ExecutableLaunchSpec -Executable 'no-such-exe-xyz-abc') 'unknown command returns null'
+
 $result = Get-TestResult
 if ($result.failures -gt 0) { Write-Host "common.test.ps1: $($result.failures) failure(s)" -ForegroundColor Red; exit 1 }
 exit 0

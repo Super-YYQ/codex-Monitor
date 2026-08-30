@@ -28,15 +28,10 @@ function Test-AnchorPromptAllowed {
 }
 
 function Get-AnchorExecCommand {
-    # .ps1 mocks run through pwsh; real codex is invoked directly. Argument arrays only.
+    # Any codex shape (exe / npm codex.cmd / mock .ps1) through the unified
+    # launcher (CQK-004). Argument arrays only.
     param([string]$CodexPath, [string]$Prompt)
-    if ($CodexPath -match '\.ps1$') {
-        $pwsh = (Get-Command pwsh -ErrorAction SilentlyContinue)
-        if (-not $pwsh) { $pwsh = (Get-Command powershell -ErrorAction SilentlyContinue) }
-        if (-not $pwsh) { return $null }
-        return @{ exe = $pwsh.Source; args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $CodexPath, 'exec', '--skip-git-repo-check', $Prompt) }
-    }
-    return @{ exe = $CodexPath; args = @('exec', '--skip-git-repo-check', $Prompt) }
+    return (Resolve-ExecutableLaunchSpec -Executable $CodexPath -ArgumentList @('exec', '--skip-git-repo-check', $Prompt))
 }
 
 function Get-RemoteProcessedEventIds {
@@ -138,7 +133,7 @@ function Invoke-AutoAnchorIfNeeded {
     $execInfo = Get-AnchorExecCommand -CodexPath $CodexPath -Prompt ([string](Get-AutoAnchorConfig $Config).prompt)
     $startedAt = Get-IsoTimestamp
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $exec = Invoke-External -FilePath $execInfo.exe -ArgumentList $execInfo.args `
+    $exec = Invoke-External -FilePath $execInfo.exe -ArgumentList $execInfo.args -RawArguments "$($execInfo.rawArgs)" `
         -TimeoutSeconds ([Math]::Max(60, [int]$Config.codex.queryTimeoutSeconds * 3)) -WorkingDirectory $workDir
     $sw.Stop()
 

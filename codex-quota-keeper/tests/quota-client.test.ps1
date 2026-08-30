@@ -231,6 +231,19 @@ $r = Invoke-MockRead 'start-failure'
 Assert-False $r.ok 'start failure not ok'
 Assert-True ($r.errorKind -in @('EOF', 'SETUP_ERR', 'TIMEOUT')) "start failure kind ($($r.errorKind))"
 
+Start-TestGroup 'launcher: npm-style codex.cmd wrapper works end to end'
+
+$cmdMock = Join-Path $testsDir 'fixtures\mock-appserver.cmd'
+$env:CQK_MOCK_MODE = 'normal'
+try {
+    $cfgCmd = New-TestConfig @{ codex = @{ command = $cmdMock; queryTimeoutSeconds = 15 } }
+    $rcmd = Invoke-CodexRateLimitsRead -Config $cfgCmd
+    Assert-True $rcmd.ok "codex.cmd launch works via ComSpec ($($rcmd.message))"
+    Assert-Equal 2 @($rcmd.windows).Count 'cmd-wrapped read returns windows'
+} finally {
+    Remove-Item Env:\CQK_MOCK_MODE -ErrorAction SilentlyContinue
+}
+
 Start-TestGroup 'setup: missing codex command reported'
 
 $cfg = New-TestConfig @{ codex = @{ command = 'auto'; queryTimeoutSeconds = 5 } }

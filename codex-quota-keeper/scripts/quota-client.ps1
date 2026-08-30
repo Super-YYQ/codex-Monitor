@@ -10,16 +10,10 @@ if (-not (Get-Command Get-KeeperRoot -ErrorAction SilentlyContinue)) {
 }
 
 function Get-CodexServerStartInfo {
-    # .ps1 targets (tests use a mock app-server) are launched through pwsh;
-    # anything else is treated as the codex executable with the app-server subcommand.
+    # Launches any codex shape (native exe, npm codex.cmd, or a mock .ps1) through
+    # the unified launcher (CQK-004).
     param([string]$CodexPath)
-    if ($CodexPath -match '\.ps1$') {
-        $pwsh = (Get-Command pwsh -ErrorAction SilentlyContinue)
-        if (-not $pwsh) { $pwsh = (Get-Command powershell -ErrorAction SilentlyContinue) }
-        if (-not $pwsh) { return $null }
-        return @{ exe = $pwsh.Source; args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $CodexPath, 'app-server') }
-    }
-    return @{ exe = $CodexPath; args = @('app-server') }
+    return (Resolve-ExecutableLaunchSpec -Executable $CodexPath -ArgumentList @('app-server'))
 }
 
 function Start-AppServerSession {
@@ -38,7 +32,10 @@ function Start-AppServerSession {
         # which corrupts the JSON-RPC line protocol (JSON must start with '{').
         $psi.StandardInputEncoding = New-Object System.Text.UTF8Encoding($false)
     }
-    if ($psi.PSObject.Properties['ArgumentList']) {
+    if ($StartInfo.ContainsKey('rawArgs') -and $StartInfo.rawArgs) {
+        $psi.Arguments = [string]$StartInfo.rawArgs
+    }
+    elseif ($psi.PSObject.Properties['ArgumentList']) {
         foreach ($a in $StartInfo.args) { [void]$psi.ArgumentList.Add([string]$a) }
     } else {
         $psi.Arguments = ($StartInfo.args | ForEach-Object { '"' + ("$_" -replace '"', '\"') + '"' }) -join ' '

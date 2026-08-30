@@ -615,6 +615,7 @@ function Invoke-External {
     param(
         [string]$FilePath,
         [string[]]$ArgumentList = @(),
+        [string]$RawArguments = '',
         [int]$TimeoutSeconds = 30,
         [string]$WorkingDirectory = $null,
         [string]$StdinText = $null,
@@ -633,8 +634,13 @@ function Invoke-External {
     if ($Environment) {
         foreach ($k in $Environment.Keys) { $psi.EnvironmentVariables[[string]$k] = [string]$Environment[$k] }
     }
+    # RawArguments (cmd/bat launches) wins: .NET ArgumentList escaping corrupts
+    # cmd.exe quote semantics, so those launches set the command line verbatim.
+    if ($RawArguments) {
+        $psi.Arguments = $RawArguments
+    }
     # ArgumentList exists on PS7 (.NET Core); PS 5.1 must fall back to a quoted command line.
-    if ($psi.PSObject.Properties['ArgumentList']) {
+    elseif ($psi.PSObject.Properties['ArgumentList']) {
         foreach ($a in $ArgumentList) { [void]$psi.ArgumentList.Add([string]$a) }
     } else {
         $psi.Arguments = ($ArgumentList | ForEach-Object { '"' + ("$_" -replace '"', '\"') + '"' }) -join ' '
@@ -659,6 +665,61 @@ function Invoke-External {
         return @{ ok = ($proc.ExitCode -eq 0); exitCode = $proc.ExitCode; stdout = $stdout; stderr = $stderr; timedOut = $false }
     } finally {
         $proc.Dispose()
+    }
+}
+
+function Resolve-ExecutableLaunchSpec {
+    # Unified external command launcher (audit plan v1.0 §9 / CQK-004).
+    # npm on Windows exposes codex as codex.cmd, which fails when handed straight
+    # to ProcessStartInfo(UseShellExecute=$false). Every external command goes
+    # through here:
+    #   .exe        -> run directly
+    #   .ps1        -> pwsh/powershell -NoProfile -ExecutionPolicy Bypass -File <script> ...
+    #   .cmd / .bat -> %ComSpec% /d /s /c "<cmd> <args>"
+    #   other       -> Get-Command resolve, then recurse on the extension
+    param([string]$Executable, [string[]]$ArgumentList = @())
+    if ([string]::IsNullOrWhiteSpace($Executable)) { return $null }
+
+    if (-not (Test-Path -LiteralPath $Executable)) {
+        # Absolute/rooted paths are trusted and dispatched by extension (errors
+        # surface at exec time); bare command names resolve through PATH.
+        if (-not [System.IO.Path]::IsPathRooted($Executable)) {
+            $found = Get-Command $Executable -ErrorAction SilentlyContinue
+            if ($found -and $found.Source) { return (Resolve-ExecutableLaunchSpec -Executable $found.Source -ArgumentList $ArgumentList) }
+            return $null
+        }
+    }
+
+    $ext = [System.IO.Path]::GetExtension($Executable).ToLowerInvariant()
+    switch ($ext) {
+        '.exe' {
+            return @{ exe = $Executable; args = $ArgumentList }
+        }
+        '.ps1' {
+            $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
+            if (-not $pwsh) { $pwsh = Get-Command powershell -ErrorAction SilentlyContinue }
+            if (-not $pwsh) { return $null }
+            return @{ exe = $pwsh.Source; args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Executable) + $ArgumentList }
+        }
+        { $_ -in '.cmd', '.bat' } {
+            $comspec = $env:ComSpec
+            if (-not $comspec) { $comspec = "$env:SystemRoot\System32\cmd.exe" }
+            # cmd.exe quote rules + .NET argument escaping do not compose through
+            # ArgumentList, so the launcher emits a raw command line instead:
+            #   cmd /d /s /c ""C:\path\x.cmd" "arg1" "arg2""
+            # /s strips the outer quotes, leaving a correctly quoted command.
+            $inner = '"' + $Executable + '"'
+            foreach ($a in $ArgumentList) { $inner += ' "' + ("$a" -replace '"', '') + '"' }
+            $raw = '/d /s /c ""' + $inner + '""'
+            return @{ exe = $comspec; args = @(); rawArgs = $raw }
+        }
+        default {
+            $found = Get-Command $Executable -ErrorAction SilentlyContinue
+            if ($found -and $found.Source -and $found.Source -ne $Executable) {
+                return (Resolve-ExecutableLaunchSpec -Executable $found.Source -ArgumentList $ArgumentList)
+            }
+            return @{ exe = $Executable; args = $ArgumentList }
+        }
     }
 }
 
