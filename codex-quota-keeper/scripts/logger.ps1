@@ -14,6 +14,9 @@ function Get-LogFilePath {
 }
 
 function Write-KeeperLog {
+    # EventRecord schema (audit plan §12): ts/level/event/machineId/machineLabel?/role/mode/
+    # runId/windows/anchor/errorKind?/error/version. machineLabel is only written when
+    # logging.includeMachineLabel=true (privacy default off).
     param(
         [string]$Root,
         [string]$Event,
@@ -21,12 +24,17 @@ function Write-KeeperLog {
         [string]$MachineLabel = '',
         [string]$Role = '',
         [string]$Mode = '',
+        [string]$RunId = '',
         $Windows = $null,
         $Anchor = $null,
         $Error = $null,
+        [string]$ErrorKind = $null,
         [string]$Level = 'INFO',
+        [hashtable]$LoggingConfig = $null,
         [DateTime]$When = (Get-Date)
     )
+    $includeLabel = $false
+    if ($LoggingConfig) { $includeLabel = [bool]$LoggingConfig.includeMachineLabel }
     $entry = @{
         ts         = $When.ToString('yyyy-MM-ddTHH:mm:sszzz')
         level      = $Level
@@ -34,11 +42,14 @@ function Write-KeeperLog {
         machineId  = $MachineId
         role       = $Role
         mode       = $Mode
+        runId      = $RunId
         windows    = $Windows
         anchor     = $Anchor
         error      = $Error
+        version    = $script:CQK_VERSION
     }
-    if ($MachineLabel) { $entry.machineLabel = $MachineLabel }
+    if ($ErrorKind) { $entry.errorKind = $ErrorKind }
+    if ($includeLabel -and $MachineLabel) { $entry.machineLabel = $MachineLabel }
     if ($entry.error -is [string]) { $entry.error = Hide-SensitiveText $entry.error }
     Write-JsonLine (Get-LogFilePath $Root $When) $entry
 }
@@ -47,13 +58,15 @@ function Write-HistoryEvent {
     # Sanitized, allowlist-only record for the optional Git-synced history.
     # Records with no meaningful payload (plain polls) are rejected by callers:
     # doc 03 §12 - never sync every unchanged poll.
+    # machineLabel is dropped unless -IncludeMachineLabel is passed (privacy).
     param(
         [string]$Root,
         [hashtable]$Record,
+        [switch]$IncludeMachineLabel,
         [DateTime]$When = (Get-Date)
     )
     $record.ts = $When.ToString('yyyy-MM-ddTHH:mm:sszzz')
-    $clean = Sanitize-Record $Record
+    $clean = Sanitize-Record $Record -IncludeMachineLabel:$IncludeMachineLabel
     $path = Join-Path (Get-HistoryDir $Root) ("events-" + $When.ToString('yyyy-MM-dd') + ".jsonl")
     Write-JsonLine $path $clean
     return $path

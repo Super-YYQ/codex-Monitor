@@ -39,24 +39,24 @@ try {
 
     Start-TestGroup 'plumbing: push blob to new branch (root commit)'
 
-    $push1 = Push-RepoBlobs -RepoPath $repos.clone -Branch 'history' `
+    $push1 = Push-RepoBlobs -RepoPath $repos.clone -Branch 'cqk/history' `
         -Blobs @{ 'history/events-2026-08-30.jsonl' = "line1`nline2`n" } `
         -ParentCommit $null -CommitMessage 'quota: test' -MachineId 'M-TEST'
     Assert-True $push1.ok "first push ok ($($push1.reason) $($push1.stderr))"
 
-    $blob = Get-RemoteBranchBlob -RepoPath $repos.clone -Branch 'history' -PathInRepo 'history/events-2026-08-30.jsonl'
+    $blob = Get-RemoteBranchBlob -RepoPath $repos.clone -Branch 'cqk/history' -PathInRepo 'history/events-2026-08-30.jsonl'
     Assert-True $blob.ok 'blob readable from remote'
     Assert-Equal 'ok' $blob.reason 'blob present'
     Assert-True ("$($blob.content)" -match 'line2') 'content matches'
 
     Start-TestGroup 'CAS: stale-parent push rejected, fresh-parent push accepted'
 
-    $pushWin = Push-RepoBlobs -RepoPath $repos.clone -Branch 'history' `
+    $pushWin = Push-RepoBlobs -RepoPath $repos.clone -Branch 'cqk/history' `
         -Blobs @{ 'history/events-2026-08-30.jsonl' = "line1`nline2`nappended`n" } `
         -ParentCommit $push1.commit -CommitMessage 'quota: race winner'
     Assert-True $pushWin.ok "fresh parent push accepted ($($pushWin.reason))"
 
-    $pushStale = Push-RepoBlobs -RepoPath $repos.clone -Branch 'history' `
+    $pushStale = Push-RepoBlobs -RepoPath $repos.clone -Branch 'cqk/history' `
         -Blobs @{ 'history/events-2026-08-30.jsonl' = "conflicting`n" } `
         -ParentCommit $push1.commit -CommitMessage 'quota: race loser'
     # parent C1 is now an ancestor (head moved to the winner commit) -> non-FF -> rejected
@@ -64,17 +64,17 @@ try {
     Assert-Equal 'push-rejected' $pushStale.reason 'rejection reason'
     Assert-False ("$($pushStale.stderr)" -match 'ghp_|github_pat_') 'no tokens in git stderr'
 
-    $blob2 = Get-RemoteBranchBlob -RepoPath $repos.clone -Branch 'history' -PathInRepo 'history/events-2026-08-30.jsonl'
+    $blob2 = Get-RemoteBranchBlob -RepoPath $repos.clone -Branch 'cqk/history' -PathInRepo 'history/events-2026-08-30.jsonl'
     Assert-True ("$($blob2.content)" -match 'appended') 'winner content visible'
     Assert-False ("$($blob2.content)" -match 'conflicting') 'loser content not visible'
 
     Start-TestGroup 'missing branch / file reported correctly'
 
-    $missing = Get-RemoteBranchBlob -RepoPath $repos.clone -Branch 'coordination' -PathInRepo 'coordination/lease.json'
+    $missing = Get-RemoteBranchBlob -RepoPath $repos.clone -Branch 'cqk/coordination' -PathInRepo 'coordination/lease.json'
     Assert-True $missing.ok 'remote reachable'
     Assert-Equal 'branch-missing' $missing.reason 'branch missing on fresh repo'
 
-    $nofile = Get-RemoteBranchBlob -RepoPath $repos.clone -Branch 'history' -PathInRepo 'history/nope.jsonl'
+    $nofile = Get-RemoteBranchBlob -RepoPath $repos.clone -Branch 'cqk/history' -PathInRepo 'history/nope.jsonl'
     Assert-Equal 'file-missing' $nofile.reason 'file missing on existing branch'
 
     Start-TestGroup 'history sync: end-to-end push + failure isolation'
@@ -84,12 +84,12 @@ try {
     $evFile = Join-Path $histDir 'events-2026-08-30.jsonl'
     [System.IO.File]::WriteAllText($evFile, '{"event":"WINDOW_RESET_OBSERVED"}' + "`n")
 
-    $cfg = New-TestConfig @{ github = @{ enabled = $true; repoPath = $repos.clone; historyBranch = 'history'; coordinationBranch = 'coordination'; push = $true } }
+    $cfg = New-TestConfig @{ github = @{ coordination = @{ enabled = $true; repoPath = $repos.clone; branch = 'cqk/coordination' }; historySync = @{ enabled = $true; push = $true; branch = 'cqk/history'; eventsOnly = $true } } }
     $sync = Sync-HistoryToGitHub -Config $cfg -KeeperRoot $keeperRoot -FilePaths @($evFile) -CommitMessage 'quota: reset observed' -MachineId 'M-TEST'
     Assert-True $sync.ok "history sync ok ($($sync.reason) $($sync.detail))"
     Assert-Equal 1 $sync.pushed 'one file pushed'
 
-    $remote = Get-RemoteBranchBlob -RepoPath $repos.clone -Branch 'history' -PathInRepo 'history/events-2026-08-30.jsonl'
+    $remote = Get-RemoteBranchBlob -RepoPath $repos.clone -Branch 'cqk/history' -PathInRepo 'history/events-2026-08-30.jsonl'
     Assert-True ("$($remote.content)" -match 'WINDOW_RESET_OBSERVED') 'event content on remote'
 
     # Second sync re-fetches the parent (fresh head) and overwrites cleanly.
@@ -100,11 +100,11 @@ try {
 
     Start-TestGroup 'history sync: disabled/unreachable never throws'
 
-    $cfgOff = New-TestConfig @{ github = @{ enabled = $false } }
+    $cfgOff = New-TestConfig @{ github = @{ coordination = @{ enabled = $false }; historySync = @{ enabled = $false } } }
     $syncOff = Sync-HistoryToGitHub -Config $cfgOff -KeeperRoot $keeperRoot -FilePaths @($evFile) -CommitMessage 'x'
     Assert-Equal 'disabled' $syncOff.reason 'disabled reason'
 
-    $cfgBad = New-TestConfig @{ github = @{ enabled = $true; repoPath = Join-Path $ws 'does-not-exist' } }
+    $cfgBad = New-TestConfig @{ github = @{ coordination = @{ enabled = $true; repoPath = Join-Path $ws 'does-not-exist' } } }
     $syncBad = Sync-HistoryToGitHub -Config $cfgBad -KeeperRoot $keeperRoot -FilePaths @($evFile) -CommitMessage 'x'
     Assert-False $syncBad.ok 'unreachable/bad repo not ok'
     Assert-True ($syncBad.reason -in @('repo-not-allowed', 'unreachable')) "bad repo reason ($($syncBad.reason))"

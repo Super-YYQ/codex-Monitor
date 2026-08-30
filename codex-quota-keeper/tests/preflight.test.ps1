@@ -16,7 +16,7 @@ $ws = New-TestWorkspace
 try {
     $cfgFile = Join-Path $ws 'config.json'
     $cfg = New-TestConfig @{
-        github = @{ enabled = $false }
+        github = @{ coordination = @{ enabled = $false }; historySync = @{ enabled = $false } }
         codex  = @{ command = $mockPath; queryTimeoutSeconds = 10 }
     }
     $null = Write-TestConfigFile $cfgFile $cfg
@@ -52,7 +52,7 @@ try {
 
     Start-TestGroup 'preflight: missing codex / bad config / bad repo'
 
-    $cfgNoCodex = New-TestConfig @{ github = @{ enabled = $false }; codex = @{ command = 'auto' } }
+    $cfgNoCodex = New-TestConfig @{ github = @{ coordination = @{ enabled = $false }; historySync = @{ enabled = $false } }; codex = @{ command = 'auto' } }
     $cfgNoCodex.codex.command = 'no-such-codex-binary-xyz'
     $r4 = Invoke-Preflight -Config $cfgNoCodex -KeeperRoot $ws
     Assert-False $r4.ok 'missing codex binary fails preflight'
@@ -62,7 +62,7 @@ try {
 
     $badRepo = Join-Path $ws 'plain'
     New-Item -ItemType Directory -Path $badRepo -Force | Out-Null
-    $cfgBadRepo = New-TestConfig @{ github = @{ enabled = $true; repoPath = $badRepo } }
+    $cfgBadRepo = New-TestConfig @{ github = @{ coordination = @{ enabled = $true; repoPath = $badRepo } } }
     $r6 = Invoke-Preflight -Config $cfgBadRepo -KeeperRoot $ws
     Assert-False $r6.ok 'non-git log repo fails preflight'
 } finally {

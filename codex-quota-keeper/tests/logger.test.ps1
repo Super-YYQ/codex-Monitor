@@ -20,10 +20,13 @@ try {
     Assert-True (Test-Path $file) 'log file named keeper-YYYY-MM-DD.jsonl'
     $rawLine = [System.IO.File]::ReadAllLines($file)[0]
     $entry = ConvertFrom-JsonSafe $rawLine
-    # null-valued schema fields must still be PRESENT (key existence, not value)
-    foreach ($field in @('ts', 'level', 'event', 'machineId', 'role', 'mode', 'windows', 'anchor', 'error')) {
+    # EventRecord schema (audit plan §12) incl. runId + version
+    foreach ($field in @('ts', 'level', 'event', 'machineId', 'role', 'mode', 'runId', 'windows', 'anchor', 'error', 'version')) {
         Assert-True ($entry.ContainsKey($field)) "field '$field' present in schema"
     }
+    Write-KeeperLog -Root $ws -Event 'X' -MachineId 'M-1' -MachineLabel 'Home PC' -When $when -LoggingConfig @{ retentionDays = 90; includeMachineLabel = $true }
+    $entry2 = ConvertFrom-JsonSafe ([System.IO.File]::ReadAllLines($file)[1])
+    Assert-Equal 'Home PC' $entry2.machineLabel 'label written when opted in'
     Assert-Equal 'QUOTA_SNAPSHOT_CHANGED' $entry.event 'event name'
     Assert-Equal 'LEADER' $entry.role 'role'
     # ConvertFrom-Json parses ISO strings into DateTime, so assert the raw line.
@@ -33,7 +36,7 @@ try {
 
     Write-KeeperLog -Root $ws -Event 'AUTH_ERROR' -Level 'ERROR' -Error 'token=supersecret123 relogin' -When $when
     $lines = [System.IO.File]::ReadAllLines($file)
-    $errEntry = ConvertFrom-JsonSafe $lines[1]
+    $errEntry = ConvertFrom-JsonSafe $lines[2]
     Assert-Equal 'ERROR' $errEntry.level 'error level recorded'
     Assert-False ("$($errEntry.error)" -match 'supersecret123') 'secret scrubbed from error text'
 
@@ -44,14 +47,22 @@ try {
         mode = 'MonitorOnly'; windows = @(@{ minutes = 300; usedPercent = 3; resetsAt = 1788087660 })
         anchor = $null; error = 'token=leaky-123'
         promptText = 'MUST NOT APPEAR'; sessionId = 'MUST NOT APPEAR'
-    } -When $when
+    } -IncludeMachineLabel -When $when
 
     $hfile = Join-Path (Get-HistoryDir $ws) 'events-2026-08-30.jsonl'
     Assert-True (Test-Path $hfile) 'history file created'
     $h = ConvertFrom-JsonSafe ([System.IO.File]::ReadAllLines($hfile)[0])
     Assert-Null $h.promptText 'prompt text never reaches history'
     Assert-Null $h.sessionId 'session data never reaches history'
-    Assert-Equal 'Home PC' $h.machineLabel 'label kept (user-provided, non-sensitive)'
+    Assert-Equal 'Home PC' $h.machineLabel 'label kept when explicitly opted in'
+
+    Start-TestGroup 'history: machineLabel dropped by default (privacy)'
+
+    $null = Write-HistoryEvent -Root $ws -Record @{
+        event = 'WINDOW_RESET_OBSERVED'; machineId = 'M-1'; machineLabel = 'Home PC'
+    } -When $when
+    $h2 = ConvertFrom-JsonSafe ([System.IO.File]::ReadAllLines($hfile)[1])
+    Assert-Null $h2.machineLabel 'machineLabel dropped when includeMachineLabel=false (CQK-006)'
     Assert-False ("$($h.error)" -match 'leaky-123') 'history error sanitized'
     Assert-Equal 3 $h.windows[0].usedPercent 'quota data (non-sensitive) preserved'
 

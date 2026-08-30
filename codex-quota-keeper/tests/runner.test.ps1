@@ -42,7 +42,7 @@ try {
     $mockPath = Join-Path $testsDir 'fixtures\mock-appserver.ps1'
 
     $cfg = New-TestConfig @{
-        github = @{ enabled = $true; repoPath = $repos.clone; coordinationBranch = 'coordination'; historyBranch = 'history' }
+        github = @{ coordination = @{ enabled = $true; repoPath = $repos.clone; branch = 'cqk/coordination' }; historySync = @{ enabled = $true; push = $true; branch = 'cqk/history'; eventsOnly = $true } }
         codex  = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = $false }
     }
     $null = Write-TestConfigFile $cfgFile $cfg
@@ -91,7 +91,7 @@ try {
     Assert-True (Test-Path $histFile) 'history event file written'
     Assert-True ("$([System.IO.File]::ReadAllText($histFile))" -match 'WINDOW_RESET_OBSERVED') 'reset in history'
 
-    $remote = Get-RemoteBranchBlob -RepoPath $repos.clone -Branch 'history' -PathInRepo 'history/events-2026-08-30.jsonl'
+    $remote = Get-RemoteBranchBlob -RepoPath $repos.clone -Branch 'cqk/history' -PathInRepo 'history/events-2026-08-30.jsonl'
     Assert-True $remote.ok 'remote history readable'
     Assert-True ("$($remote.content)" -match 'WINDOW_RESET_OBSERVED') 'reset synced to remote history branch'
     $env:CQK_MOCK_MODE = 'normal'
@@ -183,17 +183,70 @@ try {
     New-Item -ItemType Directory -Path $keeperRoot3 -Force | Out-Null
     $cfgFile3 = Join-Path $keeperRoot3 'config.json'
     $cfgLocal = New-TestConfig @{
-        github = @{ enabled = $false }
+        github = @{ coordination = @{ enabled = $false }; historySync = @{ enabled = $false } }
         codex  = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = $false }
     }
     $null = Write-TestConfigFile $cfgFile3 $cfgLocal
-    $remoteBefore = Get-RemoteBranchBlob -RepoPath $repos.clone -Branch 'coordination' -PathInRepo 'coordination/lease.json'
+    $remoteBefore = Get-RemoteBranchBlob -RepoPath $repos.clone -Branch 'cqk/coordination' -PathInRepo 'coordination/lease.json'
     $r11 = Invoke-Runner -KeeperRoot $keeperRoot3 -ConfigFile $cfgFile3
     Assert-Equal 0 $r11.exitCode 'local-only run exits 0'
     $state11 = Read-JsonFile (Join-Path $keeperRoot3 'runtime\state.json')
     Assert-Equal 'LEADER' $state11.role 'local-only leader'
-    $remoteAfter = Get-RemoteBranchBlob -RepoPath $repos.clone -Branch 'coordination' -PathInRepo 'coordination/lease.json'
+    $remoteAfter = Get-RemoteBranchBlob -RepoPath $repos.clone -Branch 'cqk/coordination' -PathInRepo 'coordination/lease.json'
     Assert-Equal "$($remoteBefore.commit)" "$($remoteAfter.commit)" 'coordination branch untouched by local-only machine'
+
+    Start-TestGroup 'runner: config semantics (audit plan section 6.2)'
+
+    # includeMachineLabel=false (default): no label anywhere in local history
+    $histText = ''
+    Get-ChildItem -LiteralPath (Join-Path $keeperRoot 'history') -File -ErrorAction SilentlyContinue | ForEach-Object {
+        $histText += [System.IO.File]::ReadAllText($_.FullName)
+    }
+    Assert-False ("$histText" -match 'machineLabel') 'machineLabel absent from local history (CQK-006)'
+
+    # historySync.push=false: no history push may happen, coordination still works
+    $freshOrigin = Join-Path $ws 'origin-push-false.git'
+    $freshClone = Join-Path $ws 'repo-push-false'
+    $null = Invoke-TestGit -RepoPath $null -ArgumentList @('init', '--bare', '-q', $freshOrigin)
+    $null = Invoke-TestGit -RepoPath $null -ArgumentList @('clone', '-q', $freshOrigin, $freshClone)
+    $keeperRoot4 = Join-Path $ws 'keeper-pushfalse'
+    New-Item -ItemType Directory -Path $keeperRoot4 -Force | Out-Null
+    $cfgFile4 = Join-Path $keeperRoot4 'config.json'
+    $cfgPushFalse = New-TestConfig @{
+        github = @{
+            coordination = @{ enabled = $true; repoPath = $freshClone; branch = 'cqk/coordination' }
+            historySync = @{ enabled = $true; push = $false; branch = 'cqk/history'; eventsOnly = $true }
+        }
+        codex = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = $false }
+    }
+    $null = Write-TestConfigFile $cfgFile4 $cfgPushFalse
+    $env:CQK_MOCK_MODE = 'normal'
+    $rp1 = Invoke-Runner -KeeperRoot $keeperRoot4 -ConfigFile $cfgFile4
+    Assert-Equal 0 $rp1.exitCode 'push=false baseline run ok'
+    Clear-Backoff $keeperRoot4
+    $env:CQK_MOCK_MODE = 'reset'
+    $rp2 = Invoke-Runner -KeeperRoot $keeperRoot4 -ConfigFile $cfgFile4
+    Assert-Equal 0 $rp2.exitCode 'push=false reset run ok'
+    $coordBranch = Get-RemoteBranchBlob -RepoPath $freshClone -Branch 'cqk/coordination' -PathInRepo 'coordination/lease.json'
+    Assert-True ($coordBranch.ok -and $coordBranch.reason -eq 'ok') 'coordination push still happens (independent of historySync.push)'
+    $histBranch = Get-RemoteBranchBlob -RepoPath $freshClone -Branch 'cqk/history' -PathInRepo 'history/.x'
+    Assert-False ($histBranch.ok -and $histBranch.reason -eq 'ok') 'no history push when historySync.push=false (CQK-005)'
+    Assert-True (Test-Path (Join-Path $keeperRoot4 'history')) 'local history files still written for later retry'
+
+    # retentionDays: runner cleans stale local files at completion (CQK-007)
+    $old = (Get-Date).AddDays(-200)
+    $oldLog = Join-Path (Get-LogsDir $keeperRoot) 'keeper-2026-01-01.jsonl'
+    [System.IO.File]::WriteAllText($oldLog, '{}')
+    (Get-Item $oldLog).LastWriteTime = $old
+    $oldHist = Join-Path (Get-HistoryDir $keeperRoot) 'events-2026-01-01.jsonl'
+    [System.IO.File]::WriteAllText($oldHist, '{}')
+    (Get-Item $oldHist).LastWriteTime = $old
+    $env:CQK_MOCK_MODE = 'normal'
+    $rp3 = Invoke-Runner -KeeperRoot $keeperRoot -ConfigFile $cfgFile
+    Assert-Equal 0 $rp3.exitCode 'retention run ok'
+    Assert-False (Test-Path $oldLog) 'stale runtime log removed by runner (CQK-007)'
+    Assert-False (Test-Path $oldHist) 'stale history file removed by runner'
+    $env:CQK_MOCK_MODE = 'normal'
 } finally {
     Remove-Item Env:\CQK_MOCK_MODE -ErrorAction SilentlyContinue
     Remove-TestWorkspace $ws

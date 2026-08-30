@@ -41,12 +41,16 @@ function Invoke-Preflight {
 
     $gitOk = $false
     $logRepoIssues = @()
-    if ($Config.github.enabled -eq $true) {
+    $coord = Get-CoordinationConfig $Config
+    $hist = Get-HistorySyncConfig $Config
+    if ($coord.enabled -eq $true -or $hist.enabled -eq $true) {
         $gitOk = Test-GitAvailable
         if (-not $gitOk) { $issues += 'git is required for GitHub coordination but was not found' }
         else {
-            $logRepoIssues = Test-LogRepoAllowed -RepoPath ([string]$Config.github.repoPath) -KeeperRoot $KeeperRoot
-            $issues += $logRepoIssues
+            if ($coord.enabled -eq $true) {
+                $logRepoIssues = Test-LogRepoAllowed -RepoPath $coord.repoPath -KeeperRoot $KeeperRoot
+                $issues += $logRepoIssues
+            }
         }
     }
 

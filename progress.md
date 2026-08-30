@@ -141,7 +141,7 @@ R1. `5586a7b` **CQK-001/002 quota v2 解析器重构 + 官方 schema 契约 fixt
       mock app-server 升级 v2 形状并新增 multi-bucket/secondary-null/null-fields/credits/
       unknown-meta/unrecognized-root 模式；保留 windows 扁平视图供消费者过渡使用。
 
-R2. **CQK-003 状态机升级 bucket/window 模型**（本次 commit）
+R2. `0c6d1b7` **CQK-003 状态机升级 bucket/window 模型**
     - 窗口唯一键 = bucketId|windowType（Get-WindowKey/Get-BucketWindowMap），多 bucket 同名窗口互不覆盖。
     - eventId v2 = SHA-256(bucketId|windowType|windowDuration|previousResetsAt|reset)，跨机确定。
     - null 字段容错：resetsAt/usedPercent/duration 任一为 null 时跳过对应比较与 reset 推断，保留 partial 状态。
@@ -152,6 +152,20 @@ R2. **CQK-003 状态机升级 bucket/window 模型**（本次 commit）
     - 又一次函数返回单元素数组被 unroll（ConvertTo-StateBuckets 漏加逗号）——已在函数注释中标注此约束。
     - 全量 10 个测试文件回归通过。
 
+R3. **CQK-005/006/007 配置语义重构 + 行为验收**（本次 commit）
+    - 配置 v2 schema（§6.1）：poll{intervalMinutes,minimumIntervalMinutes}、
+      github{coordination{enabled,repoPath,branch},historySync{enabled,push,branch,eventsOnly}}、
+      codex.autoAnchor{enabled,prompt,maxPerDay,minimumGapMinutes}、logging.includeMachineLabel 默认 false。
+    - Convert-LegacyConfig：v1 平铺键自动映射到 v2（含测试），v2 键优先，schemaVersion 升 2。
+    - 全部脚本改用形状无关访问器（Get-CoordinationConfig/Get-HistorySyncConfig/Get-PollConfig/
+      Get-LoggingConfig/Get-AutoAnchorConfig）。
+    - 行为兑现（§6.2，均有测试）：historySync.push=false 阻断一切 history push（coordination 独立）；
+      includeMachineLabel=false 时本地/远程 history 无 machineLabel（默认关闭）；eventsOnly 普通轮询零远程写入；
+      retentionDays 由 Runner 完成阶段自动执行（CQK-007，失败仅记录）；coordination.enabled=false → LOCAL_ONLY。
+    - EventRecord（§12）：runId/version/errorKind 字段入运行日志与 history 记录。
+    - 协调/历史分支默认名改 cqk/coordination、cqk/history（为 CQK-011 分支防护铺路）。
+    - 修复 runner 的 AutoAnchor 门控仍比较旧布尔键的问题。
+    - 全量 10 个测试文件回归通过。
+
 ### 下一步
-- CQK-005/006/007：配置语义重构（v2 schema + 旧配置映射）、includeMachineLabel/push/retention 行为测试、
-  Runner 接入 Invoke-LogRetention、EventRecord 增加 runId。
+- CQK-004：Resolve-ExecutableLaunchSpec 统一外部命令启动（exe/ps1/cmd/bat），npm codex.cmd 场景修复。

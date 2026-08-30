@@ -44,13 +44,14 @@ function Get-RemoteProcessedEventIds {
     # event may fire at most once across ALL machines, not just this one.
     param([hashtable]$Config, [string]$KeeperRoot)
     $out = @{ reachable = $false; ids = @(); reason = $null }
-    if ($Config.github.enabled -ne $true) {
+    if (-not (Test-CoordinationEnabled $Config)) {
         # No shared coordination point: cannot prove another machine hasn't anchored.
         $out.reason = 'disabled'
         return $out
     }
-    $repoPath = [System.IO.Path]::GetFullPath([string]$Config.github.repoPath)
-    $blob = Get-RemoteBranchBlob -RepoPath $repoPath -Branch ([string]$Config.github.coordinationBranch) -PathInRepo 'coordination/processed-events.jsonl'
+    $coord = Get-CoordinationConfig $Config
+    $repoPath = [System.IO.Path]::GetFullPath($coord.repoPath)
+    $blob = Get-RemoteBranchBlob -RepoPath $repoPath -Branch $coord.branch -PathInRepo 'coordination/processed-events.jsonl'
     if (-not $blob.ok) { $out.reason = 'unreachable'; return $out }
     $out.reachable = $true
     if ($blob.reason -eq 'ok' -and $blob.content) {
@@ -62,9 +63,10 @@ function Get-RemoteProcessedEventIds {
 function Add-RemoteProcessedEventIds {
     # Best-effort remote marker push after a local anchor decision.
     param([hashtable]$Config, [string]$KeeperRoot, [string[]]$EventIds, [hashtable]$Machine)
-    if ($Config.github.enabled -ne $true) { return @{ ok = $false; reason = 'disabled' } }
-    $repoPath = [System.IO.Path]::GetFullPath([string]$Config.github.repoPath)
-    $branch = [string]$Config.github.coordinationBranch
+    if (-not (Test-CoordinationEnabled $Config)) { return @{ ok = $false; reason = 'disabled' } }
+    $coord = Get-CoordinationConfig $Config
+    $repoPath = [System.IO.Path]::GetFullPath($coord.repoPath)
+    $branch = $coord.branch
     $blob = Get-RemoteBranchBlob -RepoPath $repoPath -Branch $branch -PathInRepo 'coordination/processed-events.jsonl'
     if (-not $blob.ok) { return @{ ok = $false; reason = 'unreachable' } }
     $existing = @()
@@ -118,7 +120,7 @@ function Invoke-AutoAnchorIfNeeded {
         return $out
     }
 
-    if (-not (Test-AnchorPromptAllowed -Prompt ([string]$Config.codex.anchorPrompt))) {
+    if (-not (Test-AnchorPromptAllowed -Prompt ([string](Get-AutoAnchorConfig $Config).prompt))) {
         $out.events += ,@{ event = 'ANCHOR_SKIPPED'; reason = 'anchorPrompt not on the safe whitelist' }
         return $out
     }
@@ -133,7 +135,7 @@ function Invoke-AutoAnchorIfNeeded {
     $before = $State.buckets
     $workDir = Join-Path (Get-RuntimeDir $KeeperRoot) 'anchor-work'
     Ensure-Directory $workDir | Out-Null
-    $execInfo = Get-AnchorExecCommand -CodexPath $CodexPath -Prompt ([string]$Config.codex.anchorPrompt)
+    $execInfo = Get-AnchorExecCommand -CodexPath $CodexPath -Prompt ([string](Get-AutoAnchorConfig $Config).prompt)
     $startedAt = Get-IsoTimestamp
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $exec = Invoke-External -FilePath $execInfo.exe -ArgumentList $execInfo.args `
@@ -177,6 +179,7 @@ function Invoke-AutoAnchorIfNeeded {
     $null = Add-RemoteProcessedEventIds -Config $Config -KeeperRoot $KeeperRoot -EventIds $pending -Machine $Machine
 
     # History record with before/after snapshots (doc 01 §6).
+    $logging = Get-LoggingConfig $Config
     $hist = Write-HistoryEvent -Root $KeeperRoot -Record @{
         event   = $(if ($verified -and $exec.ok) { 'ANCHOR_EXECUTED' } else { 'ANCHOR_ABORTED' })
         machineId = [string]$Machine.machineId
@@ -186,7 +189,7 @@ function Invoke-AutoAnchorIfNeeded {
         windows = $anchorInfo.after
         anchor  = $anchorInfo
         error   = $anchorInfo.reason
-    }
+    } -IncludeMachineLabel:([bool]$logging.includeMachineLabel)
     $out.historyFiles += $hist
     return $out
 }

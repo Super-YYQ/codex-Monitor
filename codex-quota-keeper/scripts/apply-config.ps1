@@ -35,10 +35,10 @@ function Invoke-ApplyConfig {
     if ($existing) {
         # Re-register with the new trigger/settings (keeps it simple and consistent).
         Register-KeeperTask -Config $cfg -KeeperRoot $KeeperRoot | Out-Null
-        return @{ ok = $true; issues = @(); taskName = $taskName; intervalMinutes = [int]$cfg.pollIntervalMinutes; taskCreated = $false }
+        return @{ ok = $true; issues = @(); taskName = $taskName; intervalMinutes = (Get-PollConfig $cfg).intervalMinutes; taskCreated = $false }
     }
     Register-KeeperTask -Config $cfg -KeeperRoot $KeeperRoot | Out-Null
-    return @{ ok = $true; issues = @(); taskName = $taskName; intervalMinutes = [int]$cfg.pollIntervalMinutes; taskCreated = $true }
+    return @{ ok = $true; issues = @(); taskName = $taskName; intervalMinutes = (Get-PollConfig $cfg).intervalMinutes; taskCreated = $true }
 }
 
 if ($MyInvocation.InvocationName -ne '.') {

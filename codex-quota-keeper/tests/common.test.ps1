@@ -9,16 +9,20 @@ Start-TestGroup 'config: defaults are conservative'
 
 $defaults = Get-DefaultConfig
 Assert-Equal 'MonitorOnly' $defaults.mode 'default mode is MonitorOnly'
-Assert-False ([bool]$defaults.codex.autoAnchor) 'autoAnchor default off'
-Assert-Equal 15 $defaults.pollIntervalMinutes 'default poll 15 min'
-Assert-Equal 5 $defaults.minimumPollIntervalMinutes 'min poll floor 5 min'
+Assert-Equal 2 $defaults.schemaVersion 'v2 config schema'
+Assert-False ([bool]$defaults.codex.autoAnchor.enabled) 'autoAnchor default off'
+Assert-Equal 15 $defaults.poll.intervalMinutes 'default poll 15 min'
+Assert-Equal 5 $defaults.poll.minimumIntervalMinutes 'min poll floor 5 min'
+Assert-False ([bool]$defaults.logging.includeMachineLabel) 'machineLabel privacy default off'
+Assert-Equal 'cqk/coordination' $defaults.github.coordination.branch 'coordination branch name'
+Assert-Equal 'cqk/history' $defaults.github.historySync.branch 'history branch name'
 
 Start-TestGroup 'config: Load-Config merges defaults and validates'
 
 $ws = New-TestWorkspace
 try {
     $cfgFile = Join-Path $ws 'config.json'
-    $cfg = New-TestConfig @{ github = @{ enabled = $false } }
+    $cfg = New-TestConfig @{ github = @{ coordination = @{ enabled = $false }; historySync = @{ enabled = $false } } }
     [void](Write-TestConfigFile $cfgFile $cfg)
     $loaded = Load-Config $cfgFile
     Assert-Equal 0 @($loaded.issues).Count 'valid config has no issues'
@@ -27,24 +31,52 @@ try {
 
     Start-TestGroup 'config: poll interval below minimum is rejected'
 
-    $bad = New-TestConfig @{ pollIntervalMinutes = 1; minimumPollIntervalMinutes = 1 }
+    $bad = New-TestConfig @{ poll = @{ intervalMinutes = 1; minimumIntervalMinutes = 1 } }
     [void](Write-TestConfigFile $cfgFile $bad)
     $loaded2 = Load-Config $cfgFile
     Assert-True (@($loaded2.issues).Count -ge 1) 'poll below 5-min floor rejected'
 
-    Start-TestGroup 'config: autoAnchor=true requires mode=AutoAnchor'
+    Start-TestGroup 'config: autoAnchor.enabled=true requires mode=AutoAnchor'
 
-    $bad2 = New-TestConfig @{ codex = @{ autoAnchor = $true } }
+    $bad2 = New-TestConfig @{ codex = @{ autoAnchor = @{ enabled = $true } } }
     [void](Write-TestConfigFile $cfgFile $bad2)
     $loaded3 = Load-Config $cfgFile
     Assert-True (@($loaded3.issues).Count -ge 1) 'autoAnchor without AutoAnchor mode rejected'
 
-    Start-TestGroup 'config: github enabled without repoPath rejected'
+    Start-TestGroup 'config: coordination enabled without repoPath rejected'
 
-    $bad3 = New-TestConfig @{ github = @{ enabled = $true; repoPath = '' } }
+    $bad3 = New-TestConfig @{ github = @{ coordination = @{ enabled = $true; repoPath = '' } } }
     [void](Write-TestConfigFile $cfgFile $bad3)
     $loaded4 = Load-Config $cfgFile
     Assert-True (@($loaded4.issues).Count -ge 1) 'missing repoPath rejected'
+
+    Start-TestGroup 'config: legacy v1 keys map onto v2 schema'
+
+    $legacyJson = @'
+{
+  "schemaVersion": 1,
+  "mode": "MonitorOnly",
+  "pollIntervalMinutes": 30,
+  "minimumPollIntervalMinutes": 10,
+  "leader": { "enabled": true, "leaseTtlMinutes": 45, "graceMinutes": 5, "label": "Legacy PC" },
+  "codex": { "command": "auto", "queryTimeoutSeconds": 20, "autoAnchor": false, "anchorPrompt": "p", "maxAnchorsPerDay": 4, "minimumAnchorGapMinutes": 30 },
+  "github": { "enabled": true, "repoPath": "D:/logrepo", "coordinationBranch": "coordination", "historyBranch": "history", "syncEventsOnly": true, "push": true },
+  "logging": { "retentionDays": 30, "includeMachineLabel": true },
+  "task": { "name": "LegacyTask", "startWithWindows": true, "runIfNetworkAvailable": true, "wakeToRun": false }
+}
+'@
+    [System.IO.File]::WriteAllText($cfgFile, $legacyJson, (New-Object System.Text.UTF8Encoding($false)))
+    $legacy = Load-Config $cfgFile
+    Assert-Equal 0 @($legacy.issues).Count 'legacy config valid after mapping'
+    Assert-Equal 30 $legacy.config.poll.intervalMinutes 'pollIntervalMinutes mapped'
+    Assert-Equal 10 $legacy.config.poll.minimumIntervalMinutes 'minimumPollIntervalMinutes mapped'
+    Assert-True ([bool]$legacy.config.github.coordination.enabled) 'github.enabled -> coordination.enabled'
+    Assert-Equal 'D:/logrepo' $legacy.config.github.coordination.repoPath 'repoPath mapped'
+    Assert-Equal 'coordination' $legacy.config.github.coordination.branch 'coordinationBranch mapped'
+    Assert-Equal 'history' $legacy.config.github.historySync.branch 'historyBranch mapped'
+    Assert-False ([bool]$legacy.config.codex.autoAnchor.enabled) 'legacy autoAnchor=false mapped'
+    Assert-Equal 4 $legacy.config.codex.autoAnchor.maxPerDay 'maxAnchorsPerDay mapped'
+    Assert-Equal 2 $legacy.config.schemaVersion 'schema upgraded to 2'
 
     Start-TestGroup 'config: invalid JSON / missing file handled'
 

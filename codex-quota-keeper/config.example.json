@@ -1,9 +1,10 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "mode": "MonitorOnly",
-  "pollIntervalMinutes": 15,
-  "minimumPollIntervalMinutes": 5,
-
+  "poll": {
+    "intervalMinutes": 15,
+    "minimumIntervalMinutes": 5
+  },
   "leader": {
     "enabled": true,
     "leaseTtlMinutes": 45,
@@ -11,30 +12,33 @@
     "takeoverOnExpiry": true,
     "label": "Home PC"
   },
-
+  "github": {
+    "coordination": {
+      "enabled": true,
+      "repoPath": "D:/tools/codex-quota-history",
+      "branch": "cqk/coordination"
+    },
+    "historySync": {
+      "enabled": true,
+      "push": true,
+      "branch": "cqk/history",
+      "eventsOnly": true
+    }
+  },
+  "logging": {
+    "retentionDays": 90,
+    "includeMachineLabel": false
+  },
   "codex": {
     "command": "auto",
     "queryTimeoutSeconds": 20,
-    "autoAnchor": false,
-    "anchorPrompt": "Reply exactly OK.",
-    "maxAnchorsPerDay": 6,
-    "minimumAnchorGapMinutes": 60
+    "autoAnchor": {
+      "enabled": false,
+      "prompt": "Reply exactly OK.",
+      "maxPerDay": 6,
+      "minimumGapMinutes": 60
+    }
   },
-
-  "github": {
-    "enabled": true,
-    "repoPath": "D:/tools/codex-quota-history",
-    "coordinationBranch": "coordination",
-    "historyBranch": "history",
-    "syncEventsOnly": true,
-    "push": true
-  },
-
-  "logging": {
-    "retentionDays": 90,
-    "includeMachineLabel": true
-  },
-
   "task": {
     "name": "CodexQuotaKeeper.Check",
     "startWithWindows": true,

@@ -27,16 +27,19 @@ if (-not $KeeperRoot) { $KeeperRoot = Get-KeeperRoot }
 if (-not $ConfigFile) { $ConfigFile = Get-ConfigPath $KeeperRoot }
 
 $script:CqkExitCode = 0
+$script:CqkRunId = [guid]::NewGuid().ToString('N').Substring(0, 12)
+$script:CqkLogging = @{ retentionDays = 90; includeMachineLabel = $false }
 
 function Write-RunnerLog {
-    param([string]$Event, [string]$Level = 'INFO', $Error = $null, $Windows = $null, $Anchor = $null)
+    param([string]$Event, [string]$Level = 'INFO', $Error = $null, [string]$ErrorKind = $null, $Windows = $null, $Anchor = $null)
     $machine = $script:CqkMachine
     $label = if ($machine -and $machine.label) { [string]$machine.label } else { '' }
-    Write-KeeperLog -Root $KeeperRoot -Event $Event -Level $Level `
+    Write-KeeperLog -Root $KeeperRoot -Event $Event -Level $Level -RunId $script:CqkRunId `
         -MachineId ($(if ($machine) { [string]$machine.machineId } else { '' })) -MachineLabel $label `
         -Role ($(if ($script:CqkRole) { $script:CqkRole } else { '' })) `
         -Mode ($(if ($script:CqkMode) { $script:CqkMode } else { '' })) `
-        -Windows $Windows -Anchor $Anchor -Error $Error
+        -Windows $Windows -Anchor $Anchor -Error $Error -ErrorKind $ErrorKind `
+        -LoggingConfig $script:CqkLogging
 }
 
 try {
@@ -49,6 +52,7 @@ try {
     }
     $cfg = $loaded.config
     $script:CqkMode = [string]$cfg.mode
+    $script:CqkLogging = Get-LoggingConfig $cfg
 
     # ---- local mutual exclusion (two layers, doc 03 §9) --------------------
     $lock = Enter-RunnerLock $KeeperRoot
@@ -131,7 +135,7 @@ try {
     # ---- AutoAnchor hook (experimental; module optional, default disabled) ---
     $anchorHistory = @()
     $isLeader = ($election.role -eq 'LEADER' -and $null -ne $election.lease)
-    if ($cfg.mode -eq 'AutoAnchor' -and $cfg.codex.autoAnchor -eq $true) {
+    if ($cfg.mode -eq 'AutoAnchor' -and (Test-AutoAnchorEnabled $cfg)) {
         if (Get-Command Invoke-AutoAnchorIfNeeded -ErrorAction SilentlyContinue) {
             $anchorOutcome = Invoke-AutoAnchorIfNeeded -Config $cfg -KeeperRoot $KeeperRoot `
                 -State $state -Events $events -IsLeader $isLeader -Machine $machine -Election $election
@@ -175,13 +179,16 @@ try {
             event        = [string]$ev.event
             machineId    = [string]$machine.machineId
             machineLabel = [string]$machine.label
+            runId        = $script:CqkRunId
             role         = $election.role
             mode         = [string]$cfg.mode
             windows      = $read.windows
             anchor       = $ev.anchor
+            errorKind    = $ev.kind
             error        = $(if ($ev.message) { $ev.message } else { $ev.reason })
         }
-        $historyFiles += (Write-HistoryEvent -Root $KeeperRoot -Record $record -When $now)
+        $historyFiles += (Write-HistoryEvent -Root $KeeperRoot -Record $record `
+            -IncludeMachineLabel:([bool]$script:CqkLogging.includeMachineLabel) -When $now)
     }
 
     $counts = @{}
@@ -220,6 +227,13 @@ try {
         if (-not $sync.ok -and $sync.reason -notin @('disabled', 'nothing-to-sync', 'git-unavailable')) {
             Write-RunnerLog -Event 'SYNC_FAILED' -Error "$($sync.reason): $($sync.detail)"
         }
+    }
+
+    # Retention cleanup at completion; failure must not affect the core run.
+    try {
+        $null = Invoke-LogRetention -Root $KeeperRoot -RetentionDays $script:CqkLogging.retentionDays
+    } catch {
+        Write-RunnerLog -Event 'RETENTION_FAILED' -Level 'ERROR' -Error $_.Exception.Message
     }
 
     Write-RunnerLog -Event 'RUNNER_OK' -Windows $read.windows

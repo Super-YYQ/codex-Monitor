@@ -74,15 +74,18 @@ function Get-TestResult {
 # Default-merged valid config for tests.
 function New-TestConfig {
     param([hashtable]$Override = @{})
+    # v2 config schema (audit plan v1.0 §6.1)
     $base = @{
-        schemaVersion = 1
+        schemaVersion = 2
         mode = 'MonitorOnly'
-        pollIntervalMinutes = 15
-        minimumPollIntervalMinutes = 5
+        poll = @{ intervalMinutes = 15; minimumIntervalMinutes = 5 }
         leader = @{ enabled = $true; leaseTtlMinutes = 45; graceMinutes = 5; takeoverOnExpiry = $true; label = 'Test PC' }
-        codex = @{ command = 'auto'; queryTimeoutSeconds = 20; autoAnchor = $false; anchorPrompt = 'Reply exactly OK.'; maxAnchorsPerDay = 6; minimumAnchorGapMinutes = 60 }
-        github = @{ enabled = $true; repoPath = ''; coordinationBranch = 'coordination'; historyBranch = 'history'; syncEventsOnly = $true; push = $true }
-        logging = @{ retentionDays = 90; includeMachineLabel = $true }
+        codex = @{ command = 'auto'; queryTimeoutSeconds = 20; autoAnchor = @{ enabled = $false; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60 } }
+        github = @{
+            coordination = @{ enabled = $true; repoPath = ''; branch = 'cqk/coordination' }
+            historySync = @{ enabled = $true; push = $true; branch = 'cqk/history'; eventsOnly = $true }
+        }
+        logging = @{ retentionDays = 90; includeMachineLabel = $false }
         task = @{ name = 'CodexQuotaKeeper.Check'; startWithWindows = $true; runIfNetworkAvailable = $true; wakeToRun = $false }
     }
     foreach ($k in $Override.Keys) {

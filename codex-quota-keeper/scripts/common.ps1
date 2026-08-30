@@ -177,9 +177,11 @@ $script:CQK_HISTORY_ALLOWED_KEYS = @(
 )
 
 function Sanitize-Record {
-    param([hashtable]$Record)
+    # machineLabel is only kept when explicitly allowed (logging.includeMachineLabel).
+    param([hashtable]$Record, [switch]$IncludeMachineLabel)
     $out = @{}
     foreach ($key in $script:CQK_HISTORY_ALLOWED_KEYS) {
+        if (-not $IncludeMachineLabel -and $key -eq 'machineLabel') { continue }
         if ($Record.ContainsKey($key) -and $null -ne $Record[$key]) {
             $out[$key] = $Record[$key]
         }
@@ -303,11 +305,14 @@ function Get-LoggingConfig {
 # Config
 
 function Get-DefaultConfig {
+    # v2 config schema (audit plan v1.0 §6.1)
     return @{
-        schemaVersion = 1
+        schemaVersion = 2
         mode = 'MonitorOnly'
-        pollIntervalMinutes = 15
-        minimumPollIntervalMinutes = $script:CQK_MIN_POLL_FLOOR_MINUTES
+        poll = @{
+            intervalMinutes = 15
+            minimumIntervalMinutes = $script:CQK_MIN_POLL_FLOOR_MINUTES
+        }
         leader = @{
             enabled = $true
             leaseTtlMinutes = 45
@@ -315,25 +320,32 @@ function Get-DefaultConfig {
             takeoverOnExpiry = $true
             label = 'Home PC'
         }
-        codex = @{
-            command = 'auto'
-            queryTimeoutSeconds = 20
-            autoAnchor = $false
-            anchorPrompt = 'Reply exactly OK.'
-            maxAnchorsPerDay = 6
-            minimumAnchorGapMinutes = 60
-        }
         github = @{
-            enabled = $true
-            repoPath = ''
-            coordinationBranch = 'coordination'
-            historyBranch = 'history'
-            syncEventsOnly = $true
-            push = $true
+            coordination = @{
+                enabled = $true
+                repoPath = ''
+                branch = 'cqk/coordination'
+            }
+            historySync = @{
+                enabled = $true
+                push = $true
+                branch = 'cqk/history'
+                eventsOnly = $true
+            }
         }
         logging = @{
             retentionDays = 90
-            includeMachineLabel = $true
+            includeMachineLabel = $false   # privacy default: labels stay local unless opted in
+        }
+        codex = @{
+            command = 'auto'
+            queryTimeoutSeconds = 20
+            autoAnchor = @{
+                enabled = $false
+                prompt = 'Reply exactly OK.'
+                maxPerDay = 6
+                minimumGapMinutes = 60
+            }
         }
         task = @{
             name = 'CodexQuotaKeeper.Check'
@@ -342,6 +354,46 @@ function Get-DefaultConfig {
             wakeToRun = $false
         }
     }
+}
+
+function Convert-LegacyConfig {
+    # Maps v1 flat keys onto the v2 schema so pre-0.9 config.json files keep
+    # working. v2 keys always win when both are present.
+    param([hashtable]$Config)
+    if ($Config.poll -isnot [hashtable]) {
+        $Config.poll = @{}
+        if ($Config.ContainsKey('pollIntervalMinutes')) { $Config.poll.intervalMinutes = $Config.pollIntervalMinutes }
+        if ($Config.ContainsKey('minimumPollIntervalMinutes')) { $Config.poll.minimumIntervalMinutes = $Config.minimumPollIntervalMinutes }
+    }
+    if ($Config.github -is [hashtable]) {
+        $g = $Config.github
+        if ($g.coordination -isnot [hashtable]) {
+            $c = @{}
+            if ($g.ContainsKey('enabled')) { $c.enabled = $g.enabled }
+            if ($g.ContainsKey('repoPath')) { $c.repoPath = $g.repoPath }
+            if ($g.ContainsKey('coordinationBranch')) { $c.branch = $g.coordinationBranch }
+            $g.coordination = $c
+        }
+        if ($g.historySync -isnot [hashtable]) {
+            $h = @{}
+            if ($g.ContainsKey('enabled')) { $h.enabled = $g.enabled }
+            if ($g.ContainsKey('push')) { $h.push = $g.push }
+            if ($g.ContainsKey('historyBranch')) { $h.branch = $g.historyBranch }
+            if ($g.ContainsKey('syncEventsOnly')) { $h.eventsOnly = $g.syncEventsOnly }
+            $g.historySync = $h
+        }
+    }
+    if ($Config.codex -is [hashtable] -and $Config.codex.autoAnchor -isnot [hashtable]) {
+        $c = $Config.codex
+        $aa = @{}
+        if ($c.ContainsKey('autoAnchor')) { $aa.enabled = ($c.autoAnchor -eq $true) }
+        if ($c.ContainsKey('anchorPrompt')) { $aa.prompt = $c.anchorPrompt }
+        if ($c.ContainsKey('maxAnchorsPerDay')) { $aa.maxPerDay = $c.maxAnchorsPerDay }
+        if ($c.ContainsKey('minimumAnchorGapMinutes')) { $aa.minimumGapMinutes = $c.minimumAnchorGapMinutes }
+        $Config.codex.autoAnchor = $aa
+    }
+    $Config.schemaVersion = 2
+    return $Config
 }
 
 function Merge-ConfigDefaults {
@@ -368,20 +420,19 @@ function Merge-ConfigDefaults {
 }
 
 function Test-ConfigShape {
-    # Returns a list of issue strings; empty list means valid.
+    # Returns a list of issue strings; empty list means valid. v2 schema.
     param([hashtable]$Config)
     $issues = @()
     $mode = [string]$Config.mode
     if ($mode -notin @('MonitorOnly', 'AutoAnchor')) {
         $issues += "mode must be MonitorOnly or AutoAnchor (got '$mode')"
     }
-    $minPoll = [int]$Config.minimumPollIntervalMinutes
-    if ($minPoll -lt $script:CQK_MIN_POLL_FLOOR_MINUTES) {
-        $issues += "minimumPollIntervalMinutes must be >= $($script:CQK_MIN_POLL_FLOOR_MINUTES)"
+    $poll = Get-PollConfig $Config
+    if ($poll.minimumIntervalMinutes -lt $script:CQK_MIN_POLL_FLOOR_MINUTES) {
+        $issues += "poll.minimumIntervalMinutes must be >= $($script:CQK_MIN_POLL_FLOOR_MINUTES)"
     }
-    $poll = [int]$Config.pollIntervalMinutes
-    if ($poll -lt $minPoll) {
-        $issues += "pollIntervalMinutes ($poll) must be >= minimumPollIntervalMinutes ($minPoll)"
+    if ($poll.intervalMinutes -lt $poll.minimumIntervalMinutes) {
+        $issues += "poll.intervalMinutes ($($poll.intervalMinutes)) must be >= poll.minimumIntervalMinutes ($($poll.minimumIntervalMinutes))"
     }
     if ([int]$Config.leader.leaseTtlMinutes -lt 5) {
         $issues += 'leader.leaseTtlMinutes must be >= 5'
@@ -392,28 +443,27 @@ function Test-ConfigShape {
     if ([int]$Config.codex.queryTimeoutSeconds -lt 5) {
         $issues += 'codex.queryTimeoutSeconds must be >= 5'
     }
-    if ($Config.codex.autoAnchor -eq $true -and $mode -ne 'AutoAnchor') {
-        $issues += "codex.autoAnchor=true requires mode='AutoAnchor'"
+    $aa = Get-AutoAnchorConfig $Config
+    if ($aa.enabled -and $mode -ne 'AutoAnchor') {
+        $issues += "codex.autoAnchor.enabled=true requires mode='AutoAnchor'"
     }
-    if ($Config.codex.autoAnchor -eq $true) {
-        if ([string]::IsNullOrWhiteSpace([string]$Config.codex.anchorPrompt)) {
-            $issues += 'codex.anchorPrompt must not be empty when autoAnchor is on'
+    if ($aa.enabled) {
+        if ([string]::IsNullOrWhiteSpace([string]$aa.prompt)) {
+            $issues += 'codex.autoAnchor.prompt must not be empty when enabled'
         }
-        if ([int]$Config.codex.maxAnchorsPerDay -lt 1) {
-            $issues += 'codex.maxAnchorsPerDay must be >= 1'
+        if ([int]$aa.maxPerDay -lt 1) {
+            $issues += 'codex.autoAnchor.maxPerDay must be >= 1'
         }
-        if ([int]$Config.codex.minimumAnchorGapMinutes -lt 1) {
-            $issues += 'codex.minimumAnchorGapMinutes must be >= 1'
+        if ([int]$aa.minimumGapMinutes -lt 1) {
+            $issues += 'codex.autoAnchor.minimumGapMinutes must be >= 1'
         }
     }
     if ([int]$Config.logging.retentionDays -lt 1) {
         $issues += 'logging.retentionDays must be >= 1'
     }
-    if ($Config.github.enabled -eq $true) {
-        $repo = [string]$Config.github.repoPath
-        if ([string]::IsNullOrWhiteSpace($repo)) {
-            $issues += 'github.repoPath is required when github.enabled=true'
-        }
+    $coord = Get-CoordinationConfig $Config
+    if ($coord.enabled -and [string]::IsNullOrWhiteSpace($coord.repoPath)) {
+        $issues += 'github.coordination.repoPath is required when github.coordination.enabled=true'
     }
     return $issues
 }
@@ -432,6 +482,7 @@ function Load-Config {
         return @{ config = $null; issues = @('config root must be a JSON object'); path = $Path }
     }
     try {
+        $raw = Convert-LegacyConfig $raw
         $merged = Merge-ConfigDefaults (Get-DefaultConfig) $raw
         $issues = Test-ConfigShape $merged
     } catch {

@@ -20,7 +20,7 @@ function Reset-RemoteLease {
     # All test machines share one origin; expire the lease so the next machine
     # can take over (takeoverOnExpiry=true).
     param([string]$ClonePath)
-    $blob = Get-RemoteBranchBlob -RepoPath $ClonePath -Branch 'coordination' -PathInRepo 'coordination/lease.json'
+    $blob = Get-RemoteBranchBlob -RepoPath $ClonePath -Branch 'cqk/coordination' -PathInRepo 'coordination/lease.json'
     $parent = $null
     if ($blob.commit) { $parent = $blob.commit }
     $stale = @{
@@ -30,7 +30,7 @@ function Reset-RemoteLease {
         expiresAt = (Get-Date).AddMinutes(-10).ToString('yyyy-MM-ddTHH:mm:sszzz')
         mode = 'AutoAnchor'; version = '0.1.0'
     }
-    $null = Push-RepoBlobs -RepoPath $ClonePath -Branch 'coordination' `
+    $null = Push-RepoBlobs -RepoPath $ClonePath -Branch 'cqk/coordination' `
         -Blobs @{ 'coordination/lease.json' = (ConvertTo-Json -InputObject $stale -Depth 6) } `
         -ParentCommit $parent -CommitMessage 'lease: expire for test' -MachineId 'ghost'
 }
@@ -39,10 +39,10 @@ function Clear-RemoteMarker {
     # The reset eventId is deterministic, so scenarios that must reach the exec
     # stage need the remote second-layer lock emptied first.
     param([string]$ClonePath)
-    $blob = Get-RemoteBranchBlob -RepoPath $ClonePath -Branch 'coordination' -PathInRepo 'coordination/processed-events.jsonl'
+    $blob = Get-RemoteBranchBlob -RepoPath $ClonePath -Branch 'cqk/coordination' -PathInRepo 'coordination/processed-events.jsonl'
     $parent = $null
     if ($blob.commit) { $parent = $blob.commit }
-    $null = Push-RepoBlobs -RepoPath $ClonePath -Branch 'coordination' `
+    $null = Push-RepoBlobs -RepoPath $ClonePath -Branch 'cqk/coordination' `
         -Blobs @{ 'coordination/processed-events.jsonl' = '' } `
         -ParentCommit $parent -CommitMessage 'anchor: clear marker for test' -MachineId 'ghost'
 }
@@ -77,8 +77,8 @@ try {
     $cfgFile = Join-Path $keeperRoot 'config.json'
     $cfg = New-TestConfig @{
         mode  = 'AutoAnchor'
-        codex = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = $true; anchorPrompt = 'Reply exactly OK.'; maxAnchorsPerDay = 6; minimumAnchorGapMinutes = 1 }
-        github = @{ enabled = $true; repoPath = $repos.clone; coordinationBranch = 'coordination'; historyBranch = 'history' }
+        codex = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 1 } }
+        github = @{ coordination = @{ enabled = $true; repoPath = $repos.clone; branch = 'cqk/coordination' }; historySync = @{ enabled = $true; push = $true; branch = 'cqk/history'; eventsOnly = $true } }
     }
     $null = Write-TestConfigFile $cfgFile $cfg
 
@@ -87,7 +87,7 @@ try {
     $cfgOff = New-TestConfig @{
         mode  = 'MonitorOnly'
         codex = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = $false }
-        github = @{ enabled = $true; repoPath = $repos.clone; coordinationBranch = 'coordination'; historyBranch = 'history' }
+        github = @{ coordination = @{ enabled = $true; repoPath = $repos.clone; branch = 'cqk/coordination' }; historySync = @{ enabled = $true; push = $true; branch = 'cqk/history'; eventsOnly = $true } }
     }
     $null = Write-TestConfigFile (Join-Path $ws 'cfg-off.json') $cfgOff
     $env:CQK_MOCK_MODE = 'reset'
@@ -125,7 +125,7 @@ try {
     Assert-False ("$histText" -match 'Reply exactly OK') 'prompt text never appears in history'
     Assert-True ("$histText" -match '"verified":true') 'before/after verification recorded'
 
-    $marker = Get-RemoteBranchBlob -RepoPath $repos.clone -Branch 'coordination' -PathInRepo 'coordination/processed-events.jsonl'
+    $marker = Get-RemoteBranchBlob -RepoPath $repos.clone -Branch 'cqk/coordination' -PathInRepo 'coordination/processed-events.jsonl'
     Assert-True ($marker.ok -and $marker.reason -eq 'ok') 'remote marker exists'
     Assert-True ("$($marker.content)" -match $expectedId) 'remote marker contains eventId'
 
@@ -214,8 +214,8 @@ try {
     $cfgFile5 = Join-Path $keeperRoot5 'config.json'
     $cfgCap = New-TestConfig @{
         mode  = 'AutoAnchor'
-        codex = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = $true; anchorPrompt = 'Reply exactly OK.'; maxAnchorsPerDay = 1; minimumAnchorGapMinutes = 1 }
-        github = @{ enabled = $true; repoPath = $repos.clone; coordinationBranch = 'coordination'; historyBranch = 'history' }
+        codex = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 1; minimumGapMinutes = 1 } }
+        github = @{ coordination = @{ enabled = $true; repoPath = $repos.clone; branch = 'cqk/coordination' }; historySync = @{ enabled = $true; push = $true; branch = 'cqk/history'; eventsOnly = $true } }
     }
     $null = Write-TestConfigFile $cfgFile5 $cfgCap
     Reset-RemoteLease -ClonePath $repos.clone

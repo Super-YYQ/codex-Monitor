@@ -164,6 +164,8 @@ function Push-RepoBlobs {
 function Sync-HistoryToGitHub {
     # Pushes sanitized event/summary files from local history/ onto the history
     # branch. Failures NEVER propagate: local logs stay and the next run retries.
+    # historySync.push=false blocks every history push; coordination.enabled
+    # governs the lease branch independently (audit plan §6.2).
     param(
         [hashtable]$Config,
         [string]$KeeperRoot,
@@ -172,13 +174,19 @@ function Sync-HistoryToGitHub {
         [string]$MachineId = ''
     )
     $resultTemplate = @{ ok = $false; reason = $null; detail = $null; pushed = 0 }
-    if ($Config.github.enabled -ne $true) {
+    $hist = Get-HistorySyncConfig $Config
+    $coord = Get-CoordinationConfig $Config
+    if ($hist.enabled -ne $true) {
         $resultTemplate.reason = 'disabled'
+        return $resultTemplate
+    }
+    if ($hist.push -ne $true) {
+        $resultTemplate.reason = 'push-disabled'
         return $resultTemplate
     }
     if (-not (Test-GitAvailable)) { $resultTemplate.reason = 'git-unavailable'; return $resultTemplate }
 
-    $repoPath = [System.IO.Path]::GetFullPath([string]$Config.github.repoPath)
+    $repoPath = [System.IO.Path]::GetFullPath($coord.repoPath)
     $issues = Test-LogRepoAllowed -RepoPath $repoPath -KeeperRoot $KeeperRoot
     if ($issues.Count -gt 0) {
         $resultTemplate.reason = 'repo-not-allowed'
@@ -186,7 +194,7 @@ function Sync-HistoryToGitHub {
         return $resultTemplate
     }
 
-    $branch = [string]$Config.github.historyBranch
+    $branch = $hist.branch
     $remote = Get-RemoteBranchBlob -RepoPath $repoPath -Branch $branch -PathInRepo 'history/.keeper'
     if (-not $remote.ok) {
         $resultTemplate.reason = 'unreachable'

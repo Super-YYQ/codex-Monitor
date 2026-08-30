@@ -28,9 +28,9 @@ try {
         param([int]$Poll = 15)
         New-TestConfig @{
             task   = @{ name = $taskName; startWithWindows = $true; runIfNetworkAvailable = $true; wakeToRun = $false }
-            github = @{ enabled = $false }
+            github = @{ coordination = @{ enabled = $false }; historySync = @{ enabled = $false } }
             codex  = @{ command = $mockPath; queryTimeoutSeconds = 10; autoAnchor = $false }
-            pollIntervalMinutes = $Poll
+            poll = @{ intervalMinutes = $Poll; minimumIntervalMinutes = 5 }
         }
     }
     $null = Write-TestConfigFile $cfgFile (New-Cfg 15)
@@ -77,7 +77,7 @@ try {
     Start-TestGroup 'apply-config: below-floor interval rejected'
 
     $badCfg = New-Cfg 1
-    $badCfg.minimumPollIntervalMinutes = 1
+    $badCfg.poll.minimumIntervalMinutes = 1
     $null = Write-TestConfigFile $cfgFile $badCfg
     $rejected = Invoke-ApplyConfig -KeeperRoot $keeperRoot -ConfigFile $cfgFile
     Assert-False $rejected.ok '1-minute polling rejected'

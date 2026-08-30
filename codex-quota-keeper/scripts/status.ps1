@@ -83,7 +83,7 @@ function Get-KeeperStatus {
     $status.configOk = (@($loaded.issues).Count -eq 0)
     $status.mode = [string]$cfg.mode
     $status.autoAnchor = [bool]($cfg.codex.autoAnchor -eq $true)
-    $status.pollIntervalMinutes = [int]$cfg.pollIntervalMinutes
+    $status.pollIntervalMinutes = (Get-PollConfig $cfg).intervalMinutes
 
     $machine = Get-MachineIdentity -Root $KeeperRoot -Label ([string]$cfg.leader.label)
     $status.machineId = [string]$machine.machineId
@@ -131,7 +131,8 @@ function Get-KeeperStatus {
 
     # ---- role + lease ----------------------------------------------------------
     $state = Load-KeeperState $KeeperRoot
-    if ($cfg.github.enabled -ne $true) {
+    $coord = Get-CoordinationConfig $cfg
+    if ($coord.enabled -ne $true) {
         $status.role.role = $(if ($state.role) { $state.role } else { 'LEADER' })
         $status.role.localOnly = $true
     } else {
@@ -148,9 +149,10 @@ function Get-KeeperStatus {
         } else {
             $status.role.role = $(if ($state.role) { $state.role } else { 'UNKNOWN' })
         }
-        $status.git.enabled = $true
-        $status.git.repoPath = [string]$cfg.github.repoPath
-        $reach = Test-RemoteReachable -RepoPath ([System.IO.Path]::GetFullPath([string]$cfg.github.repoPath))
+        $hist = Get-HistorySyncConfig $cfg
+        $status.git.enabled = ($coord.enabled -or $hist.enabled)
+        $status.git.repoPath = $coord.repoPath
+        $reach = Test-RemoteReachable -RepoPath ([System.IO.Path]::GetFullPath($coord.repoPath))
         $status.git.reachable = [bool]$reach.ok
     }
 

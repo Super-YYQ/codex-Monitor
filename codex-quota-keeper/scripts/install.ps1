@@ -38,7 +38,7 @@ function New-KeeperTaskParameters {
         -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$runner`"" `
         -WorkingDirectory (Get-KeeperRoot $KeeperRoot)
 
-    $interval = New-TimeSpan -Minutes ([int]$Config.pollIntervalMinutes)
+    $interval = New-TimeSpan -Minutes (Get-PollConfig $Config).intervalMinutes
     # 3650 days: [TimeSpan]::MaxValue generates out-of-range XML on current
     # Windows builds; 10 years is accepted and effectively indefinite for a poller.
     $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval $interval -RepetitionDuration (New-TimeSpan -Days 3650)

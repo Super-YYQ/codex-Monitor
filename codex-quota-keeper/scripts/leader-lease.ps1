@@ -39,16 +39,17 @@ function Get-RemoteLease {
     # Fetches and parses coordination/lease.json from the remote repo (read-only).
     param([hashtable]$Config, [string]$KeeperRoot)
     $out = @{ reachable = $false; lease = $null; commit = $null; reason = $null; detail = $null }
-    if ($Config.github.enabled -ne $true) {
+    if (-not (Test-CoordinationEnabled $Config)) {
         $out.reason = 'disabled'
         return $out
     }
     if (-not (Test-GitAvailable)) { $out.reason = 'git-unavailable'; return $out }
-    $repoPath = [System.IO.Path]::GetFullPath([string]$Config.github.repoPath)
+    $coord = Get-CoordinationConfig $Config
+    $repoPath = [System.IO.Path]::GetFullPath($coord.repoPath)
     $issues = Test-LogRepoAllowed -RepoPath $repoPath -KeeperRoot $KeeperRoot
     if ($issues.Count -gt 0) { $out.reason = 'repo-not-allowed'; $out.detail = ($issues -join '; '); return $out }
 
-    $branch = [string]$Config.github.coordinationBranch
+    $branch = $coord.branch
     $blob = Get-RemoteBranchBlob -RepoPath $repoPath -Branch $branch -PathInRepo 'coordination/lease.json'
     if (-not $blob.ok) {
         $out.reason = 'unreachable'; $out.detail = $blob.detail
@@ -78,8 +79,8 @@ function Invoke-LeaderElection {
         $out.reason = 'local-only: leader coordination disabled'
         return $out
     }
-    if ($Config.github.enabled -ne $true) {
-        $out.reason = 'local-only: github sync disabled'
+    if (-not (Test-CoordinationEnabled $Config)) {
+        $out.reason = 'local-only: github coordination disabled'
         return $out
     }
 
@@ -119,8 +120,9 @@ function Invoke-LeaderElection {
     $newLease = New-LeaseRecord -OwnerId $me -OwnerLabel ([string]$Machine.label) `
         -Mode ([string]$Config.mode) -TtlMinutes $ttl -ExistingAcquiredAt $existingAcquiredAt
 
-    $repoPath = [System.IO.Path]::GetFullPath([string]$Config.github.repoPath)
-    $branch = [string]$Config.github.coordinationBranch
+    $coord = Get-CoordinationConfig $Config
+    $repoPath = [System.IO.Path]::GetFullPath($coord.repoPath)
+    $branch = $coord.branch
     $json = ConvertTo-Json -InputObject $newLease -Depth 6
     $push = Push-RepoBlobs -RepoPath $repoPath -Branch $branch `
         -Blobs @{ 'coordination/lease.json' = $json } -ParentCommit $remote.commit `
