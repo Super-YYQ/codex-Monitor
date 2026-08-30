@@ -74,7 +74,7 @@
      PASSIVE 不查询、429 退避跳过、认证 2h 退避、失败保留旧数据、坏配置 exit 1、并发锁 SKIP、
      local-only 不碰远程协调分支）。
    - 排障记录：`pwsh -File` 对未声明的命名参数不报错而是塞进 $args——runner 参数统一命名 -ConfigFile。
-8. **步骤8 auto-anchor.ps1（实验，默认关）+ 测试**（本次 commit）
+8. `086dabd` **步骤8 auto-anchor.ps1（实验，默认关）+ 测试**
    - `scripts/auto-anchor.ps1`：Test-AnchorPromptAllowed 白名单（≤120 字符、无 shell 元字符、
      参数数组传递、绝不接受远程下发）；Get-RemoteProcessedEventIds/Add-RemoteProcessedEventIds
      实现 coordination 分支 processed-events.jsonl 第二层 event lock（文档 02 §8）；
@@ -91,11 +91,27 @@
      每日上限端到端。
    - 测试基建：mock 增加 exec 子命令（CQK_MOCK_EXEC）与读取倒计时（验证失败场景）；
      多机器场景共用 origin 时需先过期租约/清空 marker。
+9. **步骤9 install/uninstall/apply-config/status/status-json + 测试**（本次 commit）
+   - `scripts/install.ps1`：环境校验（PS 版本/git/codex/repo 白名单）→ 只读 quota probe →
+     机器标识 → 注册当前用户 Scheduled Task（codex-quota-keeper.Check，Interactive+Limited 无需管理员，
+     MultipleInstances=IgnoreNew、StartWhenAvailable 允许休眠唤醒后补跑、AllowStartIfOnBatteries）；
+     New-KeeperTaskParameters 纯构建可测。RepetitionDuration 用 3650 天（TimeSpan.MaxValue 在 Win11
+     生成越界 XML 被拒）。
+   - `scripts/apply-config.ps1`：校验并重注册任务更新轮询间隔；低于 5 分钟下限被拒绝。
+   - `scripts/uninstall.ps1`：删除任务；本地 history 默认保留，-DeleteHistory 才删除（文档 04 §9）。
+   - `scripts/status.ps1` / `status-json.ps1`：只读状态采集（任务安装/启用/上次结果/下次运行、
+     轮询间隔与配置一致性、codex 可用性、可选 -Live 只读认证探测、本机 runner 进程、
+     Leader/租约视图、最后额度快照（STALE 标记）、最近错误、日志仓库可达性、AutoAnchor OFF/EXPERIMENTAL
+     醒目标识、local-only 模式 MULTI-PC UNSAFE 警告），文本输出对齐文档 02 §4 样例。
+   - `tests/install-status.test.ps1`：7 组全过（任务参数构建、真实注册/30 分钟改期/下限拒绝/
+     status 文本与 JSON 输出/卸载保留或删除历史）。
+   - 修复：`New-ScheduledTaskSettingsSet` 参数名（AllowStartIfOnBatteries/DontStopIfGoingOnBatteries）；
+     dot-source 带 param 的脚本会覆盖调用方同名变量（status-json/apply-config 采集后引用）。
+
 
 
 
 
 
 ## 下一步
-- 步骤9：`scripts/install.ps1` / `uninstall.ps1` / `apply-config.ps1` / `status.ps1` / `status-json.ps1`
-  （Scheduled Task 注册、apply-config 更新轮询、双击状态查询按文档 02 §4 输出）。
+- 步骤10：全量测试、文档对齐核对（验收标准逐条核对）、README 对齐、收尾 commit。
