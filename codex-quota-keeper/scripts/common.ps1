@@ -193,6 +193,113 @@ function Sanitize-Record {
 }
 
 # ---------------------------------------------------------------------------
+# Config accessors (shape-agnostic: v2 nested schema and v1 flat schema both work)
+
+function Get-AutoAnchorConfig {
+    # v2: codex.autoAnchor = @{ enabled; prompt; maxPerDay; minimumGapMinutes }
+    # v1: codex.autoAnchor = bool + codex.anchorPrompt / maxAnchorsPerDay / minimumAnchorGapMinutes
+    param([hashtable]$Config)
+    if ($null -eq $Config -or $null -eq $Config.codex) {
+        return @{ enabled = $false; prompt = ''; maxPerDay = 0; minimumGapMinutes = 0 }
+    }
+    $aa = $Config.codex.autoAnchor
+    if ($aa -is [hashtable]) {
+        return @{
+            enabled            = [bool]($aa.enabled -eq $true)
+            prompt             = [string]$aa.prompt
+            maxPerDay          = [int]$aa.maxPerDay
+            minimumGapMinutes  = [int]$aa.minimumGapMinutes
+        }
+    }
+    return @{
+        enabled            = [bool]($Config.codex.autoAnchor -eq $true)
+        prompt             = [string]$Config.codex.anchorPrompt
+        maxPerDay          = [int]$Config.codex.maxAnchorsPerDay
+        minimumGapMinutes  = [int]$Config.codex.minimumAnchorGapMinutes
+    }
+}
+
+function Test-AutoAnchorEnabled {
+    param([hashtable]$Config)
+    return (Get-AutoAnchorConfig $Config).enabled
+}
+
+function Get-CoordinationConfig {
+    # v2: github.coordination = @{ enabled; repoPath; branch }
+    # v1: github = @{ enabled; repoPath; coordinationBranch }
+    param([hashtable]$Config)
+    $g = $Config.github
+    if ($g -is [hashtable] -and $g.ContainsKey('coordination') -and $g.coordination -is [hashtable]) {
+        return @{
+            enabled  = [bool]($g.coordination.enabled -eq $true)
+            repoPath = [string]$g.coordination.repoPath
+            branch   = [string]$g.coordination.branch
+        }
+    }
+    return @{
+        enabled  = [bool]($g.enabled -eq $true)
+        repoPath = [string]$g.repoPath
+        branch   = [string]$g.coordinationBranch
+    }
+}
+
+function Test-CoordinationEnabled {
+    param([hashtable]$Config)
+    return (Get-CoordinationConfig $Config).enabled
+}
+
+function Get-HistorySyncConfig {
+    # v2: github.historySync = @{ enabled; push; branch; eventsOnly }
+    # v1: github = @{ enabled; push; historyBranch; syncEventsOnly }
+    param([hashtable]$Config)
+    $g = $Config.github
+    if ($g -is [hashtable] -and $g.ContainsKey('historySync') -and $g.historySync -is [hashtable]) {
+        $h = $g.historySync
+        return @{
+            enabled    = [bool]($h.enabled -eq $true)
+            push       = [bool]($h.push -ne $false)
+            branch     = [string]$h.branch
+            eventsOnly = [bool]($h.eventsOnly -ne $false)
+        }
+    }
+    return @{
+        enabled    = [bool]($g.enabled -eq $true)
+        push       = [bool]($g.push -ne $false)
+        branch     = [string]$g.historyBranch
+        eventsOnly = [bool]($g.syncEventsOnly -ne $false)
+    }
+}
+
+function Get-PollConfig {
+    # v2: poll = @{ intervalMinutes; minimumIntervalMinutes }; v1: flat keys.
+    param([hashtable]$Config)
+    $p = $Config.poll
+    if ($p -is [hashtable]) {
+        return @{
+            intervalMinutes        = [int]$p.intervalMinutes
+            minimumIntervalMinutes = [int]$p.minimumIntervalMinutes
+        }
+    }
+    return @{
+        intervalMinutes        = [int]$Config.pollIntervalMinutes
+        minimumIntervalMinutes = [int]$Config.minimumPollIntervalMinutes
+    }
+}
+
+function Get-LoggingConfig {
+    # v2/v1 identical shape today; accessor keeps call sites future-proof.
+    param([hashtable]$Config)
+    $l = $Config.logging
+    if ($l -is [hashtable]) {
+        return @{
+            retentionDays       = [int]$l.retentionDays
+            includeMachineLabel = [bool]($l.includeMachineLabel -eq $true)
+        }
+    }
+    return @{ retentionDays = 90; includeMachineLabel = $false }
+}
+
+# ---------------------------------------------------------------------------
 # Config
 
 function Get-DefaultConfig {

@@ -157,7 +157,9 @@ function Get-KeeperStatus {
     # ---- last quota + last error ------------------------------------------------
     $status.quota.lastReadAt = $state.lastReadAt
     $status.quota.stale = [bool]$state.stale
-    $status.quota.windows = @($state.windows)
+    # flatten buckets for display; only usable windows with a known reset time
+    $flat = Get-FlattenedQuotaWindows (ConvertTo-StateBuckets $state)
+    $status.quota.windows = @($flat | Where-Object { $_.usable -and $null -ne $_.resetsAt })
     $recent = Get-RecentErrors -Root $KeeperRoot -Take 1
     if ($recent.Count -gt 0) {
         $status.lastError = "$($recent[0].event): $($recent[0].error)"
@@ -215,7 +217,8 @@ function Write-StatusText {
         $lines += ('Last quota read     : {0}{1}' -f $Status.quota.lastReadAt, $staleMark)
         foreach ($w in $Status.quota.windows) {
             $reset = ConvertFrom-EpochSeconds ([long]$w.resetsAt)
-            $lines += ('{0,2}h window          : {1}% used, reset {2}' -f ([int]($w.minutes / 60)), [int]$w.usedPercent, $reset.ToString('yyyy-MM-dd HH:mm'))
+            $bucketTag = if ($w.bucketId -and $w.bucketId -ne 'default') { " [$($w.bucketId)]" } else { '' }
+            $lines += ('{0,2}h window{1}     : {2}% used, reset {3}' -f ([int]($w.minutes / 60)), $bucketTag, [int]$w.usedPercent, $reset.ToString('yyyy-MM-dd HH:mm'))
         }
     } else {
         $lines += 'Last quota read     : never (runner has not completed a poll yet)'

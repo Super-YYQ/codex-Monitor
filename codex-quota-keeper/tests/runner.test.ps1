@@ -55,8 +55,11 @@ try {
     $state = Read-JsonFile (Join-Path $keeperRoot 'runtime\state.json')
     Assert-NotNull $state 'state persisted'
     Assert-Equal 'LEADER' $state.role 'role leader'
-    Assert-Equal 2 @($state.windows).Count 'two windows captured'
-    Assert-Equal 300 $state.windows[0].minutes 'primary minutes stored'
+    Assert-Equal 1 @($state.buckets).Count 'one bucket captured'
+    Assert-Equal 'codex-default' $state.buckets[0].bucketId 'bucketId stored'
+    Assert-Equal 2 @($state.buckets[0].windows).Count 'two windows captured'
+    $pri = @($state.buckets[0].windows | Where-Object { $_.windowType -eq 'primary' })[0]
+    Assert-Equal 300 $pri.windowDurationMins 'primary minutes stored'
     Assert-False ([bool]$state.stale) 'not stale'
 
     $evts = Get-LogEventNames $keeperRoot
@@ -81,7 +84,7 @@ try {
     Assert-Contains $evts3 'WINDOW_RESET_OBSERVED' 'reset observed'
 
     $state3 = Read-JsonFile (Join-Path $keeperRoot 'runtime\state.json')
-    $expectedId = Get-Sha256Hex '300|1788062400|reset'
+    $expectedId = Get-Sha256Hex 'codex-default|primary|300|1788062400|reset'
     Assert-Contains $state3.processedEventIds $expectedId 'reset eventId marked processed'
 
     $histFile = Join-Path $keeperRoot 'history\events-2026-08-30.jsonl'
@@ -108,7 +111,7 @@ try {
     $state4 = Read-JsonFile (Join-Path $keeperRoot2 'runtime\state.json')
     Assert-Equal 'PASSIVE' $state4.role 'role passive'
     Assert-Null $state4.lastReadAt 'no quota read performed'
-    Assert-Equal 0 @($state4.windows).Count 'no windows stored on passive'
+    Assert-Equal 0 @($state4.buckets).Count 'no buckets stored on passive'
 
     Start-TestGroup 'runner: 429 error sets backoff, next run skipped'
 
@@ -149,7 +152,7 @@ try {
     Assert-Equal 0 $r8.exitCode 'read-failure run exits 0'
     $state8 = Read-JsonFile (Join-Path $keeperRoot 'runtime\state.json')
     Assert-True ([bool]$state8.stale) 'stale flag set'
-    Assert-Equal 2 @($state8.windows).Count 'previous windows preserved'
+    Assert-Equal 2 @($state8.buckets[0].windows).Count 'previous buckets preserved'
     Assert-NotNull $state8.lastError 'error recorded'
     $env:CQK_MOCK_MODE = 'normal'
 

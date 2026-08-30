@@ -129,7 +129,7 @@
 ## 第二轮：仓库审查整改（依据 doc/codex-Monitor_仓库审查与开发计划_v1.0.docx，基线 5594c1c）
 
 ### 完成记录
-R1. **CQK-001/002 quota v2 解析器重构 + 官方 schema 契约 fixtures**（本次 commit）
+R1. `5586a7b` **CQK-001/002 quota v2 解析器重构 + 官方 schema 契约 fixtures**
     - QuotaSnapshot 模型：buckets[]（bucketId/bucketName/planType/windows[]）+ sourceSchemaVersion +
       accountPlanType + rateLimitReachedType/credits/spendControlReached + rawMetadata。
     - 解析改为白名单制：仅 primary/secondary 视为窗口键；未知键进入 rawMetadata（仅原始类型），
@@ -141,6 +141,17 @@ R1. **CQK-001/002 quota v2 解析器重构 + 官方 schema 契约 fixtures**（�
       mock app-server 升级 v2 形状并新增 multi-bucket/secondary-null/null-fields/credits/
       unknown-meta/unrecognized-root 模式；保留 windows 扁平视图供消费者过渡使用。
 
+R2. **CQK-003 状态机升级 bucket/window 模型**（本次 commit）
+    - 窗口唯一键 = bucketId|windowType（Get-WindowKey/Get-BucketWindowMap），多 bucket 同名窗口互不覆盖。
+    - eventId v2 = SHA-256(bucketId|windowType|windowDuration|previousResetsAt|reset)，跨机确定。
+    - null 字段容错：resetsAt/usedPercent/duration 任一为 null 时跳过对应比较与 reset 推断，保留 partial 状态。
+    - state.json schema=2（buckets 模型）；schema-1 旧 windows 迁移到 default bucket，避免升级后误报 appeared。
+    - 新增配置访问器（Get-AutoAnchorConfig/Get-CoordinationConfig/Get-HistorySyncConfig/Get-PollConfig/
+      Get-LoggingConfig），v1 平铺与 v2 嵌套配置形状均可用，为 CQK-005 配置重构铺路。
+    - runner/status/auto-anchor 消费者切换到 buckets；status 显示 bucket 上下文并跳过不可用窗口。
+    - 又一次函数返回单元素数组被 unroll（ConvertTo-StateBuckets 漏加逗号）——已在函数注释中标注此约束。
+    - 全量 10 个测试文件回归通过。
+
 ### 下一步
-- CQK-003：状态机窗口键升级 bucketId+windowType、eventId v2（SHA-256(bucketId|windowType|duration|prevResetsAt|reset)）、
-  null 字段容错（跳过 reset 判断但保留 partial 状态）、processedEventIds 明确为本地去重。
+- CQK-005/006/007：配置语义重构（v2 schema + 旧配置映射）、includeMachineLabel/push/retention 行为测试、
+  Runner 接入 Invoke-LogRetention、EventRecord 增加 runId。

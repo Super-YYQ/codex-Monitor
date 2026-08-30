@@ -116,7 +116,7 @@ try {
     $state = Read-JsonFile (Join-Path $keeperRoot 'runtime\state.json')
     Assert-Equal 1 $state.anchors.count 'anchor counted'
     Assert-NotNull $state.anchors.lastAnchorAt 'lastAnchorAt recorded'
-    $expectedId = Get-Sha256Hex '300|1788062400|reset'
+    $expectedId = Get-Sha256Hex 'codex-default|primary|300|1788062400|reset'
     Assert-Contains $state.processedEventIds $expectedId 'eventId marked processed'
 
     $histFile = Join-Path $keeperRoot 'history\events-2026-08-30.jsonl'

@@ -130,7 +130,7 @@ function Invoke-AutoAnchorIfNeeded {
     }
 
     # ---- ANCHORING: one minimal exec in an empty work dir --------------------
-    $before = $State.windows
+    $before = $State.buckets
     $workDir = Join-Path (Get-RuntimeDir $KeeperRoot) 'anchor-work'
     Ensure-Directory $workDir | Out-Null
     $execInfo = Get-AnchorExecCommand -CodexPath $CodexPath -Prompt ([string]$Config.codex.anchorPrompt)
@@ -154,7 +154,7 @@ function Invoke-AutoAnchorIfNeeded {
         execExitCode = $exec.exitCode
         verified     = $verified
         before       = $before
-        after        = $(if ($verify.ok) { $verify.windows } else { $null })
+        after        = $(if ($verify.ok) { $verify.buckets } else { $null })
         reason       = $(if (-not $exec.ok) { "exec failed ($($exec.exitCode))" } elseif (-not $verified) { 'post-anchor verification failed; no retry' } else { $null })
     }
 

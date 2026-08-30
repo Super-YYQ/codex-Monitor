@@ -104,7 +104,7 @@ try {
         $events = Get-StateEvents -Previous $state -Current $read -Now (Get-Date)
         $state.stale = $false
         $state.lastGoodReadAt = Get-IsoTimestamp
-        $state.windows = $read.windows
+        $state.buckets = $read.buckets
         $state.rateLimitReachedType = $read.rateLimitReachedType
         $state.schemaUnknown = $read.schemaUnknown
         $state.lastError = $null
