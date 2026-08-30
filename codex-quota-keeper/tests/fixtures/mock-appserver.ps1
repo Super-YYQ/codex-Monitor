@@ -39,6 +39,26 @@ function Get-MockWindow {
 
 if ($mode -eq 'start-failure') { exit 1 }
 
+# --- exec subcommand (AutoAnchor tests): CQK_MOCK_EXEC = ok | fail | timeout ---
+if ($args.Count -ge 1 -and $args[0] -eq 'exec') {
+    switch ($env:CQK_MOCK_EXEC) {
+        'fail' { exit 1 }
+        'timeout' { Start-Sleep -Seconds 120; exit 1 }
+        default { exit 0 }
+    }
+}
+
+# --- read countdown: after the first N successful reads, fail (verify-failure tests) ---
+$script:CountdownFile = $env:CQK_MOCK_READ_COUNTDOWN_FILE
+$script:FailReads = $false
+if ($script:CountdownFile) {
+    $n = 1
+    if (Test-Path $script:CountdownFile) { $n = [int](Get-Content $script:CountdownFile -Raw) }
+    $n = $n - 1
+    Set-Content -Path $script:CountdownFile -Value ([string]$n)
+    if ($n -lt 0) { $script:FailReads = $true }
+}
+
 while ($true) {
     $line = [Console]::In.ReadLine()
     if ($null -eq $line) { break }
@@ -57,6 +77,13 @@ while ($true) {
         'initialized' { }
         'account/rateLimits/read' {
             $id = $msg.id
+            if ($script:FailReads) {
+                Send-MockResponse @{
+                    jsonrpc = '2.0'; id = $id
+                    error   = @{ code = -32002; message = 'mock read failure after countdown' }
+                }
+                continue
+            }
             switch ($mode) {
                 'timeout' { Start-Sleep -Seconds 120; continue }
                 'auth-error' {

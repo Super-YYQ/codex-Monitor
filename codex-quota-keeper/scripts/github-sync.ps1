@@ -118,7 +118,13 @@ function Push-RepoBlobs {
     }
 
     try {
-        $r = Invoke-Git -RepoPath $RepoPath -ArgumentList @('read-tree', '--empty') -TimeoutSeconds 15 -Environment $envs
+        # Seed the temp index from the parent tree so unrelated files already on
+        # the branch survive this commit (only $Blobs paths are replaced).
+        if ($ParentCommit) {
+            $r = Invoke-Git -RepoPath $RepoPath -ArgumentList @('read-tree', $ParentCommit) -TimeoutSeconds 15 -Environment $envs
+        } else {
+            $r = Invoke-Git -RepoPath $RepoPath -ArgumentList @('read-tree', '--empty') -TimeoutSeconds 15 -Environment $envs
+        }
         if (-not $r.ok) { return @{ ok = $false; reason = 'index-failed'; stderr = $r.stderr } }
 
         foreach ($path in $Blobs.Keys) {

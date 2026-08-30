@@ -129,12 +129,14 @@ try {
     if ($lcEvent) { $events += $lcEvent }
 
     # ---- AutoAnchor hook (experimental; module optional, default disabled) ---
+    $anchorHistory = @()
     $isLeader = ($election.role -eq 'LEADER' -and $null -ne $election.lease)
     if ($cfg.mode -eq 'AutoAnchor' -and $cfg.codex.autoAnchor -eq $true) {
         if (Get-Command Invoke-AutoAnchorIfNeeded -ErrorAction SilentlyContinue) {
             $anchorOutcome = Invoke-AutoAnchorIfNeeded -Config $cfg -KeeperRoot $KeeperRoot `
                 -State $state -Events $events -IsLeader $isLeader -Machine $machine -Election $election
             if ($anchorOutcome -and $anchorOutcome.events) { $events += @($anchorOutcome.events) }
+            if ($anchorOutcome -and $anchorOutcome.historyFiles) { $anchorHistory = @($anchorOutcome.historyFiles) }
         } else {
             Write-RunnerLog -Event 'ANCHOR_UNAVAILABLE' -Level 'ERROR' -Error 'autoAnchor enabled but auto-anchor module missing'
         }
@@ -165,9 +167,9 @@ try {
 
     # ---- sanitized history records (significant events only, doc 03 §12) ----
     $significant = @($events | Where-Object {
-            $_ -and $_.event -in @('WINDOW_RESET_OBSERVED', 'LIMIT_REACHED', 'AUTH_ERROR', 'SCHEMA_UNKNOWN', 'LEADER_CHANGED')
+            $_ -and $_.event -in @('WINDOW_RESET_OBSERVED', 'LIMIT_REACHED', 'AUTH_ERROR', 'SCHEMA_UNKNOWN', 'LEADER_CHANGED', 'ANCHOR_EXECUTED', 'ANCHOR_ABORTED')
         })
-    $historyFiles = @()
+    $historyFiles = @($anchorHistory)
     foreach ($ev in $significant) {
         $record = @{
             event        = [string]$ev.event
@@ -176,8 +178,8 @@ try {
             role         = $election.role
             mode         = [string]$cfg.mode
             windows      = $read.windows
-            anchor       = $null
-            error        = $ev.message
+            anchor       = $ev.anchor
+            error        = $(if ($ev.message) { $ev.message } else { $ev.reason })
         }
         $historyFiles += (Write-HistoryEvent -Root $KeeperRoot -Record $record -When $now)
     }
@@ -206,7 +208,9 @@ try {
     # ---- sync sanitized history (failure-isolated, doc 03 §12) ---------------
     if (-not $NoSync) {
         $commitMessage = 'quota: daily summary'
-        if (@($significant | Where-Object { $_.event -eq 'WINDOW_RESET_OBSERVED' }).Count -gt 0) {
+        if (@($significant | Where-Object { $_.event -eq 'ANCHOR_EXECUTED' }).Count -gt 0) {
+            $commitMessage = 'quota: anchor executed'
+        } elseif (@($significant | Where-Object { $_.event -eq 'WINDOW_RESET_OBSERVED' }).Count -gt 0) {
             $commitMessage = 'quota: reset observed'
         } elseif (@($significant | Where-Object { $_.event -eq 'LEADER_CHANGED' }).Count -gt 0) {
             $commitMessage = 'keeper: leader changed'

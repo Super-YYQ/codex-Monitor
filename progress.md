@@ -59,7 +59,7 @@
      preflight（happy/probe 成功/probe 失败/缺 codex/坏配置/坏仓库）。
    - 修复 tests/run-all.ps1：改为每个测试文件独立 pwsh 子进程运行（原方案子 scope 计数器不互通）；
      7 个测试文件全过。
-7. **步骤7 runner.ps1 主流程 + 端到端测试**（本次 commit）
+7. `d6df316` **步骤7 runner.ps1 主流程 + 端到端测试**
    - `scripts/runner.ps1`：完整实现文档 03 §5 主流程——LoadConfig → 双层本地互斥（被占则 SKIP 退出 0）→
      preflight（失败 exit 1）→ 退避检查（BACKOFF_SKIP）→ Leader 选举（PASSIVE 只写心跳不碰 Codex）→
      只读额度轮询 → 事件识别 → LEADER_CHANGED → AutoAnchor 钩子（auto-anchor.ps1 存在才启用）→
@@ -74,10 +74,28 @@
      PASSIVE 不查询、429 退避跳过、认证 2h 退避、失败保留旧数据、坏配置 exit 1、并发锁 SKIP、
      local-only 不碰远程协调分支）。
    - 排障记录：`pwsh -File` 对未声明的命名参数不报错而是塞进 $args——runner 参数统一命名 -ConfigFile。
+8. **步骤8 auto-anchor.ps1（实验，默认关）+ 测试**（本次 commit）
+   - `scripts/auto-anchor.ps1`：Test-AnchorPromptAllowed 白名单（≤120 字符、无 shell 元字符、
+     参数数组传递、绝不接受远程下发）；Get-RemoteProcessedEventIds/Add-RemoteProcessedEventIds
+     实现 coordination 分支 processed-events.jsonl 第二层 event lock（文档 02 §8）；
+     Invoke-AutoAnchorIfNeeded 完整守卫链：本地幂等守卫 → 远程查重（不可达 fail-closed）→
+     prompt 白名单 → codex exec（空工作目录 runtime/anchor-work）→ 二次读取验证 →
+     ANCHORED / ABORTED（验证失败不重试模型）→ before/after 快照写入 history（prompt 文本永不落盘）。
+   - 守卫拒绝（未执行任何调用）记 ANCHOR_SKIPPED；进入执行后失败才记 ANCHOR_ABORTED。
+   - runner 集成：anchor 事件进入 history 同步，commit message `quota: anchor executed`。
+   - **修复 Push-RepoBlobs 关键缺陷**：原实现每次提交从空树构建，会抹掉分支上已有文件
+     （租约续期会清掉 processed-events 标记、history 分支会丢历史文件）；
+     现改为 `read-tree <parent>` 保留原树仅覆盖指定路径，并全量回归验证。
+   - `tests/auto-anchor.test.ps1`：8 组全过——默认双开关不执行、完整流程（重置→exec→验证→ANCHORED）、
+     同事件只执行一次、第二台机器被远程 marker 拦截、exec 失败 ABORTED、验证失败 ABORTED 不重试、
+     每日上限端到端。
+   - 测试基建：mock 增加 exec 子命令（CQK_MOCK_EXEC）与读取倒计时（验证失败场景）；
+     多机器场景共用 origin 时需先过期租约/清空 marker。
+
 
 
 
 
 ## 下一步
-- 步骤8：`scripts/auto-anchor.ps1`（实验功能默认关：codex exec 最小 prompt、before/after 快照、
-  验证失败 ABORTED 不重试、每日上限/最小间隔/eventId 幂等 + coordination 分支第二层 event lock）+ 测试。
+- 步骤9：`scripts/install.ps1` / `uninstall.ps1` / `apply-config.ps1` / `status.ps1` / `status-json.ps1`
+  （Scheduled Task 注册、apply-config 更新轮询、双击状态查询按文档 02 §4 输出）。
