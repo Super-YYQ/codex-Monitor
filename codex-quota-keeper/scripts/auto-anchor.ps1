@@ -34,49 +34,108 @@ function Get-AnchorExecCommand {
     return (Resolve-ExecutableLaunchSpec -Executable $CodexPath -ArgumentList @('exec', '--skip-git-repo-check', $Prompt))
 }
 
-function Get-RemoteProcessedEventIds {
-    # Second-layer event lock on the coordination branch (doc 02 §8): one reset
-    # event may fire at most once across ALL machines, not just this one.
-    param([hashtable]$Config, [string]$KeeperRoot)
-    $out = @{ reachable = $false; ids = @(); reason = $null }
-    if (-not (Test-CoordinationEnabled $Config)) {
-        # No shared coordination point: cannot prove another machine hasn't anchored.
-        $out.reason = 'disabled'
-        return $out
-    }
+function Get-AnchorEventCoordPath {
+    param([string]$EventId)
+    return 'coordination/events/' + $EventId + '.json'
+}
+
+function Get-AnchorEventState {
+    # Reads coordination/events/<eventId>.json (read-only).
+    param([hashtable]$Config, [string]$KeeperRoot, [string]$EventId)
+    $out = @{ reachable = $false; exists = $false; record = $null; commit = $null; reason = $null }
+    if (-not (Test-CoordinationEnabled $Config)) { $out.reason = 'disabled'; return $out }
+    if (-not (Test-GitAvailable)) { $out.reason = 'git-unavailable'; return $out }
     $coord = Get-CoordinationConfig $Config
-    $repoPath = [System.IO.Path]::GetFullPath($coord.repoPath)
-    $blob = Get-RemoteBranchBlob -RepoPath $repoPath -Branch $coord.branch -PathInRepo 'coordination/processed-events.jsonl'
+    $blob = Get-RemoteBranchBlob -RepoPath ([System.IO.Path]::GetFullPath($coord.repoPath)) -Branch $coord.branch `
+        -PathInRepo (Get-AnchorEventCoordPath $EventId)
     if (-not $blob.ok) { $out.reason = 'unreachable'; return $out }
     $out.reachable = $true
+    $out.commit = $blob.commit
     if ($blob.reason -eq 'ok' -and $blob.content) {
-        $out.ids = @($blob.content -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        $rec = ConvertFrom-JsonSafe $blob.content
+        if ($rec -is [hashtable]) { $out.exists = $true; $out.record = $rec }
     }
     return $out
 }
 
-function Add-RemoteProcessedEventIds {
-    # Best-effort remote marker push after a local anchor decision.
-    param([hashtable]$Config, [string]$KeeperRoot, [string[]]$EventIds, [hashtable]$Machine)
-    if (-not (Test-CoordinationEnabled $Config)) { return @{ ok = $false; reason = 'disabled' } }
+function Push-AnchorEventState {
+    # CAS-writes the anchor event record (CLAIMED / COMPLETED / FAILED / EXPIRED).
+    param(
+        [hashtable]$Config,
+        [string]$KeeperRoot,
+        [string]$EventId,
+        [hashtable]$Record,
+        [hashtable]$Machine
+    )
     $coord = Get-CoordinationConfig $Config
     $repoPath = [System.IO.Path]::GetFullPath($coord.repoPath)
-    $branch = $coord.branch
-    $binding = Test-LogRepoBinding -RepoPath $repoPath -KeeperRoot $KeeperRoot -Branch $branch
+    $binding = Test-LogRepoBinding -RepoPath $repoPath -KeeperRoot $KeeperRoot -Branch $coord.branch
     if ($binding) { return @{ ok = $false; reason = "binding: $binding" } }
-    $blob = Get-RemoteBranchBlob -RepoPath $repoPath -Branch $branch -PathInRepo 'coordination/processed-events.jsonl'
+    $blob = Get-RemoteBranchBlob -RepoPath $repoPath -Branch $coord.branch -PathInRepo (Get-AnchorEventCoordPath $EventId)
     if (-not $blob.ok) { return @{ ok = $false; reason = 'unreachable' } }
-    $existing = @()
-    if ($blob.reason -eq 'ok' -and $blob.content) {
-        $existing = @($blob.content -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-    }
-    $merged = @($existing)
-    foreach ($id in $EventIds) { if ($merged -notcontains $id) { $merged += $id } }
-    $content = ($merged -join "`n") + "`n"
-    $push = Push-RepoBlobs -RepoPath $repoPath -Branch $branch `
-        -Blobs @{ 'coordination/processed-events.jsonl' = $content } -ParentCommit $blob.commit `
-        -CommitMessage "anchor: mark processed $($Machine.machineId)" -MachineId ([string]$Machine.machineId)
+    $parent = $null
+    if ($blob.commit) { $parent = $blob.commit }
+    $push = Push-RepoBlobs -RepoPath $repoPath -Branch $coord.branch `
+        -Blobs @{ (Get-AnchorEventCoordPath $EventId) = (ConvertTo-Json -InputObject $Record -Depth 6) } `
+        -ParentCommit $parent -CommitMessage "anchor: $($Record.state) $EventId" `
+        -MachineId ([string]$Machine.machineId)
     return @{ ok = $push.ok; reason = $push.reason }
+}
+
+function Claim-AnchorEvent {
+    # Distributed at-most-once side-effect claim (audit plan v1.0 section 5, CQK-013):
+    # the event file is CREATED via CAS push while it does not exist. A rejected
+    # push means another machine claimed first. Any existing event file
+    # (CLAIMED / COMPLETED / FAILED / EXPIRED) blocks execution: an uncertain
+    # outcome must never be retried.
+    param(
+        [hashtable]$Config,
+        [string]$KeeperRoot,
+        [string]$EventId,
+        [hashtable]$Machine,
+        [int]$ClaimMinutes
+    )
+    $state = Get-AnchorEventState -Config $Config -KeeperRoot $KeeperRoot -EventId $EventId
+    if (-not $state.reachable) { return @{ ok = $false; reason = "remote unavailable ($($state.reason)); fail closed" } }
+    if ($state.exists) {
+        $st = [string]$state.record.state
+        return @{ ok = $false; reason = "event already $st (by $($state.record.ownerId)); no retry" }
+    }
+    $record = @{
+        schema         = 1
+        eventId        = $EventId
+        state          = 'CLAIMED'
+        ownerId        = [string]$Machine.machineId
+        claimedAt      = Get-IsoTimestamp
+        claimExpiresAt = (Get-Date).AddMinutes($ClaimMinutes).ToString('yyyy-MM-ddTHH:mm:sszzz')
+        completedAt    = $null
+        result         = $null
+    }
+    $push = Push-AnchorEventState -Config $Config -KeeperRoot $KeeperRoot -EventId $EventId -Record $record -Machine $Machine
+    if (-not $push.ok) { return @{ ok = $false; reason = "claim push rejected ($($push.reason)); another machine claimed first" } }
+    return @{ ok = $true; reason = $null }
+}
+
+function Test-LeaseRevalidation {
+    # CQK-014: after claiming, re-confirm the leader lease is still ours AND has
+    # enough remaining time for the safe execution window.
+    param([hashtable]$Config, [string]$KeeperRoot, [hashtable]$Machine, [int]$RequiredMinutes)
+    $election = Invoke-LeaderElection -Config $Config -KeeperRoot $KeeperRoot -Machine $Machine
+    if ($election.role -ne 'LEADER' -or $null -eq $election.lease) {
+        return @{ ok = $false; reason = "lease lost during claim (role=$($election.role))" }
+    }
+    if ([string]$election.lease.ownerId -ne [string]$Machine.machineId) {
+        return @{ ok = $false; reason = 'lease owner changed during claim' }
+    }
+    $expires = [DateTimeOffset]::MinValue
+    if ([DateTimeOffset]::TryParse([string]$election.lease.expiresAt, [ref]$expires)) {
+        $remaining = ($expires.LocalDateTime - (Get-Date)).TotalMinutes
+        if ($remaining -lt $RequiredMinutes) {
+            $msg = 'lease remaining {0:n1} min < required {1} min' -f $remaining, $RequiredMinutes
+            return @{ ok = $false; reason = $msg }
+        }
+    }
+    return @{ ok = $true; reason = $null }
 }
 
 function Invoke-AutoAnchorIfNeeded {
@@ -102,18 +161,33 @@ function Invoke-AutoAnchorIfNeeded {
         return $out
     }
 
-    # Second-layer lock: remote processed-event markers.
-    $remoteIds = Get-RemoteProcessedEventIds -Config $Config -KeeperRoot $KeeperRoot
-    if (-not $remoteIds.reachable) {
-        $out.events += ,@{ event = 'ANCHOR_ABORTED'; reason = "remote event lock unavailable ($($remoteIds.reason)); fail closed"
-                          anchor = @{ phase = 'GUARD'; reason = 'remote-lock-unavailable' } }
-        return $out
+    # Distributed claim (CQK-013): CAS-create the event file for every pending
+    # eventId. Any existing/blocked event fails closed for that event.
+    $execWindowMinutes = [Math]::Max(2, [int][Math]::Ceiling([int]$Config.codex.queryTimeoutSeconds * 3 / 60.0) + 1)
+    $claimed = @()
+    foreach ($id in @($guard.eventIds)) {
+        $claim = Claim-AnchorEvent -Config $Config -KeeperRoot $KeeperRoot -EventId $id -Machine $Machine -ClaimMinutes ($execWindowMinutes * 2)
+        if ($claim.ok) { $claimed += $id }
+        else {
+            $out.events += ,@{ event = 'ANCHOR_ABORTED'; reason = "event $id not claimed: $($claim.reason)"
+                              anchor = @{ phase = 'CLAIM'; eventId = $id; reason = $claim.reason } }
+        }
     }
-    $pending = @($guard.eventIds | Where-Object { $remoteIds.ids -notcontains $_ })
-    if ($pending.Count -eq 0) {
-        $out.events += ,@{ event = 'ANCHOR_ABORTED'; reason = 'reset event already anchored by another machine'
-                          anchor = @{ phase = 'GUARD'; reason = 'remote-duplicate' } }
-        foreach ($id in $guard.eventIds) { Add-ProcessedEvent -State $State -EventId $id }
+    if ($claimed.Count -eq 0) { return $out }
+
+    # CQK-014: revalidate the leader lease BEFORE any model call. If it cannot be
+    # proven, the claimed events are marked EXPIRED: uncertain outcome never retries.
+    $revalid = Test-LeaseRevalidation -Config $Config -KeeperRoot $KeeperRoot -Machine $Machine -RequiredMinutes $execWindowMinutes
+    if (-not $revalid.ok) {
+        foreach ($id in $claimed) {
+            $null = Push-AnchorEventState -Config $Config -KeeperRoot $KeeperRoot -EventId $id `
+                -Record @{ schema = 1; eventId = $id; state = 'EXPIRED'; ownerId = [string]$Machine.machineId;
+                           claimedAt = Get-IsoTimestamp; claimExpiresAt = Get-IsoTimestamp; completedAt = $null;
+                           result = "lease revalidation failed: $($revalid.reason)" } -Machine $Machine
+            Add-ProcessedEvent -State $State -EventId $id
+        }
+        $out.events += ,@{ event = 'ANCHOR_ABORTED'; reason = "lease revalidation failed: $($revalid.reason); no model call"
+                          anchor = @{ phase = 'REVALIDATE'; reason = $revalid.reason } }
         return $out
     }
 
@@ -172,14 +246,22 @@ function Invoke-AutoAnchorIfNeeded {
         $out.events += ,@{ event = 'ANCHOR_ABORTED'; reason = $anchorInfo.reason; anchor = $anchorInfo }
     }
 
-    # Remote marker (best effort; a failure here cannot undo the exec).
-    $null = Add-RemoteProcessedEventIds -Config $Config -KeeperRoot $KeeperRoot -EventIds $pending -Machine $Machine
+    # Complete the claimed events: COMPLETED on verified success, FAILED otherwise.
+    # A failed completion push leaves CLAIMED, which blocks every other machine
+    # (uncertain outcome is never retried).
+    $finalState = $(if ($verified -and $exec.ok) { 'COMPLETED' } else { 'FAILED' })
+    foreach ($id in $claimed) {
+        $null = Push-AnchorEventState -Config $Config -KeeperRoot $KeeperRoot -EventId $id `
+            -Record @{ schema = 1; eventId = $id; state = $finalState; ownerId = [string]$Machine.machineId;
+                       claimedAt = $startedAt; claimExpiresAt = $null; completedAt = $endedAt;
+                       result = $anchorInfo.reason } -Machine $Machine
+    }
 
     # History record with before/after snapshots (doc 01 §6): durable outbox
     # entry + local JSONL audit copy.
     $logging = Get-LoggingConfig $Config
     $anchorRecord = @{
-        eventId      = [string]$pending[0]
+        eventId      = [string]$claimed[0]
         event        = $(if ($verified -and $exec.ok) { 'ANCHOR_EXECUTED' } else { 'ANCHOR_ABORTED' })
         machineId    = [string]$Machine.machineId
         machineLabel = [string]$Machine.label

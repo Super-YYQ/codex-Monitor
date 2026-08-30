@@ -35,16 +35,19 @@ function Reset-RemoteLease {
         -ParentCommit $parent -CommitMessage 'lease: expire for test' -MachineId 'ghost'
 }
 
-function Clear-RemoteMarker {
+function Clear-AnchorEvents {
     # The reset eventId is deterministic, so scenarios that must reach the exec
-    # stage need the remote second-layer lock emptied first.
+    # stage need the remote claim files removed first.
     param([string]$ClonePath)
-    $blob = Get-RemoteBranchBlob -RepoPath $ClonePath -Branch 'cqk/coordination' -PathInRepo 'coordination/processed-events.jsonl'
+    $listing = Invoke-TestGit -RepoPath $ClonePath -ArgumentList @('ls-tree', '-r', '--name-only', 'origin/cqk/coordination')
+    if (-not $listing.ok) { return }
+    $eventFiles = @(($listing.stdout -split "`n") | Where-Object { $_ -match '^coordination/events/' })
+    if (@($eventFiles).Count -eq 0) { return }
+    $blob = Get-RemoteBranchBlob -RepoPath $ClonePath -Branch 'cqk/coordination' -PathInRepo 'coordination/lease.json'
     $parent = $null
     if ($blob.commit) { $parent = $blob.commit }
-    $null = Push-RepoBlobs -RepoPath $ClonePath -Branch 'cqk/coordination' `
-        -Blobs @{ 'coordination/processed-events.jsonl' = '' } `
-        -ParentCommit $parent -CommitMessage 'anchor: clear marker for test' -MachineId 'ghost'
+    $null = Push-RepoBlobs -RepoPath $ClonePath -Branch 'cqk/coordination' -Blobs @{} `
+        -RemovePaths $eventFiles -ParentCommit $parent -CommitMessage 'anchor: clear claims for test' -MachineId 'ghost'
 }
 
 function Invoke-RunnerSub {
@@ -126,9 +129,9 @@ try {
     Assert-False ("$histText" -match 'Reply exactly OK') 'prompt text never appears in history'
     Assert-True ("$histText" -match '"verified":true') 'before/after verification recorded'
 
-    $marker = Get-RemoteBranchBlob -RepoPath $repos.clone -Branch 'cqk/coordination' -PathInRepo 'coordination/processed-events.jsonl'
-    Assert-True ($marker.ok -and $marker.reason -eq 'ok') 'remote marker exists'
-    Assert-True ("$($marker.content)" -match $expectedId) 'remote marker contains eventId'
+    $claimFile = Get-RemoteBranchBlob -RepoPath $repos.clone -Branch 'cqk/coordination' -PathInRepo ('coordination/events/' + $expectedId + '.json')
+    Assert-True ($claimFile.ok -and $claimFile.reason -eq 'ok') 'remote claim event file exists'
+    Assert-True ("$($claimFile.content)" -match 'COMPLETED') 'claim state COMPLETED'
 
     Start-TestGroup 'anchor: idempotency - same reset never re-anchored'
 
@@ -177,7 +180,7 @@ try {
     $env:CQK_MOCK_MODE = 'normal'
     $r5 = Invoke-RunnerSub -KeeperRoot $keeperRoot3 -ConfigFile $cfgFile3
     Clear-Backoff $keeperRoot3
-    Clear-RemoteMarker -ClonePath $repos.clone
+    Clear-AnchorEvents -ClonePath $repos.clone
     $env:CQK_MOCK_MODE = 'reset'
     $env:CQK_MOCK_EXEC = 'fail'
     $r6 = Invoke-RunnerSub -KeeperRoot $keeperRoot3 -ConfigFile $cfgFile3
@@ -199,7 +202,7 @@ try {
     $env:CQK_MOCK_MODE = 'normal'
     $r7 = Invoke-RunnerSub -KeeperRoot $keeperRoot4 -ConfigFile $cfgFile4
     Clear-Backoff $keeperRoot4
-    Clear-RemoteMarker -ClonePath $repos.clone
+    Clear-AnchorEvents -ClonePath $repos.clone
     $countdownFile = Join-Path $ws 'countdown4.txt'
     Set-Content -Path $countdownFile -Value '1'
     $env:CQK_MOCK_READ_COUNTDOWN_FILE = $countdownFile
@@ -224,7 +227,7 @@ try {
     $null = Write-TestConfigFile $cfgFile5 $cfgCap
     $null = Initialize-LogRepo -RepoPath $repos.clone -KeeperRoot $keeperRoot5
     Reset-RemoteLease -ClonePath $repos.clone
-    Clear-RemoteMarker -ClonePath $repos.clone
+    Clear-AnchorEvents -ClonePath $repos.clone
     $env:CQK_MOCK_MODE = 'normal'
     $r9 = Invoke-RunnerSub -KeeperRoot $keeperRoot5 -ConfigFile $cfgFile5
     Clear-Backoff $keeperRoot5
@@ -237,7 +240,7 @@ try {
     $state5.processedEventIds = @()
     $state5.anchors = @{ day = (Get-Date).ToString('yyyy-MM-dd'); count = 1; lastAnchorAt = $null }
     Save-KeeperState -Root $keeperRoot5 -State $state5
-    Clear-RemoteMarker -ClonePath $repos.clone
+    Clear-AnchorEvents -ClonePath $repos.clone
     $r11 = Invoke-RunnerSub -KeeperRoot $keeperRoot5 -ConfigFile $cfgFile5
     Assert-Equal 0 $r11.exitCode 'cap run 2 ok'
     $state5b = Read-JsonFile (Join-Path $keeperRoot5 'runtime\state.json')

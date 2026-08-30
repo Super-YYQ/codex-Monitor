@@ -215,6 +215,18 @@ R7. **CQK-011/012 专用仓库绑定 + 脱敏加固**（本次 commit）
     - 测试：绑定防篡改/幂等/业务分支拒绝/marker 缺失/未初始化拒绝 + token 脱敏断言；
       全量 11 个测试文件回归通过。
 
+R8. **CQK-013/014 AutoAnchor 分布式 Claim 重构**（本次 commit）
+    - 新协调数据：coordination/events/<eventId>.json {state: CLAIMED|COMPLETED|FAILED|EXPIRED,
+      ownerId, claimedAt, claimExpiresAt, completedAt, result}，替代旧的 processed-events 事后标记。
+    - Claim-AnchorEvent：事件文件不存在时 CAS push 创建 CLAIMED；push 被拒 = 他机抢占；任何已存在
+      事件文件（CLAIMED/COMPLETED/FAILED/EXPIRED）一律阻止执行——不确定结果永不重试，宁可漏一次。
+    - CQK-014 Test-LeaseRevalidation：Claim 成功后、模型调用前重新确认租约仍属本机且剩余时间
+      覆盖安全执行窗口；不满足 → 事件标记 EXPIRED 且绝不调用模型。
+    - 执行后 COMPLETED/FAILED；COMPLETED push 失败留在 CLAIMED，同样阻止他机重试。
+    - 移除 Get/Add-RemoteProcessedEventIds；processedEventIds 仅本地去重（§13）。
+    - Push-RepoBlobs 支持 -RemovePaths（测试清理用）且空 Blobs + RemovePaths 不再提前返回。
+    - 全量 11 个测试文件回归通过。
+
 ### 下一步
-- CQK-013/014：AutoAnchor 远程事件 CAS Claim（coordination/events/<eventId>.json，
-  CLAIMED→COMPLETED/FAILED）+ 执行前 Leader 租约重验证。
+- CQK-015/016：双机并发 Claim 故障注入测试、backoff/接管并发测试补充；
+  CQK-017~019：CI 与工程化。

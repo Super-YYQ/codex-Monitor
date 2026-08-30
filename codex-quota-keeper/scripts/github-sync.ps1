@@ -198,16 +198,19 @@ function Push-RepoBlobs {
         [hashtable]$Blobs,
         [string]$ParentCommit,
         [string]$CommitMessage,
-        [string]$MachineId = ''
+        [string]$MachineId = '',
+        [string[]]$RemovePaths = @()
     )
-    if ($Blobs.Count -eq 0) { return @{ ok = $false; reason = 'nothing-to-commit'; stderr = $null } }
-
     # Carry the repository marker on every branch so remote state is self-describing.
     $markerPath = Join-Path $RepoPath $script:CQK_MARKER_FILE
     if (Test-Path -LiteralPath $markerPath) {
         if (-not $Blobs.ContainsKey($script:CQK_MARKER_FILE)) {
             $Blobs[$script:CQK_MARKER_FILE] = [System.IO.File]::ReadAllText($markerPath)
         }
+    }
+
+    if ($Blobs.Count -eq 0 -and @($RemovePaths).Count -eq 0) {
+        return @{ ok = $false; reason = 'nothing-to-commit'; stderr = $null }
     }
 
     $indexFile = Join-Path ([System.IO.Path]::GetTempPath()) ("cqk-index-" + [guid]::NewGuid().ToString('N'))
@@ -230,6 +233,11 @@ function Push-RepoBlobs {
             $r = Invoke-Git -RepoPath $RepoPath -ArgumentList @('read-tree', '--empty') -TimeoutSeconds 15 -Environment $envs
         }
         if (-not $r.ok) { return @{ ok = $false; reason = 'index-failed'; stderr = $r.stderr } }
+
+        foreach ($rmPath in $RemovePaths) {
+            $rm = Invoke-Git -RepoPath $RepoPath -ArgumentList @('update-index', '--force-remove', $rmPath) -TimeoutSeconds 15 -Environment $envs
+            if (-not $rm.ok) { return @{ ok = $false; reason = 'remove-failed'; stderr = $rm.stderr } }
+        }
 
         foreach ($path in $Blobs.Keys) {
             $tmpBlob = Join-Path ([System.IO.Path]::GetTempPath()) ("cqk-blob-" + [guid]::NewGuid().ToString('N'))
