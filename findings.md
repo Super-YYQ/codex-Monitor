@@ -16,4 +16,14 @@
 
 ## 进度
 - [x] 提取并阅读 4 份 .docx（已转 UTF-8 到设计要点）。
-- [ ] 实现（见 task_plan.md 分步）。
+- [x] 实现（见 task_plan.md 分步，10 步全部完成，见 progress.md 完成记录）。
+
+## 实现期新增发现（踩坑记录）
+- `pwsh -File` 对未声明的命名参数静默塞入 `$args` 而不报错。
+- 子进程 stdin 编码必须 `UTF8Encoding($false)`；`[Encoding]::UTF8` 首写会带 BOM 破坏 JSON-RPC。
+- PS7 `ConvertFrom-Json` 会把 ISO 时间字符串自动转 `[DateTime]`，重新 `[string]` 化会变本地化格式。
+- PowerShell 函数返回单元素数组会被 unroll（`return ,$list` 防御）。
+- `@($null).Count` 为 1（判断空集合需先过滤 null）。
+- dot-source 带 `param` 的脚本会在调用方作用域用默认值覆盖同名变量。
+- Win11 拒绝 `RepetitionDuration=[TimeSpan]::MaxValue`（越界 XML），用 3650 天代替。
+- git plumbing 提交必须 `read-tree <parent>` 保留原树，否则每次推送会抹掉分支上其它文件。

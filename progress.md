@@ -91,7 +91,7 @@
      每日上限端到端。
    - 测试基建：mock 增加 exec 子命令（CQK_MOCK_EXEC）与读取倒计时（验证失败场景）；
      多机器场景共用 origin 时需先过期租约/清空 marker。
-9. **步骤9 install/uninstall/apply-config/status/status-json + 测试**（本次 commit）
+9. `48edc35` **步骤9 install/uninstall/apply-config/status/status-json + 测试**
    - `scripts/install.ps1`：环境校验（PS 版本/git/codex/repo 白名单）→ 只读 quota probe →
      机器标识 → 注册当前用户 Scheduled Task（codex-quota-keeper.Check，Interactive+Limited 无需管理员，
      MultipleInstances=IgnoreNew、StartWhenAvailable 允许休眠唤醒后补跑、AllowStartIfOnBatteries）；
@@ -107,6 +107,19 @@
      status 文本与 JSON 输出/卸载保留或删除历史）。
    - 修复：`New-ScheduledTaskSettingsSet` 参数名（AllowStartIfOnBatteries/DontStopIfGoingOnBatteries）；
      dot-source 带 param 的脚本会覆盖调用方同名变量（status-json/apply-config 采集后引用）。
+10. **步骤10 全量核对 + 收尾**（本次 commit）
+    - 全量测试：`pwsh tests/run-all.ps1` 10 个测试文件全部通过（common / quota-client / state-machine /
+      logger / github-sync / leader-lease / preflight / runner / auto-anchor / install-status）。
+    - 交付物核对（对齐 doc/03 §2 目录）：scripts/ 14 个脚本齐备（含 common/status-json 两个实现期补充），
+      tests/ 10 个测试文件 + mock fixture + run-all 入口，4 个 .cmd 入口与 config.example.json 就位；
+      config.example.json 补齐文档 02 §6 的 task 段。
+    - 敏感信息扫描：仓库无 token/密钥；auth.json 仅在注释与文档中以禁止性说明出现；
+      脱敏由测试断言保障（token/refresh_token/Bearer/sk- 均被清除）。
+    - 验收标准逐条核对（doc/04 §9）：零常驻（runner 单次运行退出）、status 只读秒级返回、
+      租约 CAS 保证单 Leader、MonitorOnly 默认且无模型调用路径、429/认证退避、
+      history 仅净化数据、TTL 接管、卸载删任务/历史可选——均有对应实现与测试。
+    - task_plan.md / findings.md 更新为完成状态，并记录实现期踩坑清单。
+
 
 
 
@@ -114,4 +127,5 @@
 
 
 ## 下一步
-- 步骤10：全量测试、文档对齐核对（验收标准逐条核对）、README 对齐、收尾 commit。
+- 开发任务全部完成。后续使用：复制 config.example.json → config.json 后运行 install.cmd；
+  AutoAnchor 保持关闭，除非用户明确接受 doc/04 §11 风险清单。

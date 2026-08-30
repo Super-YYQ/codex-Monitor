@@ -55,14 +55,14 @@ codex-quota-keeper/
 9. install/uninstall/apply-config + status/status-json。
 10. 全量断言、文档对齐核对、收尾。
 
-## 状态
-- [ ] 骨架
-- [ ] common
-- [ ] quota-client
-- [ ] state-machine
-- [ ] logger
-- [ ] preflight/lease/sync
-- [ ] runner
-- [ ] auto-anchor
-- [ ] install/status
-- [ ] 收尾核对
+## 状态（2026-08-30 全部完成）
+- [x] 骨架
+- [x] common
+- [x] quota-client
+- [x] state-machine
+- [x] logger
+- [x] preflight/lease/sync
+- [x] runner
+- [x] auto-anchor
+- [x] install/status
+- [x] 收尾核对

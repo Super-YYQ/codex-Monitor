@@ -33,5 +33,12 @@
   "logging": {
     "retentionDays": 90,
     "includeMachineLabel": true
+  },
+
+  "task": {
+    "name": "CodexQuotaKeeper.Check",
+    "startWithWindows": true,
+    "runIfNetworkAvailable": true,
+    "wakeToRun": false
   }
 }
