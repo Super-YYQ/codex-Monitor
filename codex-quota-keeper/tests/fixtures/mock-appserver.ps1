@@ -12,6 +12,8 @@
 #   swapped       primary carries a 10080-min window (identify by windowDurationMins, not name)
 #   fractional    usedPercent with decimals
 #   limit-reached rateLimitReachedType set on the result
+#   rate-limit    error response mentioning 429/usage limit (backoff path)
+#   reset         primary window renewed: old resetsAt past, new resetsAt future
 #   unknown-schema rateLimits shape unrecognized -> client must fail closed
 #   auth-error    error response mentioning authentication
 #   protocol-error error response unrelated to auth
@@ -71,6 +73,13 @@ while ($true) {
                     }
                     continue
                 }
+                'rate-limit' {
+                    Send-MockResponse @{
+                        jsonrpc = '2.0'; id = $id
+                        error   = @{ code = -32001; message = 'usage limit exceeded (429): slow down and retry later' }
+                    }
+                    continue
+                }
                 'unknown-schema' {
                     Send-MockResponse @{
                         jsonrpc = '2.0'; id = $id
@@ -103,6 +112,10 @@ while ($true) {
                 'limit-reached' {
                     $windows.primary = Get-MockWindow 300 100 1788062400
                     $extra.rateLimitReachedType = 'primary'
+                }
+                'reset' {
+                    $windows.primary = Get-MockWindow 300 2 1900000000
+                    $windows.secondary = Get-MockWindow 10080 18 1788667200
                 }
                 'extra-window' {
                     $windows.primary = Get-MockWindow 300 10 1788062400

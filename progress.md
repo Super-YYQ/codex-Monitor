@@ -42,7 +42,7 @@
      Get-RecentErrors 供 status.ps1 读取最近 ERROR。
    - `tests/logger.test.ps1`：6 组全过（schema 字段存在性、脱敏、history 白名单、汇总累积、保留期、最近错误排序）。
    - 修复 common.ps1 深转换函数单元素数组被 PowerShell unroll 的问题（`return ,$list`），并全量回归通过。
-6. **步骤6 preflight + leader-lease + github-sync + 测试**（本次 commit）
+6. `3f85a17` **步骤6 preflight + leader-lease + github-sync + 测试**
    - `scripts/github-sync.ps1`：git plumbing（临时 GIT_INDEX_FILE + hash-object/update-index/commit-tree/push）
      实现 CAS 推送，完全不触碰日志仓库的检出工作区；push 被拒（non-FF）= 抢占失败；
      repoPath 白名单（必须与 keeper 项目目录互不嵌套、必须是 git 仓库）；stderr 脱敏；
@@ -59,9 +59,25 @@
      preflight（happy/probe 成功/probe 失败/缺 codex/坏配置/坏仓库）。
    - 修复 tests/run-all.ps1：改为每个测试文件独立 pwsh 子进程运行（原方案子 scope 计数器不互通）；
      7 个测试文件全过。
+7. **步骤7 runner.ps1 主流程 + 端到端测试**（本次 commit）
+   - `scripts/runner.ps1`：完整实现文档 03 §5 主流程——LoadConfig → 双层本地互斥（被占则 SKIP 退出 0）→
+     preflight（失败 exit 1）→ 退避检查（BACKOFF_SKIP）→ Leader 选举（PASSIVE 只写心跳不碰 Codex）→
+     只读额度轮询 → 事件识别 → LEADER_CHANGED → AutoAnchor 钩子（auto-anchor.ps1 存在才启用）→
+     重置事件 eventId 标记 processed → state/心跳持久化 → 运行日志 + 净化 history + 每日 summary →
+     续租 → history 分支同步（commit message 按文档规范 quota: reset observed / keeper: leader changed /
+     quota: daily summary）。错误处理按文档 03 §14：429 → 60 分钟退避、认证错误 → 120 分钟退避、
+     读取失败保留旧窗口并标记 stale、异常 exit 2。
+   - 设计取舍：GitHub 不可达时角色为 DEGRADED（按文档 02 §11 状态机定义，本地查询继续、
+     绝不自称 Leader、AutoAnchor 由守卫拦截），比直接 PASSIVE 保留本地监控价值。
+   - mock 增加 rate-limit（429）与 reset（窗口重置）模式。
+   - `tests/runner.test.ps1`：10 组端到端全过（首轮 LEADER 基线、无变化静默、重置检测+eventId 落地+远程同步、
+     PASSIVE 不查询、429 退避跳过、认证 2h 退避、失败保留旧数据、坏配置 exit 1、并发锁 SKIP、
+     local-only 不碰远程协调分支）。
+   - 排障记录：`pwsh -File` 对未声明的命名参数不报错而是塞进 $args——runner 参数统一命名 -ConfigFile。
+
 
 
 
 ## 下一步
-- 步骤7：`scripts/runner.ps1` 主流程（本地互斥 → preflight → 选举 → 额度读取 → 事件 → 持久化 →
-  可选 anchor → 续租 → 同步）+ runner.test.ps1。
+- 步骤8：`scripts/auto-anchor.ps1`（实验功能默认关：codex exec 最小 prompt、before/after 快照、
+  验证失败 ABORTED 不重试、每日上限/最小间隔/eventId 幂等 + coordination 分支第二层 event lock）+ 测试。
