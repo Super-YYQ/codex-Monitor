@@ -11,6 +11,7 @@ $script:CQK_EXIT_RUNTIME     = 2   # unexpected runtime failure
 
 # Program floor: config may raise minimumPollIntervalMinutes above this, never lower it.
 $script:CQK_MIN_POLL_FLOOR_MINUTES = 5
+$script:CQK_VERSION = '0.1.0'
 
 function Get-KeeperScriptDir {
     return $script:CqkCommonDir
