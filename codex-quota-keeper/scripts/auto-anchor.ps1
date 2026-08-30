@@ -62,6 +62,8 @@ function Add-RemoteProcessedEventIds {
     $coord = Get-CoordinationConfig $Config
     $repoPath = [System.IO.Path]::GetFullPath($coord.repoPath)
     $branch = $coord.branch
+    $binding = Test-LogRepoBinding -RepoPath $repoPath -KeeperRoot $KeeperRoot -Branch $branch
+    if ($binding) { return @{ ok = $false; reason = "binding: $binding" } }
     $blob = Get-RemoteBranchBlob -RepoPath $repoPath -Branch $branch -PathInRepo 'coordination/processed-events.jsonl'
     if (-not $blob.ok) { return @{ ok = $false; reason = 'unreachable' } }
     $existing = @()

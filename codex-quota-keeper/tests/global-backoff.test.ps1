@@ -41,6 +41,7 @@ try {
         codex  = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = $false }
     }
     $null = Write-TestConfigFile $cfgFile $cfg
+    $null = Initialize-LogRepo -RepoPath $repos.clone -KeeperRoot $keeperRoot
     $machine = @{ machineId = 'GB-MACHINE-01'; label = 'GB-1' }
 
     $gb0 = Get-GlobalBackoff -Config $cfg -KeeperRoot $keeperRoot
@@ -88,6 +89,7 @@ try {
     New-Item -ItemType Directory -Path $keeperRoot2 -Force | Out-Null
     $cfgFile2 = Join-Path $keeperRoot2 'config.json'
     $null = Write-TestConfigFile $cfgFile2 $cfg
+    $null = Initialize-LogRepo -RepoPath $repos.clone -KeeperRoot $keeperRoot2
     Write-JsonFileAtomic (Join-Path $keeperRoot2 'runtime\machine.json') @{
         machineId = 'GB-MACHINE-02'; label = 'GB-2'; createdAt = '2026-08-30T00:00:00+08:00'
     }

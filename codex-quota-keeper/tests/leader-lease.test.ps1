@@ -41,6 +41,7 @@ $ws = New-TestWorkspace
 try {
     $repos = New-TestOriginAndClone -Workspace $ws
     $keeper = New-TestKeeper -Workspace $ws -ClonePath $repos.clone
+    $null = Initialize-LogRepo -RepoPath $repos.clone -KeeperRoot $keeper.root
     $machineA = New-TestMachine 'AAAAAAAA-0000-0000-0000-000000000001' 'PC-A'
     $machineB = New-TestMachine 'BBBBBBBB-0000-0000-0000-000000000002' 'PC-B'
 

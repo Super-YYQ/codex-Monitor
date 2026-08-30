@@ -55,6 +55,8 @@ function Set-GlobalBackoff {
     if (-not (Test-GitAvailable)) { return @{ ok = $false; reason = 'git-unavailable' } }
     $coord = Get-CoordinationConfig $Config
     $repoPath = [System.IO.Path]::GetFullPath($coord.repoPath)
+    $binding = Test-LogRepoBinding -RepoPath $repoPath -KeeperRoot $KeeperRoot -Branch $coord.branch
+    if ($binding) { return @{ ok = $false; reason = "binding: $binding" } }
     $blob = Get-RemoteBranchBlob -RepoPath $repoPath -Branch $coord.branch -PathInRepo 'coordination/backoff.json'
     if (-not $blob.ok) { return @{ ok = $false; reason = 'unreachable' } }
     $parent = $null

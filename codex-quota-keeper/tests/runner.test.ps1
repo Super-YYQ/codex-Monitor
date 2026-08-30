@@ -60,6 +60,7 @@ try {
         codex  = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = $false }
     }
     $null = Write-TestConfigFile $cfgFile $cfg
+    $null = Initialize-LogRepo -RepoPath $repos.clone -KeeperRoot $keeperRoot
 
     Start-TestGroup 'runner: first MonitorOnly run acquires lease, snapshots baseline'
 
@@ -117,6 +118,7 @@ try {
     New-Item -ItemType Directory -Path $keeperRoot2 -Force | Out-Null
     $cfgFile2 = Join-Path $keeperRoot2 'config.json'
     $null = Write-TestConfigFile $cfgFile2 $cfg
+    $null = Initialize-LogRepo -RepoPath $repos.clone -KeeperRoot $keeperRoot2
     # Seed machine identity so machine2 is NOT the current lease owner.
     Write-JsonFileAtomic (Join-Path $keeperRoot2 'runtime\machine.json') @{
         machineId = 'PASSIVE-MACHINE-0002'; label = 'PC-2'; createdAt = '2026-08-30T00:00:00+08:00'
@@ -237,6 +239,7 @@ try {
         codex = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = $false }
     }
     $null = Write-TestConfigFile $cfgFile4 $cfgPushFalse
+    $null = Initialize-LogRepo -RepoPath $freshClone -KeeperRoot $keeperRoot4
     $env:CQK_MOCK_MODE = 'normal'
     $rp1 = Invoke-Runner -KeeperRoot $keeperRoot4 -ConfigFile $cfgFile4
     Assert-Equal 0 $rp1.exitCode 'push=false baseline run ok'
@@ -262,6 +265,9 @@ try {
         }
         codex = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = $false }
     }
+    # Re-bind this keeper to the shared origin (its earlier binding pointed at
+    # the push=false section's fresh clone).
+    $null = Initialize-LogRepo -RepoPath $repos.clone -KeeperRoot $keeperRoot4
     $null = Write-TestConfigFile $cfgFile4b $cfgFixed
     $blob4 = Get-RemoteBranchBlob -RepoPath $repos.clone -Branch 'cqk/coordination' -PathInRepo 'coordination/lease.json'
     $stale4 = @{ schema = 1; ownerId = 'GHOST'; ownerLabel = 'ghost'
@@ -278,7 +284,6 @@ try {
     $outboxAfter = @(Get-ChildItem -LiteralPath (Join-Path $keeperRoot4 'runtime\outbox') -Filter '*.json' -File -ErrorAction SilentlyContinue)
     Write-Host ("  DEBUG pending after rp4: " + (($outboxAfter | ForEach-Object { $_.Name }) -join ', '))
     foreach ($f in $outboxAfter) { Write-Host ("  DEBUG content: " + ($f.FullName | Out-String) + (Get-Content $f.FullName -Raw)) }
-    Write-Host ("  DEBUG rp4 events: " + ((Get-LogEventNames $keeperRoot4 | Select-Object -Last 6) -join ','))
     Assert-Equal 0 @($outboxAfter).Count 'outbox drained after successful push'
     Assert-True (Test-Path (Join-Path $keeperRoot4 'runtime\sync-state.json')) 'sync-state ledger written'
 

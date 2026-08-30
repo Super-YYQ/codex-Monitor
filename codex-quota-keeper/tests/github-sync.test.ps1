@@ -112,6 +112,60 @@ try {
     Remove-TestWorkspace $ws
 }
 
+Start-TestGroup 'binding: dedicated log repo marker + origin fingerprint (CQK-011)'
+
+$ws2 = New-TestWorkspace
+try {
+    $repos2 = New-TestOriginAndClone -Workspace $ws2
+    $keeperRoot2 = Join-Path $ws2 'keeper'
+    New-Item -ItemType Directory -Path $keeperRoot2 -Force | Out-Null
+
+    # before init: pushes are refused
+    $leaseBefore = Test-LogRepoBinding -RepoPath $repos2.clone -KeeperRoot $keeperRoot2 -Branch 'cqk/coordination'
+    Assert-True ("$leaseBefore" -match 'not-initialized') 'unbound repo refused'
+
+    $init = Initialize-LogRepo -RepoPath $repos2.clone -KeeperRoot $keeperRoot2
+    Assert-True $init.ok "init ok ($($init.issues -join '; '))"
+    Assert-True (Test-Path (Join-Path $repos2.clone '.codex-quota-keeper-repository.json')) 'marker written into log repo'
+    $binding = Read-JsonFile (Get-LogRepoBindingPath $keeperRoot2)
+    Assert-NotNull $binding.originFingerprint 'origin fingerprint recorded'
+
+    # idempotent init keeps repoId
+    $init2 = Initialize-LogRepo -RepoPath $repos2.clone -KeeperRoot $keeperRoot2
+    Assert-Equal $init.repoId $init2.repoId 're-init keeps repoId'
+
+    # tamper runtime repoId -> refused
+    $tampered = $binding
+    $tampered.repoId = '00000000-0000-0000-0000-000000000000'
+    Write-JsonFileAtomic (Get-LogRepoBindingPath $keeperRoot2) $tampered
+    $tamperedCheck = Test-LogRepoBinding -RepoPath $repos2.clone -KeeperRoot $keeperRoot2 -Branch 'cqk/coordination'
+    Assert-True ("$tamperedCheck" -match 'repoId mismatch') 'tampered repoId refused'
+    $null = Initialize-LogRepo -RepoPath $repos2.clone -KeeperRoot $keeperRoot2
+
+    # forbidden business branch names
+    foreach ($bad in @('master', 'main', 'develop', 'release')) {
+        $badCheck = Test-LogRepoBinding -RepoPath $repos2.clone -KeeperRoot $keeperRoot2 -Branch $bad
+        Assert-True ("$badCheck" -match 'forbidden') "business branch '$bad' rejected"
+    }
+
+    # marker removed -> refused
+    Remove-Item (Join-Path $repos2.clone '.codex-quota-keeper-repository.json') -Force
+    $noMarker = Test-LogRepoBinding -RepoPath $repos2.clone -KeeperRoot $keeperRoot2 -Branch 'cqk/coordination'
+    Assert-True ("$noMarker" -match 'marker file missing') 'missing marker refused'
+} finally {
+    Remove-TestWorkspace $ws2
+}
+
+Start-TestGroup 'sanitization: GitHub token families and URL userinfo (CQK-012)'
+
+$dirty = 'remote: https://user:pat123@example.com/repo.git token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456 gho_ZYXWVUTSRQPONMLKJIHGFEDCBA98765 github_pat_XXXXXXXXXXXXXXXXXXXX_1234 failed'
+$clean = Hide-SensitiveText $dirty
+Assert-False ("$clean" -match 'pat123@example') 'URL userinfo redacted'
+Assert-False ("$clean" -match 'ghp_') 'ghp_ token redacted'
+Assert-False ("$clean" -match 'gho_') 'gho_ token redacted'
+Assert-False ("$clean" -match 'github_pat_') 'github_pat_ redacted'
+Assert-True ("$clean" -match 'example\.com') 'host preserved'
+
 $result = Get-TestResult
 if ($result.failures -gt 0) { Write-Host "github-sync.test.ps1: $($result.failures) failure(s)" -ForegroundColor Red; exit 1 }
 exit 0

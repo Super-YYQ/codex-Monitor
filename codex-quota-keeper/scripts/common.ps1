@@ -162,6 +162,12 @@ function Hide-SensitiveText {
     if ([string]::IsNullOrEmpty($Text)) { return $Text }
     $result = $Text
     $result = [regex]::Replace($result, 'sk-[A-Za-z0-9_\-]{6,}', '[REDACTED]')
+    # GitHub token families (audit plan v1.0 §11 / CQK-012)
+    $result = [regex]::Replace($result, '(?i)ghp_[A-Za-z0-9]{16,}', '[REDACTED]')
+    $result = [regex]::Replace($result, '(?i)gh[ousr]_[A-Za-z0-9]{16,}', '[REDACTED]')
+    $result = [regex]::Replace($result, '(?i)github_pat_[A-Za-z0-9_]{20,}', '[REDACTED]')
+    # URL userinfo: scheme://user:pass@host/ -> scheme://[REDACTED]@host/
+    $result = [regex]::Replace($result, '([a-z][a-z0-9+.\-]*://)[^/\s@]+@', '$1[REDACTED]@')
     $result = [regex]::Replace($result, '(?i)bearer\s+[^\s"'',;}]+', 'Bearer [REDACTED]')
     $result = [regex]::Replace(
         $result,

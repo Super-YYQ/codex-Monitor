@@ -123,6 +123,12 @@ function Invoke-LeaderElection {
     $coord = Get-CoordinationConfig $Config
     $repoPath = [System.IO.Path]::GetFullPath($coord.repoPath)
     $branch = $coord.branch
+    $binding = Test-LogRepoBinding -RepoPath $repoPath -KeeperRoot $KeeperRoot -Branch $branch
+    if ($binding) {
+        $out.role = 'DEGRADED'
+        $out.reason = "log repo binding failed: $binding"
+        return $out
+    }
     $json = ConvertTo-Json -InputObject $newLease -Depth 6
     $push = Push-RepoBlobs -RepoPath $repoPath -Branch $branch `
         -Blobs @{ 'coordination/lease.json' = $json } -ParentCommit $remote.commit `

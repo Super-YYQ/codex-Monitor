@@ -202,6 +202,19 @@ R6. **CQK-009/010 不可变 history + durable outbox**（本次 commit）
       修复配置后下一轮自动排空 outbox 并写 sync-state（故障注入重试闭环）。
     - 全量 11 个测试文件回归通过。
 
+R7. **CQK-011/012 专用仓库绑定 + 脱敏加固**（本次 commit）
+    - Initialize-LogRepo（scripts/setup-log-repo.ps1）：向日志仓库写入 marker
+      .codex-quota-keeper-repository.json（repoId/createdFor/allowedBranches），并在 runtime/log-repo.json
+      记录 repoId + origin 指纹（URL 去 userinfo 后 SHA-256）；幂等——重复初始化保留 repoId。
+    - Test-LogRepoBinding 推送门禁：未初始化/repoPath 不匹配/marker 缺失/repoId 篡改/origin 变更/
+      分支不在 allowedBranches 一律 fail-closed；main/master/develop/release/trunk/dev 等业务分支名
+      即使写入 marker 也强制拒绝。marker blob 随每次 push 携带（远程自描述）。
+    - 四个推送路径（租约续期、全局退避、outbox 同步、anchor 事件标记）全部过绑定门禁。
+    - CQK-012：Hide-SensitiveText 新增 ghp_/gho_/ghu_/ghs_/ghr_/github_pat_ 系列与 URL userinfo 脱敏；
+      Invoke-Git stderr 自动脱敏。
+    - 测试：绑定防篡改/幂等/业务分支拒绝/marker 缺失/未初始化拒绝 + token 脱敏断言；
+      全量 11 个测试文件回归通过。
+
 ### 下一步
-- CQK-011/012：专用日志仓库 marker（.codex-quota-keeper-repository.json + repoId + origin 指纹 +
-  分支名防护）与脱敏加固（ghp_/github_pat_ 系列 + URL userinfo）。
+- CQK-013/014：AutoAnchor 远程事件 CAS Claim（coordination/events/<eventId>.json，
+  CLAIMED→COMPLETED/FAILED）+ 执行前 Leader 租约重验证。

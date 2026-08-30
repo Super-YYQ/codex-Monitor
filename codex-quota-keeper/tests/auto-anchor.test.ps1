@@ -81,6 +81,7 @@ try {
         github = @{ coordination = @{ enabled = $true; repoPath = $repos.clone; branch = 'cqk/coordination' }; historySync = @{ enabled = $true; push = $true; branch = 'cqk/history'; eventsOnly = $true } }
     }
     $null = Write-TestConfigFile $cfgFile $cfg
+    $null = Initialize-LogRepo -RepoPath $repos.clone -KeeperRoot $keeperRoot
 
     Start-TestGroup 'anchor: runner with autoAnchor OFF never anchors (default)'
 
@@ -147,6 +148,7 @@ try {
     New-Item -ItemType Directory -Path $keeperRoot2 -Force | Out-Null
     $cfgFile2 = Join-Path $keeperRoot2 'config.json'
     $null = Write-TestConfigFile $cfgFile2 $cfg
+    $null = Initialize-LogRepo -RepoPath $repos.clone -KeeperRoot $keeperRoot2
     Write-JsonFileAtomic (Join-Path $keeperRoot2 'runtime\machine.json') @{
         machineId = 'SECOND-MACHINE-002'; label = 'PC-2'; createdAt = '2026-08-30T00:00:00+08:00'
     }
@@ -170,6 +172,7 @@ try {
     New-Item -ItemType Directory -Path $keeperRoot3 -Force | Out-Null
     $cfgFile3 = Join-Path $keeperRoot3 'config.json'
     $null = Write-TestConfigFile $cfgFile3 $cfg
+    $null = Initialize-LogRepo -RepoPath $repos.clone -KeeperRoot $keeperRoot3
     Reset-RemoteLease -ClonePath $repos.clone
     $env:CQK_MOCK_MODE = 'normal'
     $r5 = Invoke-RunnerSub -KeeperRoot $keeperRoot3 -ConfigFile $cfgFile3
@@ -191,6 +194,7 @@ try {
     New-Item -ItemType Directory -Path $keeperRoot4 -Force | Out-Null
     $cfgFile4 = Join-Path $keeperRoot4 'config.json'
     $null = Write-TestConfigFile $cfgFile4 $cfg
+    $null = Initialize-LogRepo -RepoPath $repos.clone -KeeperRoot $keeperRoot4
     Reset-RemoteLease -ClonePath $repos.clone
     $env:CQK_MOCK_MODE = 'normal'
     $r7 = Invoke-RunnerSub -KeeperRoot $keeperRoot4 -ConfigFile $cfgFile4
@@ -218,6 +222,7 @@ try {
         github = @{ coordination = @{ enabled = $true; repoPath = $repos.clone; branch = 'cqk/coordination' }; historySync = @{ enabled = $true; push = $true; branch = 'cqk/history'; eventsOnly = $true } }
     }
     $null = Write-TestConfigFile $cfgFile5 $cfgCap
+    $null = Initialize-LogRepo -RepoPath $repos.clone -KeeperRoot $keeperRoot5
     Reset-RemoteLease -ClonePath $repos.clone
     Clear-RemoteMarker -ClonePath $repos.clone
     $env:CQK_MOCK_MODE = 'normal'

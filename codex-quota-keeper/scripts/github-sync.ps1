@@ -16,6 +16,102 @@ function Get-GitExe {
     return (Get-Command git -ErrorAction SilentlyContinue).Source
 }
 
+function Get-OriginFingerprint {
+    # Fingerprint of the log repo's origin URL with any userinfo stripped, so a
+    # binding survives credential rotation but breaks if the remote changes.
+    param([string]$RepoPath)
+    $git = Get-GitExe
+    if (-not $git) { return $null }
+    $r = Invoke-External -FilePath $git -ArgumentList @('-C', $RepoPath, 'remote', 'get-url', 'origin') -TimeoutSeconds 15
+    if (-not $r.ok) { return $null }
+    $url = $r.stdout.Trim()
+    $url = [regex]::Replace($url, '([a-z][a-z0-9+.\-]*://)[^/\s@]+@', '$1')
+    return (Get-Sha256Hex $url.ToLowerInvariant())
+}
+
+# Dedicated log-repo binding (audit plan v1.0 §10 / CQK-011)
+
+$script:CQK_MARKER_FILE = '.codex-quota-keeper-repository.json'
+$script:CQK_FORBIDDEN_BRANCHES = @('main', 'master', 'develop', 'release', 'trunk', 'dev')
+
+function Get-LogRepoBindingPath { param([string]$Root) Join-Path (Get-RuntimeDir $Root) 'log-repo.json' }
+
+function Initialize-LogRepo {
+    # One-time explicit setup: writes the marker into the log repo working tree
+    # and records repoId + origin fingerprint in runtime. Every later push
+    # verifies this binding; a misconfigured business repo is refused.
+    param([string]$RepoPath, [string]$KeeperRoot)
+    $issues = Test-LogRepoAllowed -RepoPath $RepoPath -KeeperRoot $KeeperRoot
+    if ($issues.Count -gt 0) { return @{ ok = $false; issues = $issues } }
+    if (Test-GitAvailable) {
+        $bare = Invoke-Git -RepoPath $RepoPath -ArgumentList @('rev-parse', '--is-bare-repository') -TimeoutSeconds 10
+        if ($bare.ok -and $bare.stdout.Trim() -eq 'true') {
+            return @{ ok = $false; issues = @('log repo must be a working clone (not bare) so the marker file can be written') }
+        }
+    }
+
+    # Idempotent: an existing marker keeps its repoId so multiple keeper
+    # installations bound to the same log repo stay consistent.
+    $markerPath = Join-Path $RepoPath $script:CQK_MARKER_FILE
+    $existingMarker = Read-JsonFile $markerPath
+    $repoId = [guid]::NewGuid().ToString()
+    if ($existingMarker -is [hashtable] -and $existingMarker.repoId -and [string]$existingMarker.createdFor -eq 'codex-quota-keeper') {
+        $repoId = [string]$existingMarker.repoId
+    }
+    $marker = @{
+        schema          = 1
+        repoId          = $repoId
+        createdFor      = 'codex-quota-keeper'
+        createdAt       = Get-IsoTimestamp
+        allowedBranches = @('cqk/coordination', 'cqk/history')
+    }
+    Write-JsonFileAtomic $markerPath $marker
+
+    $fingerprint = Get-OriginFingerprint -RepoPath $RepoPath
+    if (-not $fingerprint) { return @{ ok = $false; issues = @('cannot read origin url of the log repo') } }
+
+    Write-JsonFileAtomic (Get-LogRepoBindingPath $KeeperRoot) @{
+        schema            = 1
+        repoId            = $repoId
+        repoPath          = [System.IO.Path]::GetFullPath($RepoPath)
+        originFingerprint = $fingerprint
+        initializedAt     = Get-IsoTimestamp
+    }
+    return @{ ok = $true; repoId = $repoId; markerPath = $markerPath; originFingerprint = $fingerprint }
+}
+
+function Test-LogRepoBinding {
+    # Push gate: marker + repoId + origin fingerprint + allowed branch. Any
+    # mismatch fails closed with a reason string.
+    param([string]$RepoPath, [string]$KeeperRoot, [string]$Branch)
+    $binding = Read-JsonFile (Get-LogRepoBindingPath $KeeperRoot)
+    if ($null -eq $binding) { return 'not-initialized (run scripts/setup-log-repo.ps1)' }
+
+    if ([System.IO.Path]::GetFullPath($RepoPath) -ne [string]$binding.repoPath) {
+        return 'repoPath does not match the initialized binding'
+    }
+    $marker = Read-JsonFile (Join-Path $RepoPath $script:CQK_MARKER_FILE)
+    if ($null -eq $marker) { return 'marker file missing in log repo' }
+    if ([string]$marker.repoId -ne [string]$binding.repoId) { return 'marker repoId mismatch' }
+    if ([string]$marker.createdFor -ne 'codex-quota-keeper') { return 'marker was not created for codex-quota-keeper' }
+
+    $fingerprint = Get-OriginFingerprint -RepoPath $RepoPath
+    if (-not $fingerprint -or $fingerprint -ne [string]$binding.originFingerprint) {
+        return 'origin fingerprint mismatch (remote changed since initialization)'
+    }
+
+    # Business-branch guard first: main/master/... are forbidden even if someone
+    # lists them in the marker.
+    foreach ($b in $script:CQK_FORBIDDEN_BRANCHES) {
+        if ($Branch -match "(^|/)$b$") { return "branch '$Branch' looks like a business branch and is forbidden" }
+    }
+    $allowed = @($marker.allowedBranches | ForEach-Object { [string]$_ })
+    if ($allowed.Count -gt 0 -and $allowed -cnotcontains $Branch) {
+        return "branch '$Branch' is not in the marker allowedBranches"
+    }
+    return $null
+}
+
 function Test-LogRepoAllowed {
     # Whitelist/normalization for github.repoPath: the log repo must be a real git
     # repository and must be disjoint from the keeper project itself, so automation
@@ -105,6 +201,14 @@ function Push-RepoBlobs {
         [string]$MachineId = ''
     )
     if ($Blobs.Count -eq 0) { return @{ ok = $false; reason = 'nothing-to-commit'; stderr = $null } }
+
+    # Carry the repository marker on every branch so remote state is self-describing.
+    $markerPath = Join-Path $RepoPath $script:CQK_MARKER_FILE
+    if (Test-Path -LiteralPath $markerPath) {
+        if (-not $Blobs.ContainsKey($script:CQK_MARKER_FILE)) {
+            $Blobs[$script:CQK_MARKER_FILE] = [System.IO.File]::ReadAllText($markerPath)
+        }
+    }
 
     $indexFile = Join-Path ([System.IO.Path]::GetTempPath()) ("cqk-index-" + [guid]::NewGuid().ToString('N'))
     $authorName = 'codex-quota-keeper'
@@ -219,9 +323,9 @@ function Sync-OutboxToGitHub {
     if (-not (Test-GitAvailable)) { $result.reason = 'git-unavailable'; return $result }
 
     $repoPath = [System.IO.Path]::GetFullPath($coord.repoPath)
-    $issues = Test-LogRepoAllowed -RepoPath $repoPath -KeeperRoot $KeeperRoot
-    if ($issues.Count -gt 0) {
-        $result.reason = 'repo-not-allowed'; $result.detail = ($issues -join '; '); return $result
+    $binding = Test-LogRepoBinding -RepoPath $repoPath -KeeperRoot $KeeperRoot -Branch $hist.branch
+    if ($binding) {
+        $result.reason = 'repo-binding-failed'; $result.detail = $binding; return $result
     }
 
     $pending = @(Get-ChildItem -LiteralPath (Get-OutboxDir $KeeperRoot) -Filter '*.json' -File -ErrorAction SilentlyContinue)
