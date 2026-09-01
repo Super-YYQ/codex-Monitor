@@ -220,7 +220,7 @@ function Invoke-AutoAnchorIfNeeded {
 
     $anchorInfo = @{
         phase        = $(if ($verified -and $exec.ok) { 'ANCHORED' } else { 'ABORTED' })
-        eventIds     = $pending
+        eventIds     = $claimed
         startedAt    = $startedAt
         endedAt      = $endedAt
         durationSecs = [int]$sw.Elapsed.TotalSeconds
@@ -237,7 +237,7 @@ function Invoke-AutoAnchorIfNeeded {
     if ([string]$State.anchors.day -ne $today) { $count = 0 }
     $State.anchors = @{ day = $today; count = $count + 1; lastAnchorAt = $endedAt }
 
-    foreach ($id in $pending) { Add-ProcessedEvent -State $State -EventId $id }
+    foreach ($id in $claimed) { Add-ProcessedEvent -State $State -EventId $id }
 
     if ($verified -and $exec.ok) {
         $out.events += ,@{ event = 'ANCHOR_EXECUTED'; anchor = $anchorInfo }

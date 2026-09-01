@@ -123,12 +123,37 @@ try {
     $expectedId = Get-Sha256Hex 'codex-default|primary|300|1788062400|reset'
     Assert-Contains $state.processedEventIds $expectedId 'eventId marked processed'
 
-    $histFileItem = Get-ChildItem -LiteralPath (Join-Path $keeperRoot 'history') -Filter 'events-*.jsonl' -File | Select-Object -First 1
+    # History audit file: written only when a significant event fires. A missing
+    # file means the anchor flow did not execute on this runner; dump everything
+    # observable so the CI log shows exactly which sub-run diverged.
+    $histDir = Join-Path $keeperRoot 'history'
+    $histFileItem = Get-ChildItem -LiteralPath $histDir -Filter 'events-*.jsonl' -File -ErrorAction SilentlyContinue | Select-Object -First 1
     Assert-True ($null -ne $histFileItem) 'anchor history event file written'
-    $histText = [System.IO.File]::ReadAllText($histFileItem.FullName)
-    Assert-True ("$histText" -match 'ANCHOR_EXECUTED') 'anchor record in history'
-    Assert-False ("$histText" -match 'Reply exactly OK') 'prompt text never appears in history'
-    Assert-True ("$histText" -match '"verified":true') 'before/after verification recorded'
+    if ($null -eq $histFileItem) {
+        Write-Host 'DIAG: no history/events-*.jsonl under keeper root' -ForegroundColor Yellow
+        if (Test-Path -LiteralPath $histDir) {
+            Get-ChildItem -LiteralPath $histDir -Force -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "DIAG: history entry: $($_.Name)" -ForegroundColor Yellow }
+        } else {
+            Write-Host 'DIAG: history directory is missing entirely' -ForegroundColor Yellow
+        }
+        Write-Host "DIAG: r1 exit=$($r1.exitCode)" -ForegroundColor Yellow
+        Write-Host "DIAG: r1 output:`n$($r1.output)" -ForegroundColor Yellow
+        Write-Host "DIAG: r2 exit=$($r2.exitCode)" -ForegroundColor Yellow
+        Write-Host "DIAG: r2 output:`n$($r2.output)" -ForegroundColor Yellow
+        Write-Host ("DIAG: events seen: " + ($evts2 -join ', ')) -ForegroundColor Yellow
+        $stateDump = Read-JsonFile (Join-Path $keeperRoot 'runtime\state.json')
+        if ($stateDump) {
+            Write-Host ('DIAG: state.anchors=' + (ConvertTo-Json -InputObject $stateDump.anchors -Compress -Depth 6)) -ForegroundColor Yellow
+            Write-Host ('DIAG: state.processedEventIds=' + (ConvertTo-Json -InputObject $stateDump.processedEventIds -Compress -Depth 6)) -ForegroundColor Yellow
+        } else {
+            Write-Host 'DIAG: state.json unreadable or missing' -ForegroundColor Yellow
+        }
+    } else {
+        $histText = [System.IO.File]::ReadAllText($histFileItem.FullName)
+        Assert-True ("$histText" -match 'ANCHOR_EXECUTED') 'anchor record in history'
+        Assert-False ("$histText" -match 'Reply exactly OK') 'prompt text never appears in history'
+        Assert-True ("$histText" -match '"verified":true') 'before/after verification recorded'
+    }
 
     $claimFile = Get-RemoteBranchBlob -RepoPath $repos.clone -Branch 'cqk/coordination' -PathInRepo ('coordination/events/' + $expectedId + '.json')
     Assert-True ($claimFile.ok -and $claimFile.reason -eq 'ok') 'remote claim event file exists'

@@ -20,13 +20,20 @@ $failed = @()
 foreach ($file in $testFiles) {
     Write-Host ''
     Write-Host "== $($file.Name) ==" -ForegroundColor Yellow
+    # EAP=Stop turns the child's first stderr line into a terminating error and
+    # swallows its stdout, hiding every assertion result. Capture with EAP=Continue
+    # so the child's full output (and stderr) always reaches the CI log.
+    $hostEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     $out = & $pwsh -NoProfile -ExecutionPolicy Bypass -File $file.FullName 2>&1
+    $rc = $LASTEXITCODE
+    $ErrorActionPreference = $hostEap
     $out | ForEach-Object { Write-Host "$_" }
-    if ($LASTEXITCODE -eq 0) {
+    if ($rc -eq 0) {
         $passed += $file.Name
     } else {
         $failed += $file.Name
-        Write-Host "  -> FAILED (exit $LASTEXITCODE)" -ForegroundColor Red
+        Write-Host "  -> FAILED (exit $rc)" -ForegroundColor Red
     }
 }
 

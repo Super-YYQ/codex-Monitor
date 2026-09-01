@@ -102,9 +102,20 @@ try {
     $expectedId = Get-Sha256Hex 'codex-default|primary|300|1788062400|reset'
     Assert-Contains $state3.processedEventIds $expectedId 'reset eventId marked processed'
 
-    $histFile = Get-ChildItem -LiteralPath (Join-Path $keeperRoot 'history') -Filter 'events-*.jsonl' -File | Select-Object -First 1
+    $histFile = Get-ChildItem -LiteralPath (Join-Path $keeperRoot 'history') -Filter 'events-*.jsonl' -File -ErrorAction SilentlyContinue | Select-Object -First 1
     Assert-True ($null -ne $histFile) 'history event file written'
-    Assert-True ("$([System.IO.File]::ReadAllText($histFile.FullName))" -match 'WINDOW_RESET_OBSERVED') 'reset in history'
+    if ($null -ne $histFile) {
+        Assert-True ("$([System.IO.File]::ReadAllText($histFile.FullName))" -match 'WINDOW_RESET_OBSERVED') 'reset in history'
+    } else {
+        Write-Host "DIAG: reset run exit=$($r3.exitCode)" -ForegroundColor Yellow
+        Write-Host "DIAG: reset run output:`n$($r3.output)" -ForegroundColor Yellow
+        Write-Host ("DIAG: events seen: " + ($evts3 -join ', ')) -ForegroundColor Yellow
+        $stateDumpReset = Read-JsonFile (Join-Path $keeperRoot 'runtime\state.json')
+        if ($stateDumpReset) {
+            Write-Host ('DIAG: state.lastReadAt=' + [string]$stateDumpReset.lastReadAt) -ForegroundColor Yellow
+            Write-Host ('DIAG: state.lastError=' + [string]$stateDumpReset.lastError) -ForegroundColor Yellow
+        }
+    }
 
     $paths = Invoke-TestGit -RepoPath $repos.clone -ArgumentList @('ls-tree', '-r', '--name-only', 'origin/cqk/history')
     $resetPaths = @(($paths.stdout -split "`n") | Where-Object { $_ -match 'WINDOW_RESET' })
