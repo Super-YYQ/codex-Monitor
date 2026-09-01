@@ -53,6 +53,13 @@ function Write-MockTrace {
 }
 
 Write-MockTrace ("started pid={0} mode={1} psver={2} pshome={3}" -f $PID, $mode, $PSVersionTable.PSVersion, $PSHOME)
+try {
+    Write-MockTrace ("console: InEnc={0} OutEnc={1} InRedirected={2} OutRedirected={3}" -f `
+        [Console]::In.Encoding.WebName, [Console]::Out.Encoding.WebName, [Console]::IsInputRedirected,
+        [Console]::IsOutputRedirected)
+} catch {
+    Write-MockTrace ("console: probe failed: {0}" -f $_.Exception.Message)
+}
 
 function Send-MockResponse {
     param($obj)
@@ -90,8 +97,40 @@ if ($script:CountdownFile) {
     if ($n -lt 0) { $script:FailReads = $true }
 }
 
+# --- stdin: read RAW bytes, decode UTF-8 ourselves --------------------------
+# [Console]::In applies the console input encoding, and the parent (Windows
+# PowerShell 5.1, .NET Framework) cannot set StandardInputEncoding - the writer
+# and the reader can then disagree (observed on CI: 6 garbage bytes prepended to
+# the first line). Reading the pipe stream directly keeps the JSON-RPC wire
+# format intact regardless of what encoding the child inherited.
+$script:StdinStream = $null
+try { $script:StdinStream = [Console]::OpenStandardInput() } catch { }
+$script:RawBuf = New-Object System.Text.StringBuilder
+$script:Chunk = New-Object byte[] 4096
+
+function Read-MockLine {
+    # Returns the next newline-terminated line (UTF-8, leading BOM stripped),
+    # or $null on EOF. Buffers partial pipe reads across chunks.
+    if ($null -eq $script:StdinStream) { return [Console]::In.ReadLine() }
+    while ($true) {
+        $text = $script:RawBuf.ToString()
+        $idx = $text.IndexOf("`n")
+        if ($idx -ge 0) {
+            $line = $text.Substring(0, $idx)
+            $script:RawBuf.Length = 0
+            [void]$script:RawBuf.Append($text.Substring($idx + 1))
+            if ($line.EndsWith("`r")) { $line = $line.Substring(0, $line.Length - 1) }
+            if ($line.StartsWith([char]0xFEFF)) { $line = $line.Substring(1) }
+            return $line
+        }
+        $n = $script:StdinStream.Read($script:Chunk, 0, $script:Chunk.Length)
+        if ($n -le 0) { return $null }
+        [void]$script:RawBuf.Append([System.Text.Encoding]::UTF8.GetString($script:Chunk, 0, $n))
+    }
+}
+
 while ($true) {
-    $line = [Console]::In.ReadLine()
+    $line = Read-MockLine
     if ($null -eq $line) { Write-MockTrace 'stdin: EOF'; break }
     if ([string]::IsNullOrWhiteSpace($line)) { continue }
     $hex = (($line.ToCharArray() | ForEach-Object { '{0:X2}' -f [int]$_ }) | Select-Object -First 48) -join ' '
