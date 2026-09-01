@@ -102,9 +102,9 @@ try {
     $expectedId = Get-Sha256Hex 'codex-default|primary|300|1788062400|reset'
     Assert-Contains $state3.processedEventIds $expectedId 'reset eventId marked processed'
 
-    $histFile = Join-Path $keeperRoot 'history\events-2026-08-30.jsonl'
-    Assert-True (Test-Path $histFile) 'history event file written'
-    Assert-True ("$([System.IO.File]::ReadAllText($histFile))" -match 'WINDOW_RESET_OBSERVED') 'reset in history'
+    $histFile = Get-ChildItem -LiteralPath (Join-Path $keeperRoot 'history') -Filter 'events-*.jsonl' -File | Select-Object -First 1
+    Assert-True ($null -ne $histFile) 'history event file written'
+    Assert-True ("$([System.IO.File]::ReadAllText($histFile.FullName))" -match 'WINDOW_RESET_OBSERVED') 'reset in history'
 
     $paths = Invoke-TestGit -RepoPath $repos.clone -ArgumentList @('ls-tree', '-r', '--name-only', 'origin/cqk/history')
     $resetPaths = @(($paths.stdout -split "`n") | Where-Object { $_ -match 'WINDOW_RESET' })

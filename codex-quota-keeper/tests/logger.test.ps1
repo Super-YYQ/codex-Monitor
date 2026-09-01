@@ -34,7 +34,7 @@ try {
 
     Start-TestGroup 'log: error text sanitized before writing'
 
-    Write-KeeperLog -Root $ws -Event 'AUTH_ERROR' -Level 'ERROR' -Error 'token=supersecret123 relogin' -When $when
+    Write-KeeperLog -Root $ws -Event 'AUTH_ERROR' -Level 'ERROR' -ErrorText 'token=supersecret123 relogin' -When $when
     $lines = [System.IO.File]::ReadAllLines($file)
     $errEntry = ConvertFrom-JsonSafe $lines[2]
     Assert-Equal 'ERROR' $errEntry.level 'error level recorded'
@@ -97,8 +97,8 @@ try {
 
     $logFile = Join-Path (Get-LogsDir $ws) 'keeper-2026-08-30.jsonl'
     Write-KeeperLog -Root $ws -Event 'READ_FAILED' -Level 'INFO' -When ([DateTime]::Parse('2026-08-30 11:00:00'))
-    Write-KeeperLog -Root $ws -Event 'TIMEOUT' -Level 'ERROR' -Error 'app-server timeout' -When ([DateTime]::Parse('2026-08-30 11:05:00'))
-    Write-KeeperLog -Root $ws -Event 'AUTH_ERROR' -Level 'ERROR' -Error 'relogin' -When ([DateTime]::Parse('2026-08-30 11:10:00'))
+    Write-KeeperLog -Root $ws -Event 'TIMEOUT' -Level 'ERROR' -ErrorText 'app-server timeout' -When ([DateTime]::Parse('2026-08-30 11:05:00'))
+    Write-KeeperLog -Root $ws -Event 'AUTH_ERROR' -Level 'ERROR' -ErrorText 'relogin' -When ([DateTime]::Parse('2026-08-30 11:10:00'))
 
     $recent = Get-RecentErrors -Root $ws -Take 2
     Assert-Equal 2 @($recent).Count 'two most recent errors'

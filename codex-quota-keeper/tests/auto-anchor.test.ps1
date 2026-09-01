@@ -123,8 +123,9 @@ try {
     $expectedId = Get-Sha256Hex 'codex-default|primary|300|1788062400|reset'
     Assert-Contains $state.processedEventIds $expectedId 'eventId marked processed'
 
-    $histFile = Join-Path $keeperRoot 'history\events-2026-08-30.jsonl'
-    $histText = [System.IO.File]::ReadAllText($histFile)
+    $histFileItem = Get-ChildItem -LiteralPath (Join-Path $keeperRoot 'history') -Filter 'events-*.jsonl' -File | Select-Object -First 1
+    Assert-True ($null -ne $histFileItem) 'anchor history event file written'
+    $histText = [System.IO.File]::ReadAllText($histFileItem.FullName)
     Assert-True ("$histText" -match 'ANCHOR_EXECUTED') 'anchor record in history'
     Assert-False ("$histText" -match 'Reply exactly OK') 'prompt text never appears in history'
     Assert-True ("$histText" -match '"verified":true') 'before/after verification recorded'

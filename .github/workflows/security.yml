@@ -42,7 +42,12 @@ jobs:
             '(?i)(api[_-]?key|secret|password)\s*[=:]\s*[''\"][^''\"\s]{12,}'
           )
           $files = Get-ChildItem -Recurse -File |
-            Where-Object { $_.FullName -notmatch '\.git\' -and $_.Extension -notin '.docx', '.png', '.jpg' }
+            Where-Object { $_.FullName -notmatch '\.git\' -and $_.Extension -notin '.docx', '.png', '.jpg' } |
+            Where-Object { $_.FullName -notmatch '\\tests\\' }
+          # Note: codex-quota-keeper/tests/** is excluded because it carries
+          # intentionally-fake credential strings (ghp_/gho_/github_pat_ …) used by
+          # the sanitization fixtures to verify redaction. Production code is still
+          # fully scanned.
           $hits = @()
           foreach ($f in $files) {
             $text = [System.IO.File]::ReadAllText($f.FullName)

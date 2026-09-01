@@ -31,14 +31,14 @@ $script:CqkRunId = [guid]::NewGuid().ToString('N').Substring(0, 12)
 $script:CqkLogging = @{ retentionDays = 90; includeMachineLabel = $false }
 
 function Write-RunnerLog {
-    param([string]$Event, [string]$Level = 'INFO', $Error = $null, [string]$ErrorKind = $null, $Windows = $null, $Anchor = $null)
+    param([string]$Event, [string]$Level = 'INFO', $ErrorText = $null, [string]$ErrorKind = $null, $Windows = $null, $Anchor = $null)
     $machine = $script:CqkMachine
     $label = if ($machine -and $machine.label) { [string]$machine.label } else { '' }
     Write-KeeperLog -Root $KeeperRoot -Event $Event -Level $Level -RunId $script:CqkRunId `
         -MachineId ($(if ($machine) { [string]$machine.machineId } else { '' })) -MachineLabel $label `
         -Role ($(if ($script:CqkRole) { $script:CqkRole } else { '' })) `
         -Mode ($(if ($script:CqkMode) { $script:CqkMode } else { '' })) `
-        -Windows $Windows -Anchor $Anchor -Error $Error -ErrorKind $ErrorKind `
+        -Windows $Windows -Anchor $Anchor -ErrorText $ErrorText -ErrorKind $ErrorKind `
         -LoggingConfig $script:CqkLogging
 }
 
@@ -47,7 +47,7 @@ try {
     $loaded = Load-Config $ConfigFile
     if ($null -eq $loaded.config -or @($loaded.issues).Count -gt 0) {
         Write-KeeperLog -Root $KeeperRoot -Event 'CONFIG_INVALID' -Level 'ERROR' -MachineId '' `
-            -Error ($loaded.issues -join '; ')
+            -ErrorText ($loaded.issues -join '; ')
         exit 1
     }
     $cfg = $loaded.config
@@ -58,7 +58,7 @@ try {
     $lock = Enter-RunnerLock $KeeperRoot
     if (-not $lock.acquired) {
         Write-KeeperLog -Root $KeeperRoot -Event 'RUNNER_SKIPPED' -MachineId '' `
-            -Error 'another runner instance holds the local lock'
+            -ErrorText 'another runner instance holds the local lock'
         exit 0
     }
 
@@ -66,7 +66,7 @@ try {
     $script:CqkMachine = Get-MachineIdentity -Root $KeeperRoot -Label ([string]$cfg.leader.label)
     $pf = Invoke-Preflight -Config $cfg -KeeperRoot $KeeperRoot
     if (-not $pf.ok) {
-        Write-RunnerLog -Event 'PREFLIGHT_FAILED' -Level 'ERROR' -Error ($pf.issues -join '; ')
+        Write-RunnerLog -Event 'PREFLIGHT_FAILED' -Level 'ERROR' -ErrorText ($pf.issues -join '; ')
         $script:CqkExitCode = 1
         exit 1
     }
@@ -79,7 +79,7 @@ try {
         $state = Load-KeeperState $KeeperRoot
         $state.heartbeat = @{ ts = (Get-IsoTimestamp); role = 'BACKOFF' }
         Save-KeeperState -Root $KeeperRoot -State $state
-        Write-RunnerLog -Event 'BACKOFF_SKIP' -Error "until $($backoff.until.ToString('yyyy-MM-ddTHH:mm:sszzz')) ($($backoff.reason))"
+        Write-RunnerLog -Event 'BACKOFF_SKIP' -ErrorText "until $($backoff.until.ToString('yyyy-MM-ddTHH:mm:sszzz')) ($($backoff.reason))"
         exit 0
     }
 
@@ -96,7 +96,7 @@ try {
         $state.heartbeat = @{ ts = (Get-IsoTimestamp); role = 'PASSIVE' }
         if ($election.lease) { Save-LocalLeaseView -Root $KeeperRoot -State $state -Election $election }
         Save-KeeperState -Root $KeeperRoot -State $state
-        Write-RunnerLog -Event 'PASSIVE' -Error $election.reason
+        Write-RunnerLog -Event 'PASSIVE' -ErrorText $election.reason
         exit 0
     }
 
@@ -114,7 +114,7 @@ try {
             $state.role = 'BACKOFF'
             $state.heartbeat = @{ ts = (Get-IsoTimestamp); role = 'BACKOFF' }
             Save-KeeperState -Root $KeeperRoot -State $state
-            Write-RunnerLog -Event 'GLOBAL_BACKOFF_SKIP' -Error "until $($gb.until.ToString('yyyy-MM-ddTHH:mm:sszzz')) ($($gb.reason), set by $($gb.sourceOwnerId))"
+            Write-RunnerLog -Event 'GLOBAL_BACKOFF_SKIP' -ErrorText "until $($gb.until.ToString('yyyy-MM-ddTHH:mm:sszzz')) ($($gb.reason), set by $($gb.sourceOwnerId))"
             exit 0
         }
     }
@@ -143,7 +143,7 @@ try {
             Set-Backoff -Root $KeeperRoot -Minutes 60 -Reason '429'
             $null = Set-GlobalBackoff -Config $cfg -KeeperRoot $KeeperRoot -Minutes 60 -Reason '429' -Machine $machine
         }
-        Write-RunnerLog -Event 'READ_FAILED' -Level 'ERROR' -Error $read.message -ErrorKind ([string]$read.errorKind)
+        Write-RunnerLog -Event 'READ_FAILED' -Level 'ERROR' -ErrorText $read.message -ErrorKind ([string]$read.errorKind)
     }
     $state.lastReadAt = Get-IsoTimestamp
 
@@ -161,7 +161,7 @@ try {
                 -State $state -Events $events -IsLeader $isLeader -Machine $machine -Election $election
             if ($anchorOutcome -and $anchorOutcome.events) { $events += @($anchorOutcome.events) }
         } else {
-            Write-RunnerLog -Event 'ANCHOR_UNAVAILABLE' -Level 'ERROR' -Error 'autoAnchor enabled but auto-anchor module missing'
+            Write-RunnerLog -Event 'ANCHOR_UNAVAILABLE' -Level 'ERROR' -ErrorText 'autoAnchor enabled but auto-anchor module missing'
         }
     }
 
@@ -185,7 +185,7 @@ try {
         if (-not $ev) { continue }
         $level = 'INFO'
         if ($ev.event -in @('AUTH_ERROR', 'SCHEMA_UNKNOWN', 'LIMIT_REACHED', 'READ_FAILED')) { $level = 'ERROR' }
-        Write-RunnerLog -Event ([string]$ev.event) -Level $Level -Error $ev.message
+        Write-RunnerLog -Event ([string]$ev.event) -Level $Level -ErrorText $ev.message
     }
 
     # ---- sanitized history records (significant events only, doc 03 §12) ----
@@ -249,7 +249,7 @@ try {
         $sync = Sync-OutboxToGitHub -Config $cfg -KeeperRoot $KeeperRoot -Machine $machine -RunId $script:CqkRunId `
             -CommitMessage $commitMessage -SummaryFiles $summaryFiles
         if (-not $sync.ok -and $sync.reason -notin @('disabled', 'push-disabled', 'nothing-to-sync', 'git-unavailable')) {
-            Write-RunnerLog -Event 'SYNC_FAILED' -Error "$($sync.reason): $($sync.detail)"
+            Write-RunnerLog -Event 'SYNC_FAILED' -ErrorText "$($sync.reason): $($sync.detail)"
         }
     }
 
@@ -257,7 +257,7 @@ try {
     try {
         $null = Invoke-LogRetention -Root $KeeperRoot -RetentionDays $script:CqkLogging.retentionDays
     } catch {
-        Write-RunnerLog -Event 'RETENTION_FAILED' -Level 'ERROR' -Error $_.Exception.Message
+        Write-RunnerLog -Event 'RETENTION_FAILED' -Level 'ERROR' -ErrorText $_.Exception.Message
     }
 
     Write-RunnerLog -Event 'RUNNER_OK' -Windows $read.windows
@@ -265,7 +265,7 @@ try {
 } catch {
     try {
         Write-KeeperLog -Root $KeeperRoot -Event 'RUNNER_ERROR' -Level 'ERROR' -MachineId '' `
-            -Error ("$($_.Exception.Message) @ $($_.InvocationInfo.ScriptName):$($_.InvocationInfo.ScriptLineNumber)")
+            -ErrorText ("$($_.Exception.Message) @ $($_.InvocationInfo.ScriptName):$($_.InvocationInfo.ScriptLineNumber)")
     } catch { }
     exit 2
 } finally {

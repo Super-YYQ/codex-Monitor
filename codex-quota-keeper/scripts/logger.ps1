@@ -27,7 +27,7 @@ function Write-KeeperLog {
         [string]$RunId = '',
         $Windows = $null,
         $Anchor = $null,
-        $Error = $null,
+        $ErrorText = $null,
         [string]$ErrorKind = $null,
         [string]$Level = 'INFO',
         [hashtable]$LoggingConfig = $null,
@@ -45,7 +45,7 @@ function Write-KeeperLog {
         runId      = $RunId
         windows    = $Windows
         anchor     = $Anchor
-        error      = $Error
+        error      = $ErrorText
         version    = $script:CQK_VERSION
     }
     if ($ErrorKind) { $entry.errorKind = $ErrorKind }

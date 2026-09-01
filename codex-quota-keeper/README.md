@@ -40,11 +40,40 @@ codex-quota-keeper/
 ## 快速开始
 
 1. 解压到固定目录，例如 `D:\Tools\codex-quota-keeper`。
-2. 复制 `config.example.json` 为 `config.json`，按需改 `pollIntervalMinutes`、`leader.label`、`github.repoPath`。
+2. 复制 `config.example.json` 为 `config.json`，按需改 `poll.intervalMinutes`、`leader.label`、
+   `github.coordination.repoPath`（完整字段见下方「配置」）。
 3. 确保 `mode=MonitorOnly`、`codex.autoAnchor=false`。
 4. 运行 `install.cmd`（会做一次只读 quota probe，成功后注册 Windows 计划任务）。
 5. 双击 `status.cmd` 验证 `Task installed=YES`、`Enabled=YES`、`Auth=READY`。
 6. 第二台电脑重复安装，确认只有一台 `LEADER`、另一台 `PASSIVE`。
+
+## 配置（修改与生效）
+
+配置文件是 `config.json`（改前先备份）。**改完任意字段后运行 `apply-config.cmd`**，
+它会校验配置并更新 Windows 计划任务的轮询周期；可反复执行、幂等。
+
+定时相关字段（计划任务由它们驱动）：
+
+| 字段 | 默认 | 说明 |
+|------|------|------|
+| `poll.intervalMinutes` | 15 | 额度轮询周期（分钟），允许 5/10/15/30/60，低于 5 拒绝 |
+| `poll.minimumIntervalMinutes` | 5 | 最小间隔下限 |
+| `task.name` | CodexQuotaKeeper.Check | 计划任务名 |
+| `task.startWithWindows` | true | 开机自启 |
+| `task.runIfNetworkAvailable` | true | 仅在有网络时运行 |
+| `task.wakeToRun` | false | 是否允许唤醒执行 |
+
+其它常用字段：
+
+| 字段 | 默认 | 说明 |
+|------|------|------|
+| `mode` | MonitorOnly | 运行模式（MonitorOnly / AutoAnchor） |
+| `leader.label` | Home PC | 本机标签 |
+| `leader.leaseTtlMinutes` | 45 | 租约 TTL |
+| `github.coordination.repoPath` | — | 专用日志仓库本地路径（多机必填） |
+| `github.historySync.push` | true | history 分支推送开关 |
+| `logging.includeMachineLabel` | false | 隐私开关：machineLabel 是否进 history |
+| `codex.autoAnchor.enabled` | false | 实验功能开关（默认关闭） |
 
 ## 前置条件
 
@@ -62,17 +91,15 @@ codex-quota-keeper/
 - 租约过期或 owner 是自己 → 续租后 `push`。
 - 两台同时抢占时，Git `non-fast-forward` 冲突作为 CAS：先 push 成功者为 Leader。
 
-参数说明（见 `config.json`）：
+多机互斥相关参数（见 `config.json` 的 `leader` / `github.coordination` 段）：
 
 | 参数 | 默认 | 说明 |
 |------|------|------|
-| `poll.intervalMinutes` | 15 | 额度查询周期（允许 5/10/15/30/60） |
 | `leader.leaseTtlMinutes` | 45 | 租约 TTL（≈轮询周期 3 倍） |
 | `leader.graceMinutes` | 5 | 时钟漂移/网络延迟容忍 |
 | `leader.takeoverOnExpiry` | true | 过期后允许他人接管 |
 | `github.coordination.enabled` | true | 租约协调（false = LOCAL_ONLY，多机不安全） |
-| `github.historySync.push` | true | history 分支推送开关 |
-| `logging.includeMachineLabel` | false | 隐私开关：machineLabel 是否进 history |
+| `github.coordination.repoPath` | — | 专用日志仓库本地路径 |
 
 ## 状态机
 
