@@ -3,8 +3,9 @@
 ## 部署
 
 1. 解压到固定目录（如 `D:\Tools\codex-quota-keeper`）。
-2. `config.example.json` -> `config.json`：确认 `mode=MonitorOnly`、
-   `codex.autoAnchor.enabled=false`，设置 `poll.intervalMinutes`（>=5）与 `leader.label`。
+2. `config.example.jsonc` -> `config.json`：模板为 JSONC（带中文注释，取消注释即自定义）；
+   确认 `mode=MonitorOnly`、`codex.autoAnchor.enabled=false`，设置 `poll.intervalMinutes`（>=5）
+   与 `leader.label`。
 3. `install.cmd` —— 只读 quota probe 通过后注册当前用户计划任务（无需管理员）。
 4. `status.cmd` 验证。
 5. 多机：准备专用 Private Git 仓库；每台机器运行

@@ -30,7 +30,7 @@ codex-quota-keeper/
   install.cmd      安装入口
   uninstall.cmd    卸载入口
   apply-config.cmd 修改配置后应用
-  config.example.json
+  config.example.jsonc
   scripts/         实现脚本
   runtime/         gitignored（machine.json / state.json / lock / logs）
   history/         净化日志（可选 Git 同步）
@@ -39,9 +39,10 @@ codex-quota-keeper/
 
 ## 快速开始
 
-1. 解压到固定目录，例如 `D:\Tools\codex-quota-keeper`。
-2. 复制 `config.example.json` 为 `config.json`，按需改 `poll.intervalMinutes`、`leader.label`、
-   `github.coordination.repoPath`（完整字段见下方「配置」）。
+1. 解压到固定目录（**不要放在源码 Git 仓库里**，避免与源码更新互相干扰），例如 `D:\Tools\codex-quota-keeper`。
+2. 复制 `config.example.jsonc` 为 `config.json`——模板是 JSONC（支持 `//` 与 `/* */` 注释，
+   每项带中文说明），取消注释即自定义，未配置字段用内置默认值；按需改
+   `poll.intervalMinutes`、`leader.label`、`github.coordination.repoPath`（完整字段见下方「配置」）。
 3. 确保 `mode=MonitorOnly`、`codex.autoAnchor=false`。
 4. 运行 `install.cmd`（会做一次只读 quota probe，成功后注册 Windows 计划任务）。
 5. 双击 `status.cmd` 验证 `Task installed=YES`、`Enabled=YES`、`Auth=READY`。

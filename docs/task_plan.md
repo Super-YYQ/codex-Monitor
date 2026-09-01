@@ -19,7 +19,7 @@ codex-quota-keeper/
   install.cmd
   uninstall.cmd
   apply-config.cmd
-  config.example.json
+  config.example.jsonc
   scripts/
     common.ps1
     install.ps1

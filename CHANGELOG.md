@@ -5,10 +5,18 @@
 ### Changed
 - `github.coordination.enabled` 与 `github.historySync.enabled` 示例默认改为 `false`：
   单机复制配置即可零配置运行；多机需先 `setup-log-repo.ps1` 再开启。
+  代码内置默认值（`Get-DefaultConfig`）同步为 `false`（此前代码默认仍为 true）。
 - `codex.proxy` 校验放行 `socks5://` / `socks5h://`（是否被 codex 识别取决于其自身 HTTP 栈，
   失败仍回退直连一次；CQK-020）。
 - 文档明确：keeper 不指定模型/思考等级（额度读取为 app-server 协议方法；AutoAnchor 沿用
   本机 Codex CLI 默认配置）。
+- 新增 `config.example.jsonc` JSONC 模板（支持 `//` 与 `/* */` 注释，每项带中文说明，
+  自定义字段注释掉、取消注释即生效；`.json` 后缀下注释会被编辑器标红，故模板用 `.jsonc`）；
+  配置加载器支持 JSONC。
+
+### Docs
+- 快速开始建议把 `codex-quota-keeper` 复制到固定部署目录（计划任务绑定安装路径、
+  runtime 数据与机器身份随目录走，避免与源码更新互相干扰）。
 
 ## 0.9.0-beta (2026-08-30)
 
@@ -37,6 +45,6 @@ MonitorOnly 首个公开 Beta。按《codex-Monitor_仓库审查与开发计划_
 - 脱敏覆盖 ghp_/gho_/ghu_/ghs_/ghr_/github_pat_ 与 URL userinfo（CQK-012）。
 
 ### 升级说明
-- 从 0.1.x 升级：config.json 建议按 config.example.json 重写（旧键会自动迁移）；
+- 从 0.1.x 升级：config.json 建议按 config.example.jsonc 重写（旧键会自动迁移）；
   runtime/state.json 会自动迁移到 schema 2（旧窗口快照迁入 default bucket）；
   日志仓库需运行一次 scripts/setup-log-repo.ps1 完成绑定。

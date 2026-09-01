@@ -73,10 +73,50 @@ function ConvertFrom-JsonSafe {
     param([string]$Text)
     if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
     try {
-        return ConvertTo-HashtableDeep (ConvertFrom-Json $Text)
+        return ConvertTo-HashtableDeep (ConvertFrom-Json (Remove-JsonComments $Text))
     } catch {
         return $null
     }
+}
+
+function Remove-JsonComments {
+    # JSONC support: strips // line comments and /* */ block comments that appear
+    # OUTSIDE double-quoted strings (\" escapes respected), so config.example.jsonc
+    # can carry Chinese annotations while still parsing as JSON. A // inside a
+    # string value (e.g. "http://127.0.0.1:7890") is never treated as a comment.
+    param([string]$Text)
+    if ([string]::IsNullOrEmpty($Text)) { return $Text }
+    $sb = [System.Text.StringBuilder]::new($Text.Length)
+    $i = 0
+    $n = $Text.Length
+    $inString = $false
+    while ($i -lt $n) {
+        $c = $Text[$i]
+        if ($inString) {
+            [void]$sb.Append($c)
+            if ($c -eq '\' -and $i + 1 -lt $n) {
+                [void]$sb.Append($Text[$i + 1]); $i += 2; continue
+            }
+            if ($c -eq '"') { $inString = $false }
+            $i += 1; continue
+        }
+        if ($c -eq '"') {
+            $inString = $true; [void]$sb.Append($c); $i += 1; continue
+        }
+        if ($c -eq '/' -and $i + 1 -lt $n -and $Text[$i + 1] -eq '/') {
+            $i += 2
+            while ($i -lt $n -and $Text[$i] -ne "`n") { $i += 1 }
+            continue
+        }
+        if ($c -eq '/' -and $i + 1 -lt $n -and $Text[$i + 1] -eq '*') {
+            $i += 2
+            while ($i + 1 -lt $n -and -not ($Text[$i] -eq '*' -and $Text[$i + 1] -eq '/')) { $i += 1 }
+            $i += 2
+            continue
+        }
+        [void]$sb.Append($c); $i += 1
+    }
+    return $sb.ToString()
 }
 
 function Read-JsonFile {
@@ -354,12 +394,12 @@ function Get-DefaultConfig {
         }
         github = @{
             coordination = @{
-                enabled = $true
+                enabled = $false
                 repoPath = ''
                 branch = 'cqk/coordination'
             }
             historySync = @{
-                enabled = $true
+                enabled = $false
                 push = $true
                 branch = 'cqk/history'
                 eventsOnly = $true
@@ -511,7 +551,7 @@ function Load-Config {
     # Returns @{ config = <hashtable with defaults merged>; issues = @(); path = ... }
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) {
-        return @{ config = $null; issues = @("config file not found: $Path (copy config.example.json to config.json)"); path = $Path }
+        return @{ config = $null; issues = @("config file not found: $Path (copy config.example.jsonc to config.json)"); path = $Path }
     }
     $raw = Read-JsonFile $Path
     if ($null -eq $raw) {

@@ -1,0 +1,108 @@
+{
+  // =====================================================================
+  // Codex Quota Keeper 配置模板（JSONC 格式：支持 // 行注释 与 /* 块注释 */）
+  // 本模板使用 .jsonc 扩展名，编辑器会按 JSON with Comments 渲染、不报错；
+  // 若复制为 config.json 后保留注释，有的编辑器会按严格 JSON 标红（可删除注释行）。
+  //
+  // 用法：
+  //   1. 把本文件复制为同目录下的 config.json，然后取消注释你要自定义的项。
+  //   2. 被注释（未配置）的字段使用代码内置默认值，完整字段表见 README「配置」章节。
+  //   3. 单机 MonitorOnly（默认）：无需任何修改，直接 install.cmd。
+  //   4. 多机：取消注释下方 github 段的协调/历史两块，先执行
+  //      pwsh scripts/setup-log-repo.ps1 -RepoPath <日志仓库路径> 绑定仓库。
+  //   5. 改完执行 apply-config.cmd 使计划任务生效（幂等，可反复执行）。
+  // =====================================================================
+  "schemaVersion": 2,
+
+  // 运行模式：MonitorOnly（默认，只读额度、不调用模型）| AutoAnchor（实验，见下方说明）
+  "mode": "MonitorOnly",
+
+  // ---- 定时 / 轮询 ------------------------------------------------------
+  "poll": {
+    // 额度轮询周期（分钟），即计划任务重复间隔；必须 >= minimumIntervalMinutes（低于 5 会被拒绝）
+    // "intervalMinutes": 60,
+    // 允许的最小间隔下限（验证用）
+    // "minimumIntervalMinutes": 5,
+  },
+
+  // ---- 多机协调（Leader 租约）--------------------------------------------
+  "leader": {
+    // 是否启用租约协调（单机保持默认 true 即为本地 Leader；多机互斥靠下方 github 段）
+    // "enabled": true,
+    // 本机标签（status / 审计里区分机器用）
+    // "label": "Home PC",
+    // 租约 TTL（分钟，≈轮询周期 3 倍）
+    // "leaseTtlMinutes": 45,
+    // 时钟漂移 / 网络延迟容忍（分钟）
+    // "graceMinutes": 5,
+    // 租约过期后允许他人接管
+    // "takeoverOnExpiry": true,
+  },
+
+  // ---- 协调与历史仓库（GitHub，多机才需要）-------------------------------
+  "github": {
+    // 默认全部关闭：单机无需任何 Git 仓库即可运行（LOCAL_ONLY，多机不安全）。
+    // 多机步骤：每台机器执行 pwsh scripts/setup-log-repo.ps1 -RepoPath <路径> 后，
+    // 取消注释下面两块并填写你的专用 Private 日志仓库路径。
+    "coordination": {
+      // 租约协调开关（false = 单机 LOCAL_ONLY）
+      // "enabled": true,
+      // 专用 Private 日志仓库本地路径（多机必填）
+      // "repoPath": "D:/tools/codex-quota-history",
+      // 协调分支名
+      // "branch": "cqk/coordination",
+    },
+    "historySync": {
+      // 是否把净化后的重要事件同步到远程 history（多机审计用）
+      // "enabled": true,
+      // 是否 push history 分支（false 只写本地）
+      // "push": true,
+      // history 分支名
+      // "branch": "cqk/history",
+      // 只同步重要事件（普通轮询零写入）
+      // "eventsOnly": true,
+    },
+  },
+
+  // ---- 日志 ---------------------------------------------------------------
+  "logging": {
+    // 本地日志 / history 保留天数（runner 每轮自动清理）
+    // "retentionDays": 90,
+    // 隐私开关：machineLabel 是否写入 history（false = 更隐私）
+    // "includeMachineLabel": false,
+  },
+
+  // ---- Codex 与 AutoAnchor -------------------------------------------------
+  "codex": {
+    // codex 可执行文件；auto = 自动探测（已兼容 exe/ps1/cmd/bat / npm codex.cmd）
+    // "command": "auto",
+    // 额度查询超时（秒）
+    // "queryTimeoutSeconds": 20,
+    // 出入站代理 URL（http(s):// 或 socks5://）；socks 是否被 codex 识别取决于其自身 HTTP 栈；
+    // 代理失败自动回退直连再试一次；空 = 直连
+    // "proxy": "http://127.0.0.1:7890",
+    // ---- AutoAnchor（实验功能，默认关闭；开启需先设 mode=AutoAnchor）--------
+    "autoAnchor": {
+      // 实验功能开关（官方未背书该用途，有风控解释风险，见 README）
+      // "enabled": false,
+      // 锚定用最小 Prompt（≤200 字符；禁换行与 shell 元字符，支持中文）
+      // "prompt": "Reply exactly OK.",
+      // 每日最大执行次数
+      // "maxPerDay": 6,
+      // 两次锚定的最小间隔（分钟）
+      // "minimumGapMinutes": 60,
+    },
+  },
+
+  // ---- Windows 计划任务 ----------------------------------------------------
+  "task": {
+    // 计划任务名
+    // "name": "CodexQuotaKeeper.Check",
+    // 开机自启
+    // "startWithWindows": true,
+    // 仅在有网络时运行
+    // "runIfNetworkAvailable": true,
+    // 是否允许唤醒计算机执行
+    // "wakeToRun": false,
+  },
+}

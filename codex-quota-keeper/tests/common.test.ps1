@@ -14,6 +14,8 @@ Assert-False ([bool]$defaults.codex.autoAnchor.enabled) 'autoAnchor default off'
 Assert-Equal 60 $defaults.poll.intervalMinutes 'default poll 60 min'
 Assert-Equal 5 $defaults.poll.minimumIntervalMinutes 'min poll floor 5 min'
 Assert-False ([bool]$defaults.logging.includeMachineLabel) 'machineLabel privacy default off'
+Assert-False ([bool]$defaults.github.coordination.enabled) 'coordination default off (local-only)'
+Assert-False ([bool]$defaults.github.historySync.enabled) 'historySync default off'
 Assert-Equal 'cqk/coordination' $defaults.github.coordination.branch 'coordination branch name'
 Assert-Equal 'cqk/history' $defaults.github.historySync.branch 'history branch name'
 
@@ -101,6 +103,56 @@ try {
     [void](Write-TestConfigFile $cfgFile $ftpProxy)
     $lpf = Load-Config $cfgFile
     Assert-True (@($lpf.issues).Count -ge 1) 'non-http(s) proxy scheme rejected'
+
+    Start-TestGroup 'config: JSONC comments accepted (config.example.jsonc template)'
+
+    $jsonc = @'
+{
+  // 行注释：被注释的键不会覆盖默认值
+  "schemaVersion": 2, /* 块注释 */
+  "mode": "MonitorOnly",
+  "poll": {
+    // "intervalMinutes": 1,        // 注释掉的非法值应被忽略，使用默认 60
+    "intervalMinutes": 45,        // 行尾注释
+    "minimumIntervalMinutes": 5
+  },
+  "github": {
+    "coordination": { "enabled": false /* 多机可取消注释改 true */ },
+    "historySync": { "enabled": false }
+  },
+  "codex": {
+    "proxy": "http://127.0.0.1:7890",
+    "autoAnchor": { "prompt": "say \"OK\" // keep this" }
+  }
+}
+'@
+    [System.IO.File]::WriteAllText($cfgFile, $jsonc, (New-Object System.Text.UTF8Encoding($false)))
+    $ljc = Load-Config $cfgFile
+    Assert-Equal 0 @($ljc.issues).Count 'JSONC config valid'
+    Assert-Equal 45 $ljc.config.poll.intervalMinutes 'uncommented override applied'
+    Assert-Equal 'http://127.0.0.1:7890' $ljc.config.codex.proxy '// inside string (URL) preserved'
+    Assert-Equal 'say "OK" // keep this' (Get-AutoAnchorConfig $ljc.config).prompt 'escaped quote and // inside string preserved'
+    Assert-False ([bool]$ljc.config.github.coordination.enabled) 'disabled coordination stays off'
+
+    $jsoncMin = @'
+{
+  // 只有注释的最小模板：所有字段应回落到内置默认值
+  "schemaVersion": 2,
+  "mode": "MonitorOnly",
+  "poll": {
+    // "intervalMinutes": 1,
+  },
+  "leader": {
+    /* "label": "X" */
+  },
+  "github": { "coordination": {}, "historySync": {} }
+}
+'@
+    [System.IO.File]::WriteAllText($cfgFile, $jsoncMin, (New-Object System.Text.UTF8Encoding($false)))
+    $ljcMin = Load-Config $cfgFile
+    Assert-Equal 0 @($ljcMin.issues).Count 'minimal JSONC config valid'
+    Assert-Equal 60 $ljcMin.config.poll.intervalMinutes 'commented-out value leaves default intact'
+    Assert-Equal 'Home PC' $ljcMin.config.leader.label 'commented-out label leaves default intact'
 
     Start-TestGroup 'config: legacy v1 keys map onto v2 schema'
 

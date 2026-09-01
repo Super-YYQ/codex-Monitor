@@ -2,7 +2,7 @@
 runtime/
 runtimes/
 
-# 本地配置（含仓库路径等本机信息；用 config.example.json 作模板）
+# 本地配置（含仓库路径等本机信息；用 config.example.jsonc 作模板）
 config.json
 
 # 历史日志（净化数据，是否同步到专用 Private 仓库由部署决定；默认忽略本地副本）

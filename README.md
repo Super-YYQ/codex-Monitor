@@ -42,8 +42,12 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
 
 1. 需要 Windows 10/11、PowerShell 7（入口兼容 Windows PowerShell 5.1）、
    可运行的 Codex CLI 或 Desktop 且当前用户已登录。
-2. 打开 `codex-quota-keeper` 目录，复制 `config.example.json` 为 `config.json`，
-   按需修改（连接口周期见下方「配置」章节）。
+   **建议先把 `codex-quota-keeper` 整个目录复制到固定部署目录**（如 `D:\Tools\codex-quota-keeper`）
+   再继续——计划任务绑定安装路径，且 `runtime/` 数据与机器身份随部署目录走；
+   不要在源码 Git 仓库里直接运行（虽然 `runtime/`、`config.json`、`history/` 已被
+   `.gitignore` 忽略不会污染仓库，但源码更新/回退仍会干扰运行中的副本）。
+2. 打开部署目录，复制 `config.example.jsonc` 为 `config.json`——模板是 JSONC（带中文注释，
+   编辑器按 JSONC 渲染无报错），取消注释即可自定义，未配置的字段使用内置默认值（完整字段表见下方「配置」章节）。
 3. 双击 `install.cmd`（安装前先做一次只读 quota probe，通过后注册当前用户计划任务，**无需管理员**）。
 4. 双击 `status.cmd`，确认 `Task installed=YES`、`Enabled=YES`、`Codex CLI=READY`。
 5. 改完配置后双击 `apply-config.cmd` 生效；卸载双击 `uninstall.cmd`（本地历史默认保留）。
@@ -55,7 +59,10 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
 
 ## 配置（`config.json` 在哪改、怎么改）
 
-配置文件是 `codex-quota-keeper/config.json`（从 `config.example.json` 复制而来）。
+配置文件是 `codex-quota-keeper/config.json`（从 `config.example.jsonc` 复制而来）。
+**模板与运行时配置都支持 JSONC**（`//` 行注释与 `/* */` 块注释；字符串里的 `//` 如代理 URL 不受影响），
+模板中每个字段都附中文说明，取消注释即可自定义。注意：`config.json` 是 `.json` 后缀，
+部分编辑器会按严格 JSON 把注释标红——可删除注释行，或把该文件的语言关联改为 JSONC/JSON with Comments。
 **改完任意字段后双击 `apply-config.cmd`**，它会校验配置并更新 Windows 计划任务
 （轮询周期与启动条件）。幂等，可反复执行。
 
