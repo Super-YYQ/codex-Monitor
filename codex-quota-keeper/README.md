@@ -73,7 +73,7 @@ codex-quota-keeper/
 | `github.coordination.repoPath` | — | 专用日志仓库本地路径（多机必填） |
 | `github.historySync.push` | true | history 分支推送开关 |
 | `logging.includeMachineLabel` | false | 隐私开关：machineLabel 是否进 history |
-| `codex.proxy` | （空） | codex 出入站代理 URL，如 `http://127.0.0.1:7890`（空 = 直连） |
+| `codex.proxy` | （空） | codex 出入站代理 URL，如 `http://127.0.0.1:7890`、`socks5://127.0.0.1:7891`（空 = 直连） |
 | `codex.autoAnchor.enabled` | false | 实验功能开关（默认关闭） |
 
 ## 前置条件
@@ -99,7 +99,7 @@ codex-quota-keeper/
 | `leader.leaseTtlMinutes` | 45 | 租约 TTL（≈轮询周期 3 倍） |
 | `leader.graceMinutes` | 5 | 时钟漂移/网络延迟容忍 |
 | `leader.takeoverOnExpiry` | true | 过期后允许他人接管 |
-| `github.coordination.enabled` | true | 租约协调（false = LOCAL_ONLY，多机不安全） |
+| `github.coordination.enabled` | false | 租约协调（默认关闭 = 单机 LOCAL_ONLY；多机先 setup-log-repo 再开启，false 时多机不安全） |
 | `github.coordination.repoPath` | — | 专用日志仓库本地路径 |
 
 ## 状态机
@@ -128,12 +128,16 @@ AutoAnchor 指：检测到额度窗口重置后，自动发送一个无业务意
 - 遇到 429、usage-limit、认证异常、未知 schema 时立即 fail closed，不调用模型。
 - Anchor 提示词 `codex.autoAnchor.prompt` 支持中文等 Unicode，长度上限 200 字符；仍禁用换行与
   shell 元字符（`.cmd` 安装经 cmd.exe 展开，防注入）。
+- **模型与思考等级**：本项目从不指定 `--model` / 推理等级参数——额度读取走 app-server
+  协议方法不调用模型；AutoAnchor 的 `codex exec` 沿用你本机 Codex CLI 的默认配置
+  （`~/.codex/config.toml` 的 `model` / `model_reasoning_effort`），此处无对应配置项。
 
 ## 重试与代理
 
 - **不无限重试**：每次运行至多一次 quota 读取（计划任务每个周期运行一次，周期由
   `poll.intervalMinutes` 决定）。未配置代理时，失败后本周期内不再重试。
 - **代理**：`codex.proxy` 配置后，codex 子进程以 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` 走代理。
+  支持 `http(s)://` 与 `socks5://`/`socks5h://`（socks scheme 是否被 codex 识别取决于其自身 HTTP 栈）。
   若代理路径读取失败（任意错误类型），**自动退回直连再试一次**；两次都失败则停止，下个周期再试。
   AutoAnchor 的模型调用同样走代理，但绝不重试（at-most-once）。
 - 连续失败计数（所有失败类型）记录在 `runtime/state.json` 的 `consecutiveReadFailures`，成功后清零，

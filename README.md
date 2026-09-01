@@ -48,7 +48,8 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
 4. 双击 `status.cmd`，确认 `Task installed=YES`、`Enabled=YES`、`Codex CLI=READY`。
 5. 改完配置后双击 `apply-config.cmd` 生效；卸载双击 `uninstall.cmd`（本地历史默认保留）。
 6. 多机模式：准备一个专用 Private Git 仓库，在每台机器执行
-   `pwsh scripts/setup-log-repo.ps1 -RepoPath <日志仓库路径>` 完成绑定。
+   `pwsh scripts/setup-log-repo.ps1 -RepoPath <日志仓库路径>` 完成绑定，再把
+   `config.json` 的 `github.coordination.enabled` 与 `github.historySync.enabled` 置为 `true`（默认关闭）。
 
 ---
 
@@ -83,10 +84,10 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
-| `github.coordination.enabled` | `true` | 租约协调开关（false = LOCAL_ONLY，多机不安全） |
+| `github.coordination.enabled` | `false` | 租约协调开关（默认关闭 = 单机 LOCAL_ONLY；多机时先 `setup-log-repo.ps1` 再开启，false 时多机不安全） |
 | `github.coordination.repoPath` | — | 专用 Private 日志仓库本地路径（多机必填） |
 | `github.coordination.branch` | `cqk/coordination` | 协调分支 |
-| `github.historySync.enabled` | `true` | 是否同步净化后的 history |
+| `github.historySync.enabled` | `false` | 是否同步净化后的 history（默认关闭，多机开启） |
 | `github.historySync.push` | `true` | 是否 push history 分支 |
 | `github.historySync.branch` | `cqk/history` | history 分支 |
 | `github.historySync.eventsOnly` | `true` | 只同步重要事件（普通轮询零写入） |
@@ -104,11 +105,17 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
 |------|------|------|
 | `codex.command` | `auto` | codex 可执行文件（`auto` 自动探测，已兼容 exe/ps1/cmd/bat / npm codex.cmd） |
 | `codex.queryTimeoutSeconds` | `20` | 额度查询超时（秒） |
-| `codex.proxy` | （空） | codex 出入站代理 URL（如 `http://127.0.0.1:7890`）；空 = 直连 |
+| `codex.proxy` | （空） | codex 出入站代理 URL（如 `http://127.0.0.1:7890`、`socks5://127.0.0.1:7891`）；空 = 直连 |
 | `codex.autoAnchor.enabled` | `false` | **实验功能开关，默认关闭，安装器不会自动开启** |
 | `codex.autoAnchor.prompt` | `Reply exactly OK.` | 锚定用的最小 Prompt（支持中文等 Unicode，长度 ≤ 200；仍禁用换行与 shell 元字符） |
 | `codex.autoAnchor.maxPerDay` | `6` | 每日最大执行次数 |
 | `codex.autoAnchor.minimumGapMinutes` | `60` | 两次锚定的最小间隔 |
+
+> **关于模型与思考等级**：keeper 从不指定模型或推理等级——额度读取是 app-server 的
+> `account/rateLimits/read` 协议方法，**不调用模型**；AutoAnchor 的 `codex exec` 不带
+> `--model` / 推理等级参数，完全沿用你本机 Codex CLI 的默认配置（`~/.codex/config.toml`
+> 的 `model` / `model_reasoning_effort` 等），所以这里没有也不应有对应配置项。
+> 若 codex CLI 默认模型指向 gpt-5 类主力模型，AutoAnchor 即按该模型发送。
 
 > 配置 schema 标注为 v2；旧版平铺键（如 `pollIntervalMinutes`、`github.repoPath`）会
 > 在加载时自动迁移，无需手工改写。

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- `github.coordination.enabled` 与 `github.historySync.enabled` 示例默认改为 `false`：
+  单机复制配置即可零配置运行；多机需先 `setup-log-repo.ps1` 再开启。
+- `codex.proxy` 校验放行 `socks5://` / `socks5h://`（是否被 codex 识别取决于其自身 HTTP 栈，
+  失败仍回退直连一次；CQK-020）。
+- 文档明确：keeper 不指定模型/思考等级（额度读取为 app-server 协议方法；AutoAnchor 沿用
+  本机 Codex CLI 默认配置）。
+
 ## 0.9.0-beta (2026-08-30)
 
 MonitorOnly 首个公开 Beta。按《codex-Monitor_仓库审查与开发计划_v1.0》完成

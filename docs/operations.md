@@ -8,7 +8,9 @@
 3. `install.cmd` —— 只读 quota probe 通过后注册当前用户计划任务（无需管理员）。
 4. `status.cmd` 验证。
 5. 多机：准备专用 Private Git 仓库；每台机器运行
-   `pwsh scripts/setup-log-repo.ps1 -RepoPath <路径>`；第二台机器安装后应显示 PASSIVE。
+   `pwsh scripts/setup-log-repo.ps1 -RepoPath <路径>` 完成绑定，然后把
+   `config.json` 的 `github.coordination.enabled` 与 `github.historySync.enabled` 置为
+   `true`（示例默认均为 false，单机无需开启）；第二台机器安装后应显示 PASSIVE。
 
 ## 日常
 

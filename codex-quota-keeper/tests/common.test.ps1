@@ -74,6 +74,24 @@ try {
     Assert-Equal 'http://127.0.0.1:7890' $pOn['ALL_PROXY'] 'ALL_PROXY set'
     Assert-Equal 3 @($pOn.Keys).Count 'exactly three proxy env keys'
 
+    $socksProxy = New-TestConfig @{
+        github = @{ coordination = @{ enabled = $false; repoPath = '' }; historySync = @{ enabled = $false } }
+        codex  = @{ proxy = 'socks5://127.0.0.1:7891' }
+    }
+    [void](Write-TestConfigFile $cfgFile $socksProxy)
+    $ls5 = Load-Config $cfgFile
+    Assert-Equal 0 @($ls5.issues).Count 'socks5 proxy URL accepted'
+    $ps5 = Get-CodexProxyEnvironment $ls5.config
+    Assert-Equal 'socks5://127.0.0.1:7891' $ps5['ALL_PROXY'] 'socks5 ALL_PROXY set'
+
+    $socksHProxy = New-TestConfig @{
+        github = @{ coordination = @{ enabled = $false; repoPath = '' }; historySync = @{ enabled = $false } }
+        codex  = @{ proxy = 'socks5h://127.0.0.1:7891' }
+    }
+    [void](Write-TestConfigFile $cfgFile $socksHProxy)
+    $ls5h = Load-Config $cfgFile
+    Assert-Equal 0 @($ls5h.issues).Count 'socks5h proxy URL accepted'
+
     $badProxy = New-TestConfig @{ codex = @{ proxy = 'not a url' } }
     [void](Write-TestConfigFile $cfgFile $badProxy)
     $lpb = Load-Config $cfgFile

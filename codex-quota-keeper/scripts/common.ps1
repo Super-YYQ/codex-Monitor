@@ -233,8 +233,10 @@ function Test-AutoAnchorEnabled {
 }
 
 function Get-ProxyConfig {
-    # codex.proxy = '' (off) or an http(s) proxy URL handed to the codex child
-    # process as HTTP_PROXY/HTTPS_PROXY/ALL_PROXY (CQK-020 proxy support).
+    # codex.proxy = '' (off) or an http/https/socks5 proxy URL handed to the codex
+    # child process as HTTP_PROXY/HTTPS_PROXY/ALL_PROXY (CQK-020 proxy support).
+    # Whether the codex binary honors a socks5 scheme is up to its own HTTP stack;
+    # a failed proxy attempt still falls back to one direct retry.
     param([hashtable]$Config)
     if ($null -eq $Config -or $null -eq $Config.codex) { return @{ enabled = $false; url = '' } }
     $url = [string]$Config.codex.proxy
@@ -476,8 +478,8 @@ function Test-ConfigShape {
     $proxy = Get-ProxyConfig $Config
     if ($proxy.enabled) {
         $uri = $null
-        if (-not [System.Uri]::TryCreate($proxy.url, [System.UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -notin @('http', 'https')) {
-            $issues += "codex.proxy must be an http(s) URL (got '$($proxy.url)')"
+        if (-not [System.Uri]::TryCreate($proxy.url, [System.UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -notin @('http', 'https', 'socks5', 'socks5h')) {
+            $issues += "codex.proxy must be an http(s)/socks5(s) URL (got '$($proxy.url)')"
         }
     }
     $aa = Get-AutoAnchorConfig $Config

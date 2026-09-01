@@ -14,12 +14,12 @@
   },
   "github": {
     "coordination": {
-      "enabled": true,
+      "enabled": false,
       "repoPath": "D:/tools/codex-quota-history",
       "branch": "cqk/coordination"
     },
     "historySync": {
-      "enabled": true,
+      "enabled": false,
       "push": true,
       "branch": "cqk/history",
       "eventsOnly": true
