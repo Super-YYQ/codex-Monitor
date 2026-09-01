@@ -22,7 +22,7 @@
 - **AutoAnchor prompt 白名单**：长度与字符集受限、参数数组传递、绝不接受远程下发命令。
 - **专用日志仓库绑定**：推送前校验 marker（repoId）+ origin 指纹 + 分支白名单；
   main/master/develop/release 等业务分支强制拒绝。
-- **AutoAnchor 默认关闭**：属于实验功能，开启即表示接受 doc/01 评估的合规解释风险。
+- **AutoAnchor 默认关闭**：属于实验功能，开启即表示接受 docs/design/01 评估的合规解释风险。
 
 ## 凭证处理建议
 
