@@ -104,5 +104,7 @@
     // "runIfNetworkAvailable": true,
     // 是否允许唤醒计算机执行
     // "wakeToRun": false,
+    // 安装（install.cmd）注册完任务后立即触发一次，便于马上验证链路；默认 false
+    // "runAtInstall": true,
   },
 }

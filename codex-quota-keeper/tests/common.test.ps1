@@ -18,6 +18,7 @@ Assert-False ([bool]$defaults.github.coordination.enabled) 'coordination default
 Assert-False ([bool]$defaults.github.historySync.enabled) 'historySync default off'
 Assert-Equal 'cqk/coordination' $defaults.github.coordination.branch 'coordination branch name'
 Assert-Equal 'cqk/history' $defaults.github.historySync.branch 'history branch name'
+Assert-False ([bool]$defaults.task.runAtInstall) 'runAtInstall default off (no immediate run)'
 
 Start-TestGroup 'config: Load-Config merges defaults and validates'
 

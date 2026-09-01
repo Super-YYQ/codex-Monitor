@@ -72,6 +72,22 @@ function New-KeeperTaskParameters {
     }
 }
 
+function Invoke-ImmediateRunIfRequested {
+    # task.runAtInstall=true: start the freshly registered task right away so the
+    # user can watch the first run without waiting for the poll interval. Fire and
+    # forget: a start failure is reported but never fails the install.
+    param([hashtable]$Config, [string]$TaskName)
+    if ($Config.task -isnot [hashtable] -or $Config.task.runAtInstall -ne $true) {
+        return @{ started = $false; reason = 'runAtInstall not enabled' }
+    }
+    try {
+        Start-ScheduledTask -TaskName $TaskName
+        return @{ started = $true; reason = $null }
+    } catch {
+        return @{ started = $false; reason = $_.Exception.Message }
+    }
+}
+
 function Register-KeeperTask {
     param([hashtable]$Config, [string]$KeeperRoot)
     $tp = New-KeeperTaskParameters -Config $Config -KeeperRoot $KeeperRoot
@@ -121,8 +137,9 @@ function Invoke-KeeperInstall {
     # 4/5. Register the per-user scheduled task.
     $loaded = Load-Config $ConfigFile
     $taskName = Register-KeeperTask -Config $loaded.config -KeeperRoot $KeeperRoot
+    $immediateRun = Invoke-ImmediateRunIfRequested -Config $loaded.config -TaskName $taskName
 
-    return @{ ok = $true; issues = @(); taskName = $taskName; machine = $pf.machine; probe = $probe; codexPath = $pf.codexPath }
+    return @{ ok = $true; issues = @(); taskName = $taskName; machine = $pf.machine; probe = $probe; codexPath = $pf.codexPath; immediateRun = $immediateRun }
 }
 
 # Direct execution (pwsh -File / install.cmd): run the install interactively.
@@ -135,6 +152,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         Write-Host "  Installed        : YES (task '$($result.taskName)')"
         Write-Host "  Machine identity : $($result.machine.label) [$($result.machine.machineId)]"
         Write-Host "  Quota probe      : $(if ($SkipProbe) { 'SKIPPED (-SkipProbe)' } else { 'OK (read-only, no model call)' })"
+        Write-Host "  Immediate run    : $(if ($result.immediateRun.started) { 'STARTED (task.runAtInstall=true)' } else { "no ($($result.immediateRun.reason))" })"
         Write-Host ''
         Write-Host '  Next: double-click status.cmd to verify.'
     } else {

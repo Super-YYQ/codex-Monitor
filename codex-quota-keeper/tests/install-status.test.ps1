@@ -64,6 +64,27 @@ try {
     $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
     Assert-NotNull $info 'task info readable'
 
+    Start-TestGroup 'install: task.runAtInstall decides immediate start'
+
+    $script:startedTaskCalls = @()
+    function Start-ScheduledTask { param([string]$TaskName) $script:startedTaskCalls += $TaskName }
+    try {
+        $cfgOff = New-Cfg 15
+        $r1 = Invoke-ImmediateRunIfRequested -Config $cfgOff -TaskName $taskName
+        Assert-False $r1.started 'no start when runAtInstall is off'
+        Assert-Equal 0 @($script:startedTaskCalls).Count 'Start-ScheduledTask not called when off'
+
+        $cfgOn = New-Cfg 15
+        $cfgOn.task.runAtInstall = $true
+        $r2 = Invoke-ImmediateRunIfRequested -Config $cfgOn -TaskName $taskName
+        Assert-True $r2.started 'start requested when runAtInstall is on'
+        Assert-Equal 1 @($script:startedTaskCalls).Count 'Start-ScheduledTask called exactly once'
+        Assert-Equal $taskName $script:startedTaskCalls[0] 'task name passed through'
+    } finally {
+        Remove-Item Function:\Start-ScheduledTask -ErrorAction SilentlyContinue
+        Remove-Variable startedTaskCalls -Scope Script -ErrorAction SilentlyContinue
+    }
+
     Start-TestGroup 'apply-config: interval update 15 -> 30'
 
     $null = Write-TestConfigFile $cfgFile (New-Cfg 30)

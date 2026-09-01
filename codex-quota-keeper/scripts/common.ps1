@@ -424,6 +424,7 @@ function Get-DefaultConfig {
             startWithWindows = $true
             runIfNetworkAvailable = $true
             wakeToRun = $false
+            runAtInstall = $false   # true = start the task right after install.cmd registers it
         }
     }
 }
