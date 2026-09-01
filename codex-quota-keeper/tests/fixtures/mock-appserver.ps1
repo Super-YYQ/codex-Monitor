@@ -32,11 +32,34 @@ $ErrorActionPreference = 'Stop'
 $mode = if ($env:CQK_MOCK_MODE) { $env:CQK_MOCK_MODE } else { 'normal' }
 $out = [Console]::Out
 
+# --- diagnostic trace (tests only) -----------------------------------------
+# The quota client captures the child's PID; on a TIMEOUT it reads this file's
+# tail to say whether the mock started / received / parsed / sent. File name
+# must match Start-AppServerSession's reader (quota-client.ps1).
+$script:TraceFile = $null
+try {
+    $traceDir = Join-Path $env:TEMP 'cqk-mock-trace'
+    New-Item -ItemType Directory -Path $traceDir -Force | Out-Null
+    $script:TraceFile = Join-Path $traceDir ('cqk-mock-{0}.trace' -f $PID)
+} catch { }
+
+function Write-MockTrace {
+    param([string]$Text)
+    if (-not $script:TraceFile) { return }
+    try {
+        $line = "[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss.fff'), $Text
+        [System.IO.File]::AppendAllText($script:TraceFile, $line + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($false)))
+    } catch { }
+}
+
+Write-MockTrace ("started pid={0} mode={1} psver={2} pshome={3}" -f $PID, $mode, $PSVersionTable.PSVersion, $PSHOME)
+
 function Send-MockResponse {
     param($obj)
     $json = ConvertTo-Json -InputObject $obj -Depth 10 -Compress
     $out.WriteLine($json)
     $out.Flush()
+    Write-MockTrace ("sent: id={0} len={1}" -f $obj.id, $json.Length)
 }
 
 function Get-MockWindow {
@@ -48,6 +71,7 @@ if ($mode -eq 'start-failure') { exit 1 }
 
 # --- exec subcommand (AutoAnchor tests): CQK_MOCK_EXEC = ok | fail | timeout ---
 if ($args.Count -ge 1 -and $args[0] -eq 'exec') {
+    Write-MockTrace ("exec: mode={0}" -f $env:CQK_MOCK_EXEC)
     switch ($env:CQK_MOCK_EXEC) {
         'fail' { exit 1 }
         'timeout' { Start-Sleep -Seconds 120; exit 1 }
@@ -68,11 +92,15 @@ if ($script:CountdownFile) {
 
 while ($true) {
     $line = [Console]::In.ReadLine()
-    if ($null -eq $line) { break }
+    if ($null -eq $line) { Write-MockTrace 'stdin: EOF'; break }
     if ([string]::IsNullOrWhiteSpace($line)) { continue }
+    $hex = (($line.ToCharArray() | ForEach-Object { '{0:X2}' -f [int]$_ }) | Select-Object -First 48) -join ' '
+    if ($line.Length -gt 48) { $hex += '...' }
+    Write-MockTrace ("recv: len={0} hex={1}" -f $line.Length, $hex)
     $msg = $null
-    try { $msg = ConvertFrom-Json $line } catch { continue }
-    if ($null -eq $msg -or -not $msg.method) { continue }
+    try { $msg = ConvertFrom-Json $line } catch { }
+    if ($null -eq $msg -or -not $msg.method) { Write-MockTrace 'recv: not parseable (no method)'; continue }
+    Write-MockTrace ("recv: method={0} id={1}" -f [string]$msg.method, [string]$msg.id)
 
     switch ([string]$msg.method) {
         'initialize' {

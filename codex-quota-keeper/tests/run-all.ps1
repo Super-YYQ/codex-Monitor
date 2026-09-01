@@ -40,7 +40,10 @@ foreach ($file in $testFiles) {
 Write-Host ''
 if ($failed.Count -gt 0) {
     Write-Host "RESULT: $($passed.Count) passed, $($failed.Count) failed. Failed: $($failed -join ', ')" -ForegroundColor Red
+    Write-Host "Mock trace files kept for forensics: $env:TEMP\cqk-mock-trace" -ForegroundColor Yellow
     exit 1
 }
+# Mock trace files (tests only) - scrub them once everything passed.
+try { Remove-Item -LiteralPath (Join-Path $env:TEMP 'cqk-mock-trace') -Recurse -Force -ErrorAction SilentlyContinue } catch { }
 Write-Host "RESULT: all $($passed.Count) test file(s) passed." -ForegroundColor Green
 exit 0

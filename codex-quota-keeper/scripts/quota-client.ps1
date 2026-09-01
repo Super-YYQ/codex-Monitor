@@ -44,11 +44,25 @@ function Start-AppServerSession {
     $proc.StartInfo = $psi
     [void]$proc.Start()
     $stderrTask = $proc.StandardError.ReadToEndAsync()
+    # Pipe encodings + mock trace path are captured here so a TIMEOUT can report
+    # exactly how the child was wired (5.1 and 7 take different code paths).
+    $traceFile = $null
+    if ($env:TEMP) { $traceFile = Join-Path (Join-Path $env:TEMP 'cqk-mock-trace') ('cqk-mock-{0}.trace' -f $proc.Id) }
+    $launchSpec = if ($StartInfo.ContainsKey('rawArgs') -and $StartInfo.rawArgs) {
+        ('"{0}" {1}' -f $StartInfo.exe, [string]$StartInfo.rawArgs)
+    } else {
+        ('"{0}" {1}' -f $StartInfo.exe, (($StartInfo.args | ForEach-Object { '"' + $_ + '"' }) -join ' '))
+    }
     return @{
-        proc       = $proc
-        stdin      = $proc.StandardInput
-        stdout     = $proc.StandardOutput
-        stderrTask = $stderrTask
+        proc           = $proc
+        stdin          = $proc.StandardInput
+        stdout         = $proc.StandardOutput
+        stderrTask     = $stderrTask
+        stdinEncoding  = [string]$proc.StandardInput.Encoding.WebName
+        stdoutEncoding = [string]$proc.StandardOutput.Encoding.WebName
+        traceFile      = $traceFile
+        lastWritten    = $null
+        launchSpec     = $launchSpec
     }
 }
 
@@ -70,6 +84,38 @@ function Send-AppServerMessage {
     $json = ConvertTo-Json -InputObject $Message -Depth 10 -Compress
     $Session.stdin.WriteLine($json)
     $Session.stdin.Flush()
+    $Session.lastWritten = $json
+}
+
+function Get-AppServerFailureDetail {
+    # One-line diagnostics for TIMEOUT/EOF failures: pipe encodings, what was
+    # last written, the child's own trace (mock fixtures only), and stderr state.
+    # Surfaces which pipe boundary broke without a debugger.
+    param($Session, [int]$Id)
+    $parts = @('id=' + $Id)
+    if ($null -ne $Session) {
+        if ($Session.launchSpec) { $parts += ('launch=' + $Session.launchSpec) }
+        if ($Session.stdinEncoding)  { $parts += ('stdin=' + $Session.stdinEncoding) }
+        if ($Session.stdoutEncoding) { $parts += ('stdout=' + $Session.stdoutEncoding) }
+        if ($Session.lastWritten) {
+            $parts += ('wrote=' + $Session.lastWritten.Substring(0, [Math]::Min(48, $Session.lastWritten.Length)))
+        }
+        if ($Session.traceFile -and (Test-Path -LiteralPath $Session.traceFile)) {
+            $tail = @(Get-Content -LiteralPath $Session.traceFile -Tail 6 -ErrorAction SilentlyContinue)
+            if (@($tail).Count -gt 0) { $parts += ('mockTrace=' + ($tail -join ' | ')) }
+        } else {
+            $parts += 'mockTrace=<none>'
+        }
+        if ($Session.proc) {
+            if ($Session.proc.HasExited) {
+                $parts += ('procExited=True exitCode=' + $Session.proc.ExitCode)
+            } else {
+                $parts += 'procExited=False'
+                if ($Session.stderrTask.IsCompleted) { $parts += 'stderr=<closed>' } else { $parts += 'stderr=<open>' }
+            }
+        }
+    }
+    return ($parts -join '; ')
 }
 
 function Wait-AppServerResponse {
@@ -79,18 +125,18 @@ function Wait-AppServerResponse {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ($true) {
         if ([DateTime]::UtcNow -gt $deadline) {
-            return @{ ok = $false; kind = 'TIMEOUT'; message = "timed out after ${TimeoutSeconds}s waiting for response id $Id" }
+            return @{ ok = $false; kind = 'TIMEOUT'; message = ("timed out after {0}s waiting for response id {1} [{2}]" -f $TimeoutSeconds, $Id, (Get-AppServerFailureDetail $Session $Id)) }
         }
         $task = $Session.stdout.ReadLineAsync()
         while (-not $task.IsCompleted) {
             if ([DateTime]::UtcNow -gt $deadline) {
-                return @{ ok = $false; kind = 'TIMEOUT'; message = "timed out after ${TimeoutSeconds}s waiting for response id $Id" }
+                return @{ ok = $false; kind = 'TIMEOUT'; message = ("timed out after {0}s waiting for response id {1} [{2}]" -f $TimeoutSeconds, $Id, (Get-AppServerFailureDetail $Session $Id)) }
             }
             Start-Sleep -Milliseconds 20
         }
         $line = $task.GetAwaiter().GetResult()
         if ($null -eq $line) {
-            return @{ ok = $false; kind = 'EOF'; message = 'app-server closed stdout before responding' }
+            return @{ ok = $false; kind = 'EOF'; message = ("app-server closed stdout before responding [{0}]" -f (Get-AppServerFailureDetail $Session $Id)) }
         }
         # Defensive: strip a UTF-8 BOM if the child emits one.
         $line = $line.TrimStart([char]0xFEFF)
