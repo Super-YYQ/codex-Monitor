@@ -76,12 +76,19 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
 | `task.startWithWindows` | `true` | 开机自启 |
 | `task.runIfNetworkAvailable` | `true` | 仅在有网络时运行 |
 | `task.wakeToRun` | `false` | 是否允许唤醒计算机执行 |
+| `task.runAtInstall` | `false` | 安装（install.cmd）注册完任务后立即触发一次，便于马上验证链路 |
+
+> **触发节奏**：任务以「安装时刻 +1 分钟」为锚点（`-Once` 触发器），按 `poll.intervalMinutes`
+> 重复；`startWithWindows=true`（默认）另加登录触发；关机错过的周期由 `StartWhenAvailable`
+> 在可运行时补跑。改配置执行 `apply-config.cmd` 会重注册任务，锚点重置为当时 +1 分钟。
+> 安装时的一次性只读 quota probe 不算轮询（不保存状态），首次正式运行是 first observation，
+> 空历史下不产生事件。
 
 ### 多机协调（Leader 租约）
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
-| `leader.enabled` | `true` | 是否启用租约协调 |
+| `leader.enabled` | `true` | 是否启用单 Leader 租约**机制**（机制层；多机互斥还需 `github.coordination.enabled=true`） |
 | `leader.label` | `Home PC` | 本机标签（便于在 status/审计里区分机器） |
 | `leader.leaseTtlMinutes` | `45` | 租约 TTL（≈轮询周期 3 倍） |
 | `leader.graceMinutes` | `5` | 时钟漂移 / 网络延迟容忍 |
@@ -98,6 +105,19 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
 | `github.historySync.push` | `true` | 是否 push history 分支 |
 | `github.historySync.branch` | `cqk/history` | history 分支 |
 | `github.historySync.eventsOnly` | `true` | 只同步重要事件（普通轮询零写入） |
+
+> **`leader.enabled` 与 `github.coordination.enabled` 是两个独立层级**，不是重复开关：
+> `leader.enabled` = 机制层（是否启用单 Leader 租约机制）；
+> `github.coordination.enabled` = 传输层（租约是否经专用仓库做**跨机器**协调）。
+> 两者**任一为 false 即进入本地模式**（LOCAL_ONLY：本机始终以 Leader 身份运行，
+> 不 fetch/push 远端租约，status 会提示 MULTI-PC UNSAFE）。
+
+| `leader.enabled` | `github.coordination.enabled` | 效果 |
+|---|---|---|
+| `true` | `true` | **多机互斥**（完整模式，唯一需要仓库的组合） |
+| `true` | `false` | **单机默认**（LOCAL_ONLY，不碰 git） |
+| `false` | `true` | 不抢租约，仅用仓库同步 history |
+| `false` | `false` | 纯单机，完全不碰 git |
 
 ### 日志
 

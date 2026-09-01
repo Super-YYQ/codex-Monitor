@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+- 新增 `task.runAtInstall` 配置（默认 `false`）：`install.cmd` 注册完计划任务后立即触发一次
+  （fire-and-forget，启动失败不影响安装），便于马上验证链路。
+
 ### Changed
 - `github.coordination.enabled` 与 `github.historySync.enabled` 示例默认改为 `false`：
   单机复制配置即可零配置运行；多机需先 `setup-log-repo.ps1` 再开启。
@@ -17,6 +21,11 @@
 ### Docs
 - 快速开始建议把 `codex-quota-keeper` 复制到固定部署目录（计划任务绑定安装路径、
   runtime 数据与机器身份随目录走，避免与源码更新互相干扰）。
+- 明确计划任务触发节奏：锚点 = 注册时刻 +1 分钟、按 `poll.intervalMinutes` 重复、
+  AtLogOn 触发器、`StartWhenAvailable` 补跑、`apply-config.cmd` 重锚点、
+  安装 probe 不算轮询、首轮 first observation。
+- 新增「更新升级」流程说明：合并覆盖部署目录（保留 config.json / runtime / history）、
+  重装 `install.cmd` 同名替换不产生多任务、新配置项需手动放开注释。
 
 ## 0.9.0-beta (2026-08-30)
 

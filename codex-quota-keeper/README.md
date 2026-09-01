@@ -44,9 +44,16 @@ codex-quota-keeper/
    每项带中文说明），取消注释即自定义，未配置字段用内置默认值；按需改
    `poll.intervalMinutes`、`leader.label`、`github.coordination.repoPath`（完整字段见下方「配置」）。
 3. 确保 `mode=MonitorOnly`、`codex.autoAnchor=false`。
-4. 运行 `install.cmd`（会做一次只读 quota probe，成功后注册 Windows 计划任务）。
+4. 运行 `install.cmd`（会做一次只读 quota probe，成功后注册 Windows 计划任务；
+   想注册完立即跑一轮可设 `task.runAtInstall=true`）。
 5. 双击 `status.cmd` 验证 `Task installed=YES`、`Enabled=YES`、`Auth=READY`。
 6. 第二台电脑重复安装，确认只有一台 `LEADER`、另一台 `PASSIVE`。
+
+**更新升级**：仓库更新后，把新版本文件**合并覆盖**到部署目录（务必保留 `config.json`、
+`runtime/`——含机器身份 `machine.json`，多机租约依赖它——与 `history/`），再运行一次
+`install.cmd`；它用 `-Force` 同名替换任务定义，**不会产生多个计划任务**
+（前提是 `task.name` 没改；改名会残留旧任务）。新版本新增的配置项以注释形式出现在
+`config.example.jsonc` 里，不添加也能运行（走默认值），需要再取消注释 + `apply-config.cmd`。
 
 ## 配置（修改与生效）
 
@@ -63,6 +70,15 @@ codex-quota-keeper/
 | `task.startWithWindows` | true | 开机自启 |
 | `task.runIfNetworkAvailable` | true | 仅在有网络时运行 |
 | `task.wakeToRun` | false | 是否允许唤醒执行 |
+| `task.runAtInstall` | false | 安装（install.cmd）注册完任务后立即触发一次（fire-and-forget，启动失败不影响安装） |
+
+> **计划任务节奏**：注册时以「当前时刻 +1 分钟」为锚点创建 `-Once` 触发器，之后每
+> `poll.intervalMinutes` 重复一次（不绑定整点，如 14:37 安装 → 14:38、15:38、16:38…）；
+> 重复时长固定 10 年（等效无限）。`startWithWindows=true`（默认）会另加一个登录时触发；
+> 关机错过的周期因 `StartWhenAvailable=true` 会在可运行时立即补跑。
+> 改配置后 `apply-config.cmd` 会重注册任务，把锚点重置为「当时时刻 +1 分钟」。
+> 另外安装本身会先做一次只读额度探测（不保存状态、不算轮询）；计划任务的首次正式运行
+> 才是第一轮（空历史 = first observation，不会产生事件，所以窗口重置检测最早第二轮才可能发生）。
 
 其它常用字段：
 
@@ -102,6 +118,10 @@ codex-quota-keeper/
 | `leader.takeoverOnExpiry` | true | 过期后允许他人接管 |
 | `github.coordination.enabled` | false | 租约协调（默认关闭 = 单机 LOCAL_ONLY；多机先 setup-log-repo 再开启，false 时多机不安全） |
 | `github.coordination.repoPath` | — | 专用日志仓库本地路径 |
+
+`leader.enabled`（机制层：是否启用单 Leader 租约）与 `github.coordination.enabled`（传输层：
+是否经专用仓库做跨机器协调）是两个独立层级，**任一为 false 即 LOCAL_ONLY**（本机始终
+Leader，不碰远端租约）。多机 = 两个都 `true`；单机默认 = `leader.enabled=true` + 协调关。
 
 ## 状态机
 
