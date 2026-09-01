@@ -33,8 +33,7 @@
 
 ```
 codex-quota-keeper/   工具本体（scripts / tests / 安装入口）
-doc/                  设计文档与开发计划
-docs/                 架构 / 运维 / 安全模型说明
+docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运维 / 安全模型与开发记录
 ```
 
 ---
@@ -63,7 +62,7 @@ docs/                 架构 / 运维 / 安全模型说明
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
-| `poll.intervalMinutes` | `15` | **额度轮询周期（分钟）**，即计划任务的重复间隔；允许 `5 / 10 / 15 / 30 / 60`，低于 5 会被拒绝 |
+| `poll.intervalMinutes` | `60` | **额度轮询周期（分钟）**，即计划任务的重复间隔；必须 ≥ `minimumIntervalMinutes`（低于 5 会被拒绝） |
 | `poll.minimumIntervalMinutes` | `5` | 允许的最小间隔下限（验证用） |
 | `task.name` | `CodexQuotaKeeper.Check` | Windows 计划任务名 |
 | `task.startWithWindows` | `true` | 开机自启 |
@@ -105,8 +104,9 @@ docs/                 架构 / 运维 / 安全模型说明
 |------|------|------|
 | `codex.command` | `auto` | codex 可执行文件（`auto` 自动探测，已兼容 exe/ps1/cmd/bat / npm codex.cmd） |
 | `codex.queryTimeoutSeconds` | `20` | 额度查询超时（秒） |
+| `codex.proxy` | （空） | codex 出入站代理 URL（如 `http://127.0.0.1:7890`）；空 = 直连 |
 | `codex.autoAnchor.enabled` | `false` | **实验功能开关，默认关闭，安装器不会自动开启** |
-| `codex.autoAnchor.prompt` | `Reply exactly OK.` | 锚定用的最小 Prompt（受长度/字符集白名单约束） |
+| `codex.autoAnchor.prompt` | `Reply exactly OK.` | 锚定用的最小 Prompt（支持中文等 Unicode，长度 ≤ 200；仍禁用换行与 shell 元字符） |
 | `codex.autoAnchor.maxPerDay` | `6` | 每日最大执行次数 |
 | `codex.autoAnchor.minimumGapMinutes` | `60` | 两次锚定的最小间隔 |
 
@@ -180,9 +180,13 @@ CI（GitHub Actions）在每次 push / PR 上运行：PS 7 与 PS 5.1 全量测�
 
 ## 文档
 
+- [docs/design/](docs/design/) — 中文设计交付文档（合规调研、总体架构、详细设计、部署运维、仓库审查）
 - [docs/architecture.md](docs/architecture.md) — 模块与数据流
 - [docs/operations.md](docs/operations.md) — 部署、多机与日常运维
 - [docs/security-model.md](docs/security-model.md) — 安全边界与隐私设计
+- [docs/findings.md](docs/findings.md) — 开发发现与决策记录
+- [docs/progress.md](docs/progress.md) — 实现进度
+- [docs/task_plan.md](docs/task_plan.md) — 开发任务计划
 - [SECURITY.md](SECURITY.md) — 漏洞报告与安全策略
 - [CHANGELOG.md](CHANGELOG.md) — 版本历史与升级说明
 

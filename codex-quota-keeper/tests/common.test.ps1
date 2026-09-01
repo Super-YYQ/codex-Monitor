@@ -11,7 +11,7 @@ $defaults = Get-DefaultConfig
 Assert-Equal 'MonitorOnly' $defaults.mode 'default mode is MonitorOnly'
 Assert-Equal 2 $defaults.schemaVersion 'v2 config schema'
 Assert-False ([bool]$defaults.codex.autoAnchor.enabled) 'autoAnchor default off'
-Assert-Equal 15 $defaults.poll.intervalMinutes 'default poll 15 min'
+Assert-Equal 60 $defaults.poll.intervalMinutes 'default poll 60 min'
 Assert-Equal 5 $defaults.poll.minimumIntervalMinutes 'min poll floor 5 min'
 Assert-False ([bool]$defaults.logging.includeMachineLabel) 'machineLabel privacy default off'
 Assert-Equal 'cqk/coordination' $defaults.github.coordination.branch 'coordination branch name'
@@ -49,6 +49,40 @@ try {
     [void](Write-TestConfigFile $cfgFile $bad3)
     $loaded4 = Load-Config $cfgFile
     Assert-True (@($loaded4.issues).Count -ge 1) 'missing repoPath rejected'
+
+    Start-TestGroup 'config: proxy URL validation'
+
+    $noProxy = New-TestConfig @{
+        github = @{ coordination = @{ enabled = $false; repoPath = '' }; historySync = @{ enabled = $false } }
+        codex  = @{ proxy = '' }
+    }
+    [void](Write-TestConfigFile $cfgFile $noProxy)
+    $lNone = Load-Config $cfgFile
+    Assert-Equal 0 @($lNone.issues).Count 'proxy-off config valid'
+    Assert-Equal 0 @((Get-CodexProxyEnvironment $lNone.config).Keys).Count 'no proxy env when proxy is off'
+
+    $goodProxy = New-TestConfig @{
+        github = @{ coordination = @{ enabled = $false; repoPath = '' }; historySync = @{ enabled = $false } }
+        codex  = @{ proxy = 'http://127.0.0.1:7890' }
+    }
+    [void](Write-TestConfigFile $cfgFile $goodProxy)
+    $lp = Load-Config $cfgFile
+    Assert-Equal 0 @($lp.issues).Count 'http proxy URL accepted'
+    Assert-Equal 'http://127.0.0.1:7890' (Get-ProxyConfig $lp.config).url 'proxy url preserved'
+    $pOn = Get-CodexProxyEnvironment $lp.config
+    Assert-Equal 'http://127.0.0.1:7890' $pOn['HTTPS_PROXY'] 'HTTPS_PROXY set'
+    Assert-Equal 'http://127.0.0.1:7890' $pOn['ALL_PROXY'] 'ALL_PROXY set'
+    Assert-Equal 3 @($pOn.Keys).Count 'exactly three proxy env keys'
+
+    $badProxy = New-TestConfig @{ codex = @{ proxy = 'not a url' } }
+    [void](Write-TestConfigFile $cfgFile $badProxy)
+    $lpb = Load-Config $cfgFile
+    Assert-True (@($lpb.issues).Count -ge 1) 'malformed proxy URL rejected'
+
+    $ftpProxy = New-TestConfig @{ codex = @{ proxy = 'ftp://example.com:21' } }
+    [void](Write-TestConfigFile $cfgFile $ftpProxy)
+    $lpf = Load-Config $cfgFile
+    Assert-True (@($lpf.issues).Count -ge 1) 'non-http(s) proxy scheme rejected'
 
     Start-TestGroup 'config: legacy v1 keys map onto v2 schema'
 

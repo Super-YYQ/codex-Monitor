@@ -35,6 +35,7 @@ function New-KeeperState {
         rateLimitReachedType = $null
         schemaUnknown        = $false
         lastError            = $null
+        consecutiveReadFailures = 0
         processedEventIds    = @()
         anchors              = @{ day = $null; count = 0; lastAnchorAt = $null }
         leader               = @{ ownerId = $null; ownerLabel = $null; expiresAt = $null }

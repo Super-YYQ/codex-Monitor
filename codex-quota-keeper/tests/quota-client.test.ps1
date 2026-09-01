@@ -244,6 +244,58 @@ try {
     Remove-Item Env:\CQK_MOCK_MODE -ErrorAction SilentlyContinue
 }
 
+Start-TestGroup 'proxy: off by default -> exactly one attempt'
+
+$r = Invoke-MockRead 'normal'
+Assert-True $r.ok 'read ok'
+Assert-Equal 'off' $r.proxy 'proxy flag off'
+Assert-Equal 1 $r.attempts 'single attempt'
+
+Start-TestGroup 'proxy: configured, mock accepts proxy -> used, one attempt'
+
+$env:CQK_MOCK_MODE = 'normal'
+try {
+    $cfg = New-TestConfig @{ codex = @{ command = $mockPath; queryTimeoutSeconds = 15; proxy = 'http://cqk-test-proxy.invalid:7890' } }
+    $r = Invoke-CodexRateLimitsRead -Config $cfg
+    Assert-True $r.ok 'read ok through proxy'
+    Assert-Equal 'used' $r.proxy 'proxy flag used'
+    Assert-Equal 1 $r.attempts 'one attempt'
+} finally {
+    Remove-Item Env:\CQK_MOCK_MODE -ErrorAction SilentlyContinue
+}
+
+Start-TestGroup 'proxy: fails through proxy, falls back to direct once'
+
+$env:CQK_MOCK_PROXY_URL = 'http://cqk-test-proxy.invalid:7890'
+$env:CQK_MOCK_FAIL_WITH_PROXY = '1'
+$env:CQK_MOCK_MODE = 'normal'
+try {
+    $cfg = New-TestConfig @{ codex = @{ command = $mockPath; queryTimeoutSeconds = 15; proxy = $env:CQK_MOCK_PROXY_URL } }
+    $r = Invoke-CodexRateLimitsRead -Config $cfg
+    Assert-True $r.ok 'fallback direct attempt ok'
+    Assert-Equal 'fallback' $r.proxy 'fallback flag'
+    Assert-Equal 2 $r.attempts 'exactly two attempts (no endless retry)'
+    Assert-Equal 2 @($r.windows).Count 'fallback read returns windows'
+} finally {
+    Remove-Item Env:\CQK_MOCK_MODE -ErrorAction SilentlyContinue
+    Remove-Item Env:\CQK_MOCK_FAIL_WITH_PROXY -ErrorAction SilentlyContinue
+    Remove-Item Env:\CQK_MOCK_PROXY_URL -ErrorAction SilentlyContinue
+}
+
+Start-TestGroup 'proxy: both attempts fail, no third retry'
+
+$env:CQK_MOCK_MODE = 'start-failure'
+try {
+    $cfg = New-TestConfig @{ codex = @{ command = $mockPath; queryTimeoutSeconds = 5; proxy = 'http://cqk-test-proxy.invalid:7890' } }
+    $r = Invoke-CodexRateLimitsRead -Config $cfg
+    Assert-False $r.ok 'both attempts fail'
+    Assert-Equal 'fallback' $r.proxy 'fallback flag'
+    Assert-Equal 2 $r.attempts 'still exactly two attempts'
+    Assert-True ("$($r.message)" -match 'proxy attempt also failed') 'failure message mentions the proxy attempt'
+} finally {
+    Remove-Item Env:\CQK_MOCK_MODE -ErrorAction SilentlyContinue
+}
+
 Start-TestGroup 'setup: missing codex command reported'
 
 $cfg = New-TestConfig @{ codex = @{ command = 'auto'; queryTimeoutSeconds = 5 } }

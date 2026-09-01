@@ -76,6 +76,15 @@ function Get-MockWindow {
 
 if ($mode -eq 'start-failure') { exit 1 }
 
+# --- proxy fallback test hook: die when the keeper-set proxy env is present ---
+# The test config points codex.proxy at CQK_MOCK_PROXY_URL; the mock exits only
+# when HTTPS_PROXY actually equals it, so a system-level proxy on the test host
+# cannot make the fallback assertion flaky.
+if ($env:CQK_MOCK_FAIL_WITH_PROXY -eq '1' -and $env:CQK_MOCK_PROXY_URL -and $env:HTTPS_PROXY -eq $env:CQK_MOCK_PROXY_URL) {
+    Write-MockTrace 'proxy env present -> exiting (CQK_MOCK_FAIL_WITH_PROXY)'
+    exit 1
+}
+
 # --- exec subcommand (AutoAnchor tests): CQK_MOCK_EXEC = ok | fail | timeout ---
 if ($args.Count -ge 1 -and $args[0] -eq 'exec') {
     Write-MockTrace ("exec: mode={0}" -f $env:CQK_MOCK_EXEC)

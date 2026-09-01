@@ -80,7 +80,7 @@ function New-TestConfig {
         mode = 'MonitorOnly'
         poll = @{ intervalMinutes = 15; minimumIntervalMinutes = 5 }
         leader = @{ enabled = $true; leaseTtlMinutes = 45; graceMinutes = 5; takeoverOnExpiry = $true; label = 'Test PC' }
-        codex = @{ command = 'auto'; queryTimeoutSeconds = 20; autoAnchor = @{ enabled = $false; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60 } }
+        codex = @{ command = 'auto'; queryTimeoutSeconds = 20; proxy = ''; autoAnchor = @{ enabled = $false; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60 } }
         github = @{
             coordination = @{ enabled = $true; repoPath = ''; branch = 'cqk/coordination' }
             historySync = @{ enabled = $true; push = $true; branch = 'cqk/history'; eventsOnly = $true }

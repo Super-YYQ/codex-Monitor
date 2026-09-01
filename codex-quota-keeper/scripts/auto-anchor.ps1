@@ -18,13 +18,16 @@ if (-not (Get-Command Push-RepoBlobs -ErrorAction SilentlyContinue)) {
 }
 
 function Test-AnchorPromptAllowed {
-    # Prompt whitelist (doc 03 §15): short, printable, no shell metacharacters.
-    # The prompt is passed as a single argument (never through a shell) and is
-    # never accepted from remote content.
+    # Prompt whitelist (doc 03 §15): short, printable, no control characters,
+    # no shell metacharacters. Unicode prompts (e.g. Chinese) are allowed; the
+    # prompt is passed as a single argument (never through a shell), but .cmd
+    # installs dispatch through cmd.exe, so metacharacters stay banned.
     param([string]$Prompt)
     if ([string]::IsNullOrWhiteSpace($Prompt)) { return $false }
-    if ($Prompt.Length -gt 120) { return $false }
-    return ($Prompt -match '^[A-Za-z0-9 .,!?''\-]+$')
+    if ($Prompt.Length -gt 200) { return $false }
+    if ($Prompt -match '[\x00-\x1F\x7F]') { return $false }
+    if ($Prompt -match '[&|<>^%$"`@;]') { return $false }
+    return $true
 }
 
 function Get-AnchorExecCommand {
@@ -210,7 +213,8 @@ function Invoke-AutoAnchorIfNeeded {
     $startedAt = Get-IsoTimestamp
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $exec = Invoke-External -FilePath $execInfo.exe -ArgumentList $execInfo.args -RawArguments "$($execInfo.rawArgs)" `
-        -TimeoutSeconds ([Math]::Max(60, [int]$Config.codex.queryTimeoutSeconds * 3)) -WorkingDirectory $workDir
+        -TimeoutSeconds ([Math]::Max(60, [int]$Config.codex.queryTimeoutSeconds * 3)) -WorkingDirectory $workDir `
+        -Environment (Get-CodexProxyEnvironment $Config)
     $sw.Stop()
 
     # ---- VERIFY: second read; never retry the model call --------------------

@@ -57,8 +57,9 @@ try {
     # ---- local mutual exclusion (two layers, doc 03 §9) --------------------
     $lock = Enter-RunnerLock $KeeperRoot
     if (-not $lock.acquired) {
-        Write-KeeperLog -Root $KeeperRoot -Event 'RUNNER_SKIPPED' -MachineId '' `
-            -ErrorText 'another runner instance holds the local lock'
+        $skipText = 'another runner instance holds the local lock'
+        if ($lock.detail) { $skipText = "another runner instance holds the local lock ($($lock.detail))" }
+        Write-KeeperLog -Root $KeeperRoot -Event 'RUNNER_SKIPPED' -MachineId '' -ErrorText $skipText
         exit 0
     }
 
@@ -127,6 +128,7 @@ try {
         $events = Get-StateEvents -Previous $state -Current $read -Now (Get-Date)
         $state.stale = $false
         $state.lastGoodReadAt = Get-IsoTimestamp
+        $state.consecutiveReadFailures = 0
         $state.buckets = $read.buckets
         $state.rateLimitReachedType = $read.rateLimitReachedType
         $state.schemaUnknown = $read.schemaUnknown
@@ -135,6 +137,7 @@ try {
         # Keep previous windows but mark them stale; never treat stale data as a reset.
         $events = Get-StateEvents -Previous $state -Current $read -Now (Get-Date)
         $state.stale = $true
+        $state.consecutiveReadFailures = [int]$state.consecutiveReadFailures + 1
         $state.lastError = [string]$read.message
         if ($read.errorKind -eq 'AUTH_ERROR') {
             Set-Backoff -Root $KeeperRoot -Minutes 120 -Reason 'auth error'
@@ -143,7 +146,11 @@ try {
             Set-Backoff -Root $KeeperRoot -Minutes 60 -Reason '429'
             $null = Set-GlobalBackoff -Config $cfg -KeeperRoot $KeeperRoot -Minutes 60 -Reason '429' -Machine $machine
         }
-        Write-RunnerLog -Event 'READ_FAILED' -Level 'ERROR' -ErrorText $read.message -ErrorKind ([string]$read.errorKind)
+        # No -f here: the read message may contain '{' (e.g. the JSON-RPC line in
+        # a TIMEOUT diagnostic), which would break a String.Format template.
+        Write-RunnerLog -Event 'READ_FAILED' -Level 'ERROR' `
+            -ErrorText ("$($read.message) (consecutive failures: $($state.consecutiveReadFailures))") `
+            -ErrorKind ([string]$read.errorKind)
     }
     $state.lastReadAt = Get-IsoTimestamp
 

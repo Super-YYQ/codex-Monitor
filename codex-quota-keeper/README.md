@@ -56,7 +56,7 @@ codex-quota-keeper/
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
-| `poll.intervalMinutes` | 15 | 额度轮询周期（分钟），允许 5/10/15/30/60，低于 5 拒绝 |
+| `poll.intervalMinutes` | 60 | 额度轮询周期（分钟），>= `minimumIntervalMinutes`（低于 5 拒绝） |
 | `poll.minimumIntervalMinutes` | 5 | 最小间隔下限 |
 | `task.name` | CodexQuotaKeeper.Check | 计划任务名 |
 | `task.startWithWindows` | true | 开机自启 |
@@ -73,6 +73,7 @@ codex-quota-keeper/
 | `github.coordination.repoPath` | — | 专用日志仓库本地路径（多机必填） |
 | `github.historySync.push` | true | history 分支推送开关 |
 | `logging.includeMachineLabel` | false | 隐私开关：machineLabel 是否进 history |
+| `codex.proxy` | （空） | codex 出入站代理 URL，如 `http://127.0.0.1:7890`（空 = 直连） |
 | `codex.autoAnchor.enabled` | false | 实验功能开关（默认关闭） |
 
 ## 前置条件
@@ -123,8 +124,20 @@ AutoAnchor 指：检测到额度窗口重置后，自动发送一个无业务意
 
 - OpenAI《使用条款》禁止规避任何 rate limits / restrictions；官方未明确批准“quota keepalive/AutoAnchor”这一用途。
 - 本项目**不保证零风控**。首次开启会显示醒目警告；默认关闭，安装器不会自动开启。
-- 开启前必须满足的清单见 `doc/04`（单 Leader、幂等锁、每日上限、最小间隔、fail-closed 等已内置）。
+- 开启前必须满足的清单见 `docs/design/04`（单 Leader、幂等锁、每日上限、最小间隔、fail-closed 等已内置）。
 - 遇到 429、usage-limit、认证异常、未知 schema 时立即 fail closed，不调用模型。
+- Anchor 提示词 `codex.autoAnchor.prompt` 支持中文等 Unicode，长度上限 200 字符；仍禁用换行与
+  shell 元字符（`.cmd` 安装经 cmd.exe 展开，防注入）。
+
+## 重试与代理
+
+- **不无限重试**：每次运行至多一次 quota 读取（计划任务每个周期运行一次，周期由
+  `poll.intervalMinutes` 决定）。未配置代理时，失败后本周期内不再重试。
+- **代理**：`codex.proxy` 配置后，codex 子进程以 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` 走代理。
+  若代理路径读取失败（任意错误类型），**自动退回直连再试一次**；两次都失败则停止，下个周期再试。
+  AutoAnchor 的模型调用同样走代理，但绝不重试（at-most-once）。
+- 连续失败计数（所有失败类型）记录在 `runtime/state.json` 的 `consecutiveReadFailures`，成功后清零，
+  出现在 `READ_FAILED` 日志中便于观察。
 
 ## 安全边界
 

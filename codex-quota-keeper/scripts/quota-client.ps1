@@ -17,7 +17,10 @@ function Get-CodexServerStartInfo {
 }
 
 function Start-AppServerSession {
-    param([hashtable]$StartInfo)
+    param(
+        [hashtable]$StartInfo,
+        [hashtable]$Environment = @{}
+    )
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $StartInfo.exe
     $psi.UseShellExecute = $false
@@ -39,6 +42,11 @@ function Start-AppServerSession {
         foreach ($a in $StartInfo.args) { [void]$psi.ArgumentList.Add([string]$a) }
     } else {
         $psi.Arguments = ($StartInfo.args | ForEach-Object { '"' + ("$_" -replace '"', '\"') + '"' }) -join ' '
+    }
+    # Must be set before Start(); the child inherits the parent's environment
+    # first, and these keys override/append it (proxy config, CQK-020).
+    if ($Environment) {
+        foreach ($k in $Environment.Keys) { $psi.EnvironmentVariables[[string]$k] = [string]$Environment[$k] }
     }
     $proc = New-Object System.Diagnostics.Process
     $proc.StartInfo = $psi
@@ -385,13 +393,15 @@ function ConvertFrom-RateLimitsResponse {
     return ConvertFrom-QuotaSnapshotResult $result
 }
 
-function Invoke-CodexRateLimitsRead {
-    # One read-only quota probe against the official app-server protocol.
+function Invoke-CodexRateLimitsAttempt {
+    # One read-only quota probe against the official app-server protocol with the
+    # given child environment. Never retries; callers own the retry policy.
     # Returns @{ ok; windows; rateLimitReachedType; schemaUnknown; errorKind; message }
     param(
         [hashtable]$Config,
         [string]$CodexPath = '',
-        [int]$TimeoutSeconds = 0
+        [int]$TimeoutSeconds = 0,
+        [hashtable]$Environment = @{}
     )
     $empty = { @{ ok = $false; buckets = @(); windows = @(); sourceSchemaVersion = $null; accountPlanType = $null;
                   rateLimitReachedType = $null; credits = $null; spendControlReached = $null; rawMetadata = @{};
@@ -414,7 +424,7 @@ function Invoke-CodexRateLimitsRead {
 
     $session = $null
     try {
-        $session = Start-AppServerSession $startInfo
+        $session = Start-AppServerSession $startInfo -Environment $Environment
         if ($session.proc.HasExited) {
             $out.errorKind = 'SETUP_ERR'
             $out.message = 'app-server process exited immediately'
@@ -451,4 +461,39 @@ function Invoke-CodexRateLimitsRead {
     } finally {
         Stop-AppServerSession $session
     }
+}
+
+function Invoke-CodexRateLimitsRead {
+    # Read-only quota probe with the no-endless-retry policy (CQK-020):
+    #   no proxy configured -> exactly one attempt, no retry within the cycle
+    #   proxy configured    -> one attempt through the proxy; if it fails (any
+    #                          error kind) one fallback attempt WITHOUT the
+    #                          proxy, then stop. Never retries a third time.
+    # Returns @{ ok; ...; proxy = 'off'|'used'|'fallback'; attempts = 1|2 }
+    param(
+        [hashtable]$Config,
+        [string]$CodexPath = '',
+        [int]$TimeoutSeconds = 0
+    )
+    $envMap = Get-CodexProxyEnvironment $Config
+    $out = Invoke-CodexRateLimitsAttempt -Config $Config -CodexPath $CodexPath `
+        -TimeoutSeconds $TimeoutSeconds -Environment $envMap
+    if (@($envMap.Keys).Count -eq 0) {
+        $out.proxy = 'off'
+        $out.attempts = 1
+        return $out
+    }
+    if ($out.ok) {
+        $out.proxy = 'used'
+        $out.attempts = 1
+        return $out
+    }
+    # Proxy path failed: exactly one fallback attempt without the keeper-set
+    # proxy env vars. (System-level proxy vars, if any, stay inherited.)
+    $direct = Invoke-CodexRateLimitsAttempt -Config $Config -CodexPath $CodexPath -TimeoutSeconds $TimeoutSeconds
+    $direct.proxy = 'fallback'
+    $direct.attempts = 2
+    if ($direct.ok) { return $direct }
+    $direct.message = "$($direct.message) (proxy attempt also failed: $($out.message))"
+    return $direct
 }

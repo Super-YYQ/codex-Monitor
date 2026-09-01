@@ -68,9 +68,15 @@ function Get-LogEventNames {
 Start-TestGroup 'anchor: prompt whitelist'
 
 Assert-True (Test-AnchorPromptAllowed -Prompt 'Reply exactly OK.') 'default prompt allowed'
-Assert-False (Test-AnchorPromptAllowed -Prompt 'rm -rf /') 'shell metachars rejected'
+Assert-True (Test-AnchorPromptAllowed -Prompt '回复 恰好 OK') 'unicode (Chinese) prompt allowed'
+Assert-True (Test-AnchorPromptAllowed -Prompt ("x" * 200)) '200 chars allowed'
+Assert-False (Test-AnchorPromptAllowed -Prompt 'a"b') 'double quote rejected'
+Assert-False (Test-AnchorPromptAllowed -Prompt 'a>b') 'redirect character rejected'
+Assert-False (Test-AnchorPromptAllowed -Prompt 'a&b') 'ampersand rejected'
+Assert-False (Test-AnchorPromptAllowed -Prompt 'a%PATH%b') 'percent rejected'
+Assert-False (Test-AnchorPromptAllowed -Prompt "line1`nline2") 'newline rejected'
 Assert-False (Test-AnchorPromptAllowed -Prompt '') 'empty rejected'
-Assert-False (Test-AnchorPromptAllowed -Prompt ('x' * 121)) 'overlong rejected'
+Assert-False (Test-AnchorPromptAllowed -Prompt ('x' * 201)) 'overlong rejected'
 
 $ws = New-TestWorkspace
 try {

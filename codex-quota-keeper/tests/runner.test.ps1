@@ -184,6 +184,7 @@ try {
     Assert-True ([bool]$state8.stale) 'stale flag set'
     Assert-Equal 2 @($state8.buckets[0].windows).Count 'previous buckets preserved'
     Assert-NotNull $state8.lastError 'error recorded'
+    Assert-Equal 3 $state8.consecutiveReadFailures 'consecutive failures counted across runs (429 + auth + start-failure)'
     $env:CQK_MOCK_MODE = 'normal'
 
     Start-TestGroup 'runner: invalid config exits 1 with error log'
@@ -295,6 +296,23 @@ try {
     $outboxAfter = @(Get-ChildItem -LiteralPath (Join-Path $keeperRoot4 'runtime\outbox') -Filter '*.json' -File -ErrorAction SilentlyContinue)
     Write-Host ("  DEBUG pending after rp4: " + (($outboxAfter | ForEach-Object { $_.Name }) -join ', '))
     foreach ($f in $outboxAfter) { Write-Host ("  DEBUG content: " + ($f.FullName | Out-String) + (Get-Content $f.FullName -Raw)) }
+    if (@($outboxAfter).Count -gt 0 -or -not (Test-Path (Join-Path $keeperRoot4 'runtime\sync-state.json'))) {
+        Write-Host 'DIAG: rp4 did not drain -> dumping keeperRoot4 runner events' -ForegroundColor Yellow
+        foreach ($ln in (Get-RunnerLogLines $keeperRoot4 | Select-Object -Last 30)) {
+            $ev = ConvertFrom-JsonSafe $ln
+            if ($ev) { Write-Host ("  DIAG: $($ev.event) [$($ev.level)] $([string]$ev.errorText)" -replace "\s+", ' ') -ForegroundColor Yellow }
+        }
+        Write-Host "DIAG: rp4 exit=$($rp4.exitCode)" -ForegroundColor Yellow
+        $lockFile = Join-Path (Get-LockDir $keeperRoot4) 'runner.lock'
+        if (Test-Path $lockFile) {
+            $lk = Read-JsonFile $lockFile
+            Write-Host ("DIAG: rp4 lock file present pid=$($lk.pid) startedAt=$($lk.startedAt)") -ForegroundColor Yellow
+            try { $lp = Get-Process -Id ([int]$lk.pid) -ErrorAction Stop; Write-Host ("DIAG: lock pid $($lk.pid) ALIVE: $($lp.ProcessName) started $($lp.StartTime)") -ForegroundColor Yellow } catch { Write-Host "DIAG: lock pid $($lk.pid) dead" -ForegroundColor Yellow }
+        } else {
+            Write-Host 'DIAG: rp4 lock file absent' -ForegroundColor Yellow
+        }
+        Write-Host "DIAG: rp4 output tail:`n$((($rp4.output -split "`n") | Select-Object -Last 25) -join "`n")" -ForegroundColor Yellow
+    }
     Assert-Equal 0 @($outboxAfter).Count 'outbox drained after successful push'
     Assert-True (Test-Path (Join-Path $keeperRoot4 'runtime\sync-state.json')) 'sync-state ledger written'
 
@@ -320,8 +338,19 @@ try {
     $env:CQK_MOCK_MODE = 'normal'
     $rp3 = Invoke-Runner -KeeperRoot $keeperRoot -ConfigFile $cfgFile
     Assert-Equal 0 $rp3.exitCode 'retention run ok'
+    if ((Test-Path $oldLog) -or (Test-Path $oldHist)) {
+        Write-Host 'DIAG: retention did not run -> dumping keeperRoot runner events' -ForegroundColor Yellow
+        foreach ($ln in (Get-RunnerLogLines $keeperRoot | Select-Object -Last 30)) {
+            $ev = ConvertFrom-JsonSafe $ln
+            if ($ev) { Write-Host ("  DIAG: $($ev.event) [$($ev.level)] $([string]$ev.errorText)" -replace "\s+", ' ') -ForegroundColor Yellow }
+        }
+        Write-Host "DIAG: rp3 exit=$($rp3.exitCode)" -ForegroundColor Yellow
+        Write-Host "DIAG: rp3 output tail:`n$((($rp3.output -split "`n") | Select-Object -Last 25) -join "`n")" -ForegroundColor Yellow
+    }
     Assert-False (Test-Path $oldLog) 'stale runtime log removed by runner (CQK-007)'
     Assert-False (Test-Path $oldHist) 'stale history file removed by runner'
+    $stateRp3 = Read-JsonFile (Join-Path $keeperRoot 'runtime\state.json')
+    Assert-Equal 0 $stateRp3.consecutiveReadFailures 'counter resets after a successful read'
     $env:CQK_MOCK_MODE = 'normal'
 } finally {
     Remove-Item Env:\CQK_MOCK_MODE -ErrorAction SilentlyContinue

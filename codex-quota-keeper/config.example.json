@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "mode": "MonitorOnly",
   "poll": {
-    "intervalMinutes": 15,
+    "intervalMinutes": 60,
     "minimumIntervalMinutes": 5
   },
   "leader": {
@@ -32,6 +32,7 @@
   "codex": {
     "command": "auto",
     "queryTimeoutSeconds": 20,
+    "proxy": "",
     "autoAnchor": {
       "enabled": false,
       "prompt": "Reply exactly OK.",

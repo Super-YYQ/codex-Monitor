@@ -232,6 +232,30 @@ function Test-AutoAnchorEnabled {
     return (Get-AutoAnchorConfig $Config).enabled
 }
 
+function Get-ProxyConfig {
+    # codex.proxy = '' (off) or an http(s) proxy URL handed to the codex child
+    # process as HTTP_PROXY/HTTPS_PROXY/ALL_PROXY (CQK-020 proxy support).
+    param([hashtable]$Config)
+    if ($null -eq $Config -or $null -eq $Config.codex) { return @{ enabled = $false; url = '' } }
+    $url = [string]$Config.codex.proxy
+    if ([string]::IsNullOrWhiteSpace($url)) { return @{ enabled = $false; url = '' } }
+    return @{ enabled = $true; url = $url }
+}
+
+function Get-CodexProxyEnvironment {
+    # Env vars the codex child inherits when a proxy is configured. Windows
+    # environment variables are case-insensitive (one process env entry), so the
+    # upper-case forms are the canonical keys and cover case-variant readers.
+    param([hashtable]$Config)
+    $p = Get-ProxyConfig $Config
+    if (-not $p.enabled) { return @{} }
+    return @{
+        'HTTP_PROXY'  = $p.url
+        'HTTPS_PROXY' = $p.url
+        'ALL_PROXY'   = $p.url
+    }
+}
+
 function Get-CoordinationConfig {
     # v2: github.coordination = @{ enabled; repoPath; branch }
     # v1: github = @{ enabled; repoPath; coordinationBranch }
@@ -316,7 +340,7 @@ function Get-DefaultConfig {
         schemaVersion = 2
         mode = 'MonitorOnly'
         poll = @{
-            intervalMinutes = 15
+            intervalMinutes = 60
             minimumIntervalMinutes = $script:CQK_MIN_POLL_FLOOR_MINUTES
         }
         leader = @{
@@ -449,6 +473,13 @@ function Test-ConfigShape {
     if ([int]$Config.codex.queryTimeoutSeconds -lt 5) {
         $issues += 'codex.queryTimeoutSeconds must be >= 5'
     }
+    $proxy = Get-ProxyConfig $Config
+    if ($proxy.enabled) {
+        $uri = $null
+        if (-not [System.Uri]::TryCreate($proxy.url, [System.UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -notin @('http', 'https')) {
+            $issues += "codex.proxy must be an http(s) URL (got '$($proxy.url)')"
+        }
+    }
     $aa = Get-AutoAnchorConfig $Config
     if ($aa.enabled -and $mode -ne 'AutoAnchor') {
         $issues += "codex.autoAnchor.enabled=true requires mode='AutoAnchor'"
@@ -563,24 +594,25 @@ function Enter-RunnerLock {
     param([string]$Root)
     Ensure-Directory (Get-LockDir $Root) | Out-Null
     $lockPath = Join-Path (Get-LockDir $Root) 'runner.lock'
-    $rootKey = Get-Sha256Hex ("lock:" + (Get-KeeperRoot $Root).ToLowerInvariant()).Substring(0, 12)
+    $rootKey = (Get-Sha256Hex ("lock:" + (Get-KeeperRoot $Root).ToLowerInvariant())).Substring(0, 12)
     $mutexName = "Global\CodexQuotaKeeper.$rootKey"
 
-    # Layer 1: lock file with PID; stale locks from dead processes are breakable.
+    # Same-process re-entry: the mutex is recursive, so only the record can tell
+    # us this caller already holds the lock. A record carrying our pid while we
+    # never acquired is a stale record from a recycled pid; the mutex below is
+    # authoritative in that case.
     if (Test-Path -LiteralPath $lockPath) {
         $existing = Read-JsonFile $lockPath
-        if ($null -ne $existing -and $existing.pid) {
-            $dead = $true
-            try {
-                $proc = Get-Process -Id ([int]$existing.pid) -ErrorAction Stop
-                if ($proc) { $dead = $false }
-            } catch { $dead = $true }
-            if (-not $dead) { return @{ acquired = $false; lockPath = $lockPath; owner = $existing } }
+        if ($null -ne $existing -and $existing.pid -and "$($existing.pid)" -eq "$PID" -and $script:CqkRunnerLockAcquired) {
+            return @{ acquired = $false; lockPath = $lockPath; owner = $existing; layer = 'reentry';
+                      detail = "process pid=$PID already holds the lock (startedAt=$($existing.startedAt))" }
         }
-        Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
     }
 
-    # Layer 2: named mutex; released by OS when the process dies.
+    # Layer 2 (authoritative): named mutex, released by the OS when the owning
+    # process dies. A stale lock file whose pid was recycled to some unrelated
+    # live process can never block acquisition while this mutex is free, which
+    # makes the old file-order check safe against fast pid reuse on busy boxes.
     $mutex = $null
     $createdNew = $false
     try {
@@ -592,13 +624,39 @@ function Enter-RunnerLock {
         $got = $false
         try { $got = $mutex.WaitOne(0) } catch { $got = $false }
         if (-not $got) {
+            $fileDiag = 'no lock file present'
+            if (Test-Path -LiteralPath $lockPath) {
+                $l = Read-JsonFile $lockPath
+                if ($l) { $fileDiag = "lock file pid=$($l.pid) startedAt=$($l.startedAt)" }
+            }
             $mutex.Dispose()
-            return @{ acquired = $false; lockPath = $lockPath; owner = $null }
+            return @{ acquired = $false; lockPath = $lockPath; owner = $null; layer = 'mutex';
+                      detail = "named mutex held ($mutexName); $fileDiag" }
+        }
+    } elseif (Test-Path -LiteralPath $lockPath) {
+        # Layer 1 fallback, used only when the mutex API is unavailable: break a
+        # stale record from a dead pid; a live owner pid still blocks.
+        $existing = Read-JsonFile $lockPath
+        if ($null -ne $existing -and $existing.pid) {
+            $dead = $true
+            $ownerInfo = ''
+            try {
+                $proc = Get-Process -Id ([int]$existing.pid) -ErrorAction Stop
+                if ($proc) { $dead = $false; $ownerInfo = "$($proc.ProcessName) (started $($proc.StartTime.ToString('HH:mm:ss')))" }
+            } catch { $dead = $true }
+            if (-not $dead) {
+                return @{ acquired = $false; lockPath = $lockPath; owner = $existing; layer = 'file';
+                          detail = "lock file pid=$($existing.pid) startedAt=$($existing.startedAt) owner=$ownerInfo" }
+            }
         }
     }
 
+    # The mutex (or its absence) says we may proceed: drop any stale record and
+    # write our own.
+    Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
     Write-JsonFileAtomic $lockPath @{ pid = $PID; startedAt = Get-IsoTimestamp; mutex = $mutexName }
     $script:CqkRunnerMutex = $mutex
+    $script:CqkRunnerLockAcquired = $true
     return @{ acquired = $true; lockPath = $lockPath; owner = $null }
 }
 
@@ -609,6 +667,11 @@ function Exit-RunnerLock {
         try { $script:CqkRunnerMutex.Dispose() } catch { }
         $script:CqkRunnerMutex = $null
     }
+    # Remove only the record this process wrote; a runner that never acquired
+    # the lock must not delete the lock file of the real holder (that also
+    # destroyed the evidence of who held the lock).
+    if (-not $script:CqkRunnerLockAcquired) { return }
+    $script:CqkRunnerLockAcquired = $false
     $lockPath = Join-Path (Get-LockDir $Root) 'runner.lock'
     Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
 }
