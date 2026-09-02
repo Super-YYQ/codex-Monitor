@@ -93,7 +93,7 @@ sequenceDiagram
     T->>R: 10:00 第2次轮询（还是零用量）
     T->>R: 11:00 第3次轮询
     R->>G: 有两次记录、从未锚定、primary usedPercent=0
-    G-->>R: should=true (triggerKind=idle, eventId=SHA-256(idle|2026-09-02))
+    G-->>R: should=true (triggerKind=idle, eventId=SHA-256("idle|2026-09-02"))
     R->>X: "Reply exactly OK."（空工作目录）
     X-->>R: exit 0
     R->>R: VERIFY 二次读取 → ANCHOR_EXECUTED
@@ -120,7 +120,7 @@ sequenceDiagram
     R->>C: 15:00 轮询
     C-->>R: primary resetsAt: 1788050400(14:00已过) → 1788068400(19:00)
     R->>E: 对比上一轮快照
-    E-->>R: WINDOW_RESET_OBSERVED eventId=SHA-256(default|primary|300|1788050400|reset)
+    E-->>R: WINDOW_RESET_OBSERVED eventId=SHA-256("default|primary|300|...|reset")
     R->>X: codex exec（锚定新窗口）
     R->>H: ANCHOR_EXECUTED → history
 ```
@@ -141,7 +141,7 @@ sequenceDiagram
 ```mermaid
 flowchart LR
     A[上次锚定 15:00] -->|300 分钟无重置| B[20:00 轮询]
-    B --> C{keepalive 槽位<br/>SHA-256 keepalive|1788072000<br/>已处理?}
+    B --> C{"keepalive 槽位已处理?<br/>eventId = SHA-256(keepalive 1788072000)"}
     C -->|否| D[触发 keepalive 锚定]
     C -->|是| E[跳过]
 ```
@@ -165,10 +165,10 @@ sequenceDiagram
     participant R as runner.ps1
     participant G as 守卫
     T->>R: 09:00 轮询（槽位 09:30 未到）
-    G-->>R: 拒绝：timer mode; no due slot
+    G->>R: 拒绝 - timer mode, no due slot
     T->>R: 10:00 轮询（已过 09:30）
     R->>G: 槽位 09:30 今天没处理过
-    G-->>R: should=true (triggerKind=schedule)
+    G->>R: should=true (triggerKind=schedule)
     R->>X: CLI 一次
     Note over G: 重置事件若同轮到达也被忽略
 ```
