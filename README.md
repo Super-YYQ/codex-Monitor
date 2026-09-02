@@ -138,7 +138,7 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
 | `codex.autoAnchor.minimumGapMinutes` | `300` | 「静默期」：两次锚定的最小间隔（分钟）；一次 CLI 调用后至少等这么久才会再触发（anchorOnApply 强制触发除外） |
 | `codex.autoAnchor.keepaliveIntervalMinutes` | `300` | 空闲**兜底**触发间隔（分钟）：存在首次锚定后，距上次锚定超过该值仍未观测到窗口重置即由 keeper 再触发一次（默认 = 一个 5 小时窗口）；`0` = 关闭兜底（空闲判定与重置触发仍生效） |
 | `codex.autoAnchor.anchorOnApply` | `false` | **立即触发 CLI**：设为 `true` 后，每次运行 `install.cmd` / `apply-config.cmd` 都立刻强制执行一次锚定（不等 300 分钟静默期、不受最小间隔限制；仍受每日上限与 fail-closed 约束，同一分钟内的重复请求只执行一次） |
-| `codex.autoAnchor.schedule` | `[]` | **每日定时模式**：`"HH:mm"` 数组（本地时间、24 小时制、必须补零）。每个时间点后的第一次轮询触发一次 CLI——纯定时，不判断重置/空闲场景；同一时间点每天最多一次，不受静默期限制（仍受每日上限与 fail-closed 约束）；空 = 关闭 |
+| `codex.autoAnchor.schedule` | `[]` | **每日定时模式（与周期判断互斥）**：`"HH:mm"` 数组（本地时间、24 小时制、必须补零）。配置任意槽位即切换为纯定时模式——每个时间点后的第一次轮询触发一次 CLI，不做重置/空闲/兜底判断，重置事件被忽略；清空数组回到周期判断模式（重置/空闲/兜底生效）。同一时间点每天最多一次，不受静默期限制（仍受每日上限与 fail-closed 约束） |
 
 > **关于模型与思考等级**：keeper 从不指定模型或推理等级——额度读取是 app-server 的
 > `account/rateLimits/read` 协议方法，**不调用模型**；AutoAnchor 的 `codex exec` 不带
@@ -162,7 +162,9 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
 
 ## AutoAnchor（实验，默认关闭）
 
-触发方式（真正调用 Codex CLI 模型）：
+触发方式（真正调用 Codex CLI 模型）。**两种模式互斥，按需二选一**：
+
+**模式 A：周期判断模式（`schedule` 为空，默认）**——由 keeper 判断何时该锚定：
 
 1. **窗口重置触发**：检测到额度窗口重置后，自动发送一个无业务意义的最小 Prompt
    以锚定下一轮窗口（需要你先使用过 Codex）。
@@ -171,13 +173,16 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
    随后 5 小时静默（`minimumGapMinutes` 默认 300），要等窗口真正滚动才会再次触发。
 3. **空闲兜底触发（keepalive，默认 300 分钟）**：存在首次锚定后，连续 5 小时仍未观测到
    任何重置（也没人使用 Codex），keeper 再自触发一次；`0` = 关闭兜底。
-4. **立即触发（anchorOnApply）**：`codex.autoAnchor.anchorOnApply=true` 时，每次运行
-   `install.cmd` / `apply-config.cmd` 后会立刻强制执行一次锚定——"现在就来一次"，
-   不等静默期、不需要重置、也不需要你本人使用 Codex。
-5. **每日定时（schedule）**：`codex.autoAnchor.schedule`（如 `["09:30","21:00"]`）时，
-   每个时间点后的第一次轮询触发一次 CLI——固定时刻、纯定时，不做任何重置/空闲判断，
-   也不需要你使用过 Codex；适合"每天固定几点保持账户活跃"的场景（与重置/空闲/兜底
-   触发按需组合，槽位去重后同一时间点每天最多一次）。
+
+**模式 B：每日定时模式（`schedule` 非空）**——不做任何判断，到点就打：
+
+4. **每日定时（schedule）**：`codex.autoAnchor.schedule`（如 `["09:30","21:00"]`）时，
+   每个时间点后的第一次轮询触发一次 CLI——固定时刻、纯定时，重置/空闲/兜底判断全部
+   停用、重置事件被忽略；也不需要你使用过 Codex。同一时间点每天最多一次。
+
+**立即触发（anchorOnApply）不属于模式，任何模式下都可用**：`codex.autoAnchor.anchorOnApply=true`
+时，每次运行 `install.cmd` / `apply-config.cmd` 后会立刻强制执行一次锚定——"现在就来一次"，
+不等静默期、不需要重置、也不需要你本人使用 Codex。
 
 - **官方未明确背书该用途**；OpenAI《使用条款》对"规避限制"存在解释风险，本项目不承诺零风控。
 - 默认 `codex.autoAnchor.enabled=false`，安装器不会自动开启。

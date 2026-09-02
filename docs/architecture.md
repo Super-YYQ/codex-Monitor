@@ -37,6 +37,9 @@ Windows Task Scheduler (CodexQuotaKeeper.Check, 仅当前用户)
 
 ```
 DISABLED/PASSIVE/LEADER/DEGRADED/AUTH_ERR/BACKOFF
-AutoAnchor(实验): RESET_SEEN | idle(二次观测空闲判定) | keepalive(兜底300) | schedule(每日定时HH:mm) | anchorOnApply(立即) -> Claim(CAS) -> LeaseRevalidate -> codex exec -> Verify -> COMPLETED/FAILED/EXPIRED
+AutoAnchor(实验) 两种模式互斥:
+  判断模式(schedule为空): RESET_SEEN | idle(二次观测空闲判定) | keepalive(兜底300) -> Claim(CAS) -> LeaseRevalidate -> codex exec -> Verify -> COMPLETED/FAILED/EXPIRED
+  定时模式(schedule非空): 每日HH:mm到点触发(不做判断,重置事件忽略)
+  anchorOnApply(立即,任何模式可用)
                  （LOCAL_ONLY 单机跳过 Claim/LeaseRevalidate，以本地锁 + state 去重承担 at-most-once）
 ```

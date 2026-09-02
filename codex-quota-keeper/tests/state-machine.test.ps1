@@ -127,22 +127,6 @@ $failed.errorKind = 'TIMEOUT'
 $events = Get-StateEvents -Previous (New-KeeperState) -Current $failed -Now $now
 Assert-Equal 'READ_FAILED' $events[0].event 'transient failure is READ_FAILED (state untouched)'
 
-Start-TestGroup 'events: unified reset - both windows renew at once'
-
-$prevUni = New-KeeperState
-$prevUni.buckets = @((New-StateBucket 'default' @(
-    (New-StateWindow 'primary' 300 100 $expired), (New-StateWindow 'secondary' 10080 100 ($nowEpoch - 1200)))))
-$evUni = Get-StateEvents -Previous $prevUni -Current (New-ReadOk @(
-    (New-StateWindow 'primary' 300 1 $future2), (New-StateWindow 'secondary' 10080 2 ($nowEpoch + 500000)))) -Now $now
-$resetsUni = @($evUni | Where-Object { $_.event -eq 'WINDOW_RESET_OBSERVED' })
-Assert-Equal 2 @($resetsUni).Count 'both windows produce a reset event'
-Assert-True ($resetsUni[0].eventId -ne $resetsUni[1].eventId) 'distinct event ids per window'
-Assert-Equal 'primary' "$($resetsUni[0].windowType)" 'first reset is the primary window'
-$cfgUni = New-TestConfig @{ mode = 'AutoAnchor'; codex = @{ autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 1; keepaliveIntervalMinutes = 0 } } }
-$allowUni = Test-ShouldAnchor -Config $cfgUni -State (New-KeeperState) -Events $evUni -IsLeader $true -Now $now
-Assert-True $allowUni.should 'unified reset anchors'
-Assert-Equal 2 @($allowUni.eventIds).Count 'both reset ids pending for one call'
-
 Start-TestGroup 'events: LEADER_CHANGED only when owner actually changes'
 
 Assert-Null (Get-LeaderChangedEvent -PreviousOwnerId $null -CurrentOwnerId 'A') 'first sight: no event'
@@ -345,12 +329,25 @@ Assert-True $allowSchGap.should 'due schedule slot bypasses the minimum gap'
 $denySch3 = Test-ShouldAnchor -Config $cfgSch -State (New-KeeperState) -Events @(@{ event = 'READ_FAILED' }) -IsLeader $true -Now $schNow
 Assert-False $denySch3.should 'scheduled anchor fails closed on a failed read'
 
-# A reset and a due slot in the same poll -> one allow carrying both ids.
+# Mutual exclusion: in timer mode a reset event is IGNORED - only the due slot fires.
 $allowSchRes = Test-ShouldAnchor -Config $cfgSch -State (New-KeeperState) -Events $resetEvent -IsLeader $true -Now $schNow
-Assert-True $allowSchRes.should 'reset + due slot both pending in one poll'
-Assert-Contains $allowSchRes.eventIds 'abc123' 'reset id pending alongside schedule'
-Assert-Contains $allowSchRes.eventIds $schId 'schedule id pending alongside reset'
-Assert-Equal 'reset' $allowSchRes.triggerKind 'reset remains the reported kind'
+Assert-True $allowSchRes.should 'due slot still fires in timer mode'
+Assert-Equal 1 @($allowSchRes.eventIds).Count 'reset event ignored in timer mode'
+Assert-Equal $schId $allowSchRes.eventIds[0] 'only the schedule id is pending'
+Assert-Equal 'schedule' $allowSchRes.triggerKind 'trigger kind stays schedule'
+
+# Timer mode without a due slot -> denied even if a reset event arrives.
+$denySchRes = Test-ShouldAnchor -Config $cfgSch -State (New-KeeperState) -Events $resetEvent -IsLeader $true -Now $schNow.AddMinutes(-30)
+Assert-False $denySchRes.should 'timer mode ignores reset events when no slot is due'
+
+# Judgment mode (schedule cleared): reset events fire again.
+$cfgJudge = New-TestConfig @{
+    mode  = 'AutoAnchor'
+    codex = @{ command = 'auto'; queryTimeoutSeconds = 20; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 300; keepaliveIntervalMinutes = 0; schedule = @() } }
+}
+$allowJudge = Test-ShouldAnchor -Config $cfgJudge -State (New-KeeperState) -Events $resetEvent -IsLeader $true -Now $now
+Assert-True $allowJudge.should 'judgment mode fires on reset events'
+Assert-Equal 'reset' $allowJudge.triggerKind 'judgment mode reports reset'
 
 Start-TestGroup 'anchor guard: forced anchor (anchorOnApply)'
 

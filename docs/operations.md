@@ -10,7 +10,7 @@
    **想让 CLI 在安装/改配置后立即被调用一次**：`codex.autoAnchor.anchorOnApply=true`
    （需已启用 AutoAnchor）——`install.cmd` 与 `apply-config.cmd` 都会立刻触发一次锚定。
    另一个可选模式：`codex.autoAnchor.schedule=["09:30","21:00"]` 每天固定时刻触发一次
-   CLI（纯定时，不判断重置/空闲场景；详见 README「AutoAnchor」）。
+   CLI（定时模式与周期判断互斥：配置槽位后重置/空闲判断停用；详见 README「AutoAnchor」）。
 4. `status.cmd` 验证。
 5. 多机：准备专用 Private Git 仓库；每台机器运行
    `pwsh scripts/setup-log-repo.ps1 -RepoPath <路径>` 完成绑定，然后把

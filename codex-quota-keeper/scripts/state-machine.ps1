@@ -346,10 +346,13 @@ function Test-ShouldAnchor {
         if ($ev -and $ev.event -eq 'READ_FAILED') { $readFailed = $true; break }
     }
     # Daily schedule (timer mode): every configured HH:mm fires one anchor on the
-    # first poll at/after that time. Pure timer - no idle/reset judgment, no
-    # second-observation requirement - and as an explicit user request it also
-    # bypasses the minimum gap (the daily cap above still applies). Fails closed
-    # on this cycle's read failure, exactly like idle detection.
+    # first poll at/after that time. Configuring ANY schedule slot switches
+    # AutoAnchor to the pure timer mode and MUTUALLY EXCLUDES the judgment
+    # triggers (window reset / idle detection / keepalive) - exactly one of the
+    # two modes is active; clearing schedule returns to judgment mode. As an
+    # explicit user request a due slot bypasses the minimum gap (the daily cap
+    # above still applies). Fails closed on this cycle's read failure, exactly
+    # like idle detection.
     $scheduleIds = @()
     foreach ($slot in @($anchorCfg.schedule)) {
         if ([string]::IsNullOrWhiteSpace([string]$slot)) { continue }
@@ -361,8 +364,12 @@ function Test-ShouldAnchor {
         $scheduleIds += $sid
     }
     $scheduleDue = ($scheduleIds.Count -gt 0)
+    $scheduleMode = (@($anchorCfg.schedule | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0)
     if ($scheduleDue -and $readFailed) {
         return & $deny 'quota read failed this cycle; scheduled anchor fails closed'
+    }
+    if ($scheduleMode -and -not $Force -and -not $scheduleDue) {
+        return & $deny 'timer mode active (schedule configured); no due slot now - judgment triggers (reset/idle/keepalive) are mutually exclusive and disabled'
     }
     if ($State.anchors.lastAnchorAt -and -not $Force -and -not $scheduleDue) {
         $last = [DateTimeOffset]::MinValue
@@ -375,12 +382,10 @@ function Test-ShouldAnchor {
     }
 
     # Triggers. An explicit force wins (the user asked for the CLI right now and
-    # even the minimum gap is bypassed); reset events (a real window rollover)
-    # and due daily schedule slots come next; then the never-anchored idle
-    # detection: Codex was never used, so after the second observation with zero
-    # usage the keeper fires the FIRST anchor itself (scenario 1). Once an anchor
-    # exists, keepalive is the idle backstop - no anchor within
-    # keepaliveIntervalMinutes -> fire (default 300 min = one 5h window).
+    # even the minimum gap is bypassed). Timer mode and judgment mode are mutually
+    # exclusive: with schedule configured, ONLY due schedule slots fire (reset
+    # events are ignored); without schedule, reset events, the never-anchored
+    # idle detection and the keepalive backstop apply.
     $triggerKind = $null
     $pending = @()
     if ($Force) {
@@ -390,6 +395,11 @@ function Test-ShouldAnchor {
         }
         $pending = @($forceId)
         $triggerKind = 'force'
+    } elseif ($scheduleMode) {
+        # Timer mode: judgment triggers disabled. Only due slots fire here.
+        if (-not $scheduleDue) { return & $deny 'no due schedule slot' }
+        $pending = @($scheduleIds)
+        $triggerKind = 'schedule'
     } else {
         $resetPending = $false
         foreach ($ev in @($Events)) {
@@ -399,16 +409,8 @@ function Test-ShouldAnchor {
                 if (-not $processed) { $pending += [string]$ev.eventId; $resetPending = $true }
             }
         }
-        # A due scheduled slot joins the same pending list: one poll carrying both
-        # a reset and a due slot performs ONE model call and marks every id
-        # (each slot stays at-most-once per day).
-        if ($scheduleDue) {
-            foreach ($sid in $scheduleIds) {
-                if ($pending -notcontains $sid) { $pending += $sid }
-            }
-        }
         if ($pending.Count -gt 0) {
-            $triggerKind = if ($resetPending) { 'reset' } else { 'schedule' }
+            $triggerKind = 'reset'
         } elseif (-not $State.anchors.lastAnchorAt) {
             # Never anchored. The first observation is only a baseline; the idle
             # detection needs a second poll record to conclude "nobody is using
