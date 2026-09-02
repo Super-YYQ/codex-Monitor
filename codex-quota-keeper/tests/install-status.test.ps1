@@ -40,10 +40,13 @@ try {
     $cfg15 = New-Cfg 15
     $tp = New-KeeperTaskParameters -Config $cfg15 -KeeperRoot $keeperRoot
     Assert-Equal $taskName $tp.TaskName 'task name from config'
-    Assert-True ("$($tp.Action.Execute)" -match 'pwsh|powershell') 'action uses powershell'
-    Assert-True ("$($tp.Action.Arguments)" -match 'runner\.ps1') 'action runs runner.ps1'
-    Assert-True ("$($tp.Action.Arguments)" -match '-NoProfile') 'action uses -NoProfile'
-    Assert-True ("$($tp.Action.Arguments)" -match 'WindowStyle Hidden') 'action hides console window (no popup on scheduled run)'
+    Assert-True ("$($tp.Action.Execute)" -match 'wscript') 'action launches via wscript (windowless host, no console flash)'
+    Assert-True ("$($tp.Action.Arguments)" -match 'hidden-launch\.vbs') 'action points at the generated hidden-launch.vbs'
+    $vbsContent = [System.IO.File]::ReadAllText((Join-Path $keeperRoot 'runtime\hidden-launch.vbs'))
+    Assert-True ("$vbsContent" -match 'runner\.ps1') 'vbs runs runner.ps1'
+    Assert-True ("$vbsContent" -match '-NoProfile') 'vbs uses -NoProfile'
+    Assert-True ("$vbsContent" -match 'WindowStyle Hidden') 'vbs hides console window (no popup on scheduled run)'
+    Assert-True ("$vbsContent" -match '", 0, False') 'vbs Run uses window style 0 (hidden from creation)'
     Assert-Equal (Join-Path $keeperRoot '') "$($tp.Action.WorkingDirectory)\" 'working directory pinned to project'
     $onceTrigger = @($tp.Trigger)[0]
     Assert-Equal 15 (Get-TaskIntervalMinutes $onceTrigger) 'repetition interval from config'
@@ -71,9 +74,11 @@ try {
     $cfgAaOn.codex.autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; keepaliveIntervalMinutes = 240; anchorOnApply = $true }
     $spec = Get-ForcedAnchorLaunchSpec -Config $cfgAaOn -KeeperRoot $keeperRoot -ConfigFile $cfgFile
     Assert-False $spec.skip 'spec produced when anchorOnApply=true and autoAnchor enabled'
-    Assert-True ("$($spec.arguments)" -match 'runner\.ps1') 'spec runs runner.ps1'
-    Assert-True ("$($spec.arguments)" -match '\-ForceAnchor') 'spec passes -ForceAnchor'
-    Assert-True ("$($spec.arguments)" -match 'WindowStyle Hidden') 'spec hides the console window'
+    Assert-True ("$($spec.exe)" -match 'wscript') 'spec launches via wscript (windowless host)'
+    $forcedVbs = [System.IO.File]::ReadAllText("$($spec.vbsPath)")
+    Assert-True ("$forcedVbs" -match 'runner\.ps1') 'spec vbs runs runner.ps1'
+    Assert-True ("$forcedVbs" -match '\-ForceAnchor') 'spec vbs passes -ForceAnchor'
+    Assert-True ("$forcedVbs" -match 'WindowStyle Hidden') 'spec vbs hides the console window'
 
     $specOff = Get-ForcedAnchorLaunchSpec -Config (New-Cfg 15) -KeeperRoot $keeperRoot -ConfigFile $cfgFile
     Assert-True $specOff.skip 'autoAnchor off -> no forced launch'

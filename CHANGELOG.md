@@ -66,6 +66,12 @@
   安装 probe 不算轮询、首轮 first observation。
 - 新增「更新升级」流程说明：合并覆盖部署目录（保留 config.json / runtime / history）、
   重装 `install.cmd` 同名替换不产生多任务、新配置项需手动放开注释。
+- **计划任务启动器改为 wscript + 生成的 `.vbs`**（`runtime/hidden-launch.vbs`）：
+  此前直接执行 `powershell.exe -WindowStyle Hidden`，conhost 仍会在每次计划触发时
+  闪现数百毫秒黑框；改为 `wscript.exe` 经 `WScript.Shell.Run(..., 0, False)` 启动后
+  窗口从创建起即隐藏，闪窗消除。`anchorOnApply` 强制锚定的即发即忘启动同样改走
+  `runtime/hidden-launch-forced-anchor.vbs`。`.vbs` 在每次 install / apply-config
+  时幂等重新生成。
 
 ## 0.9.0-beta (2026-08-30)
 
