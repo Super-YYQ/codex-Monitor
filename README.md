@@ -153,6 +153,8 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
 
 ## 多机协调（单 Leader）
 
+> 租约抢占/接管、集群退避、history 推送的逐分钟模拟数据见 **[docs/scenarios.md](docs/scenarios.md)**。
+
 - 每台机器一个随机 `machineId`（不用 MAC / 序列号）。
 - 租约在 Private 仓库的 `cqk/coordination` 分支；Git push 冲突作为 CAS，
   任意时刻最多一个 Leader 查询额度。
@@ -161,6 +163,9 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
   推送前校验，main/master 等业务分支名被强制拒绝。
 
 ## AutoAnchor（实验，默认关闭）
+
+> 每种触发场景的完整时间线模拟（真实格式的状态快照、事件文件、守卫拒绝原因、Mermaid 图）
+> 见 **[docs/scenarios.md](docs/scenarios.md)**。
 
 触发方式（真正调用 Codex CLI 模型）。**两种模式互斥，按需二选一**：
 
@@ -238,6 +243,7 @@ CI（GitHub Actions）在每次 push / PR 上运行：PS 7 与 PS 5.1 全量测�
 ## 文档
 
 - [docs/design/](docs/design/) — 中文设计交付文档（合规调研、总体架构、详细设计、部署运维、仓库审查）
+- [docs/scenarios.md](docs/scenarios.md) — 场景详解：每个处理场景的真实模拟数据与图
 - [docs/architecture.md](docs/architecture.md) — 模块与数据流
 - [docs/operations.md](docs/operations.md) — 部署、多机与日常运维
 - [docs/security-model.md](docs/security-model.md) — 安全边界与隐私设计

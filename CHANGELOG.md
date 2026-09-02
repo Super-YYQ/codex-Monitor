@@ -55,6 +55,10 @@
   配置加载器支持 JSONC。
 
 ### Docs
+- 新增 `docs/scenarios.md` 场景详解页：每个仓库处理场景（首次轮询、空闲判定、窗口重置、
+  keepalive、每日定时、立即触发、Leader 租约、集群退避、history 推送、fail-closed 一览）
+  配真实格式的模拟数据（state.json / lease.json / backoff.json / history 事件文件 /
+  summary / 守卫 reason 文本）与 Mermaid 时序图；两份 README 在对应章节加跳转。
 - 快速开始建议把 `codex-quota-keeper` 复制到固定部署目录（计划任务绑定安装路径、
   runtime 数据与机器身份随目录走，避免与源码更新互相干扰）。
 - 明确计划任务触发节奏：锚点 = 注册时刻 +1 分钟、按 `poll.intervalMinutes` 重复、

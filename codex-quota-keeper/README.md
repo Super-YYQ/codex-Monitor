@@ -103,6 +103,9 @@ codex-quota-keeper/
 
 ## 多电脑互斥（Leader Lease）
 
+> 每种场景的逐分钟模拟数据（租约抢占/接管、退避、history 推送、锚定时间线）见
+> **[docs/scenarios.md](../docs/scenarios.md)**。
+
 每台机器生成一个随机 `machineId`（不用 MAC/序列号）。任务运行后 `git fetch` 远程协调分支读取
 `coordination/lease.json`：
 
@@ -141,6 +144,9 @@ RESET_SEEN -> 幂等守卫(eventId) -> ANCHORING -> VERIFY -> ANCHORED
 ```
 
 ## AutoAnchor 风险说明（实验，默认关闭）
+
+> 各触发场景的完整时间线模拟（含每次轮询的快照数据、eventId、守卫拒绝原因）见
+> **[docs/scenarios.md](../docs/scenarios.md)**。
 
 触发方式（都执行真正的 `codex exec` 模型调用）。**两种模式互斥，按需二选一**：
 
@@ -208,6 +214,7 @@ pwsh tests/run-all.ps1
 
 ## 参考
 
+- **[docs/scenarios.md](../docs/scenarios.md)** — 场景详解：每个处理场景的真实模拟数据与图
 - Codex app-server README — https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md
 - Using Codex with your ChatGPT plan — https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan
 - How banked Codex resets work — https://help.openai.com/en/articles/20001498-how-banked-codex-resets-work
