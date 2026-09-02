@@ -244,11 +244,12 @@ function Sanitize-Record {
 # Config accessors (shape-agnostic: v2 nested schema and v1 flat schema both work)
 
 function Get-AutoAnchorConfig {
-    # v2: codex.autoAnchor = @{ enabled; prompt; maxPerDay; minimumGapMinutes }
-    # v1: codex.autoAnchor = bool + codex.anchorPrompt / maxAnchorsPerDay / minimumAnchorGapMinutes
+    # v2: codex.autoAnchor = @{ enabled; prompt; maxPerDay; minimumGapMinutes; keepaliveIntervalMinutes; anchorOnApply }
+    # v1: codex.autoAnchor = bool + codex.anchorPrompt / maxAnchorsPerDay / minimumAnchorGapMinutes /
+    #                        anchorKeepaliveMinutes / anchorOnApply
     param([hashtable]$Config)
     if ($null -eq $Config -or $null -eq $Config.codex) {
-        return @{ enabled = $false; prompt = ''; maxPerDay = 0; minimumGapMinutes = 0 }
+        return @{ enabled = $false; prompt = ''; maxPerDay = 0; minimumGapMinutes = 0; keepaliveIntervalMinutes = 0; anchorOnApply = $false }
     }
     $aa = $Config.codex.autoAnchor
     if ($aa -is [hashtable]) {
@@ -257,6 +258,9 @@ function Get-AutoAnchorConfig {
             prompt             = [string]$aa.prompt
             maxPerDay          = [int]$aa.maxPerDay
             minimumGapMinutes  = [int]$aa.minimumGapMinutes
+            keepaliveIntervalMinutes = [int]$aa.keepaliveIntervalMinutes
+            anchorOnApply      = [bool]($aa.anchorOnApply -eq $true)
+            schedule           = @(@($aa.schedule) | Where-Object { $_ -and -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ } | Select-Object -Unique)
         }
     }
     return @{
@@ -264,6 +268,9 @@ function Get-AutoAnchorConfig {
         prompt             = [string]$Config.codex.anchorPrompt
         maxPerDay          = [int]$Config.codex.maxAnchorsPerDay
         minimumGapMinutes  = [int]$Config.codex.minimumAnchorGapMinutes
+        keepaliveIntervalMinutes = [int]$Config.codex.anchorKeepaliveMinutes
+        anchorOnApply      = [bool]($Config.codex.anchorOnApply -eq $true)
+        schedule           = @()
     }
 }
 
@@ -416,7 +423,10 @@ function Get-DefaultConfig {
                 enabled = $false
                 prompt = 'Reply exactly OK.'
                 maxPerDay = 6
-                minimumGapMinutes = 60
+                minimumGapMinutes = 300           # 5h quiet: 一次调用后 5 小时窗口内不再触发（force 除外）
+                keepaliveIntervalMinutes = 300    # 0 = off; >0 = idle backstop: 距上次锚定超过该值仍未观测到滚动则自触发（默认 = 一个 5 小时窗口）
+                anchorOnApply = $false   # true = install.cmd/apply-config.cmd fire one forced anchor right away
+                schedule = @()           # 每日定时触发（"HH:mm" 本地时间数组）：到点后第一次轮询触发一次；空 = 关闭
             }
         }
         task = @{
@@ -424,7 +434,6 @@ function Get-DefaultConfig {
             startWithWindows = $true
             runIfNetworkAvailable = $true
             wakeToRun = $false
-            runAtInstall = $false   # true = start the task right after install.cmd registers it
         }
     }
 }
@@ -463,6 +472,8 @@ function Convert-LegacyConfig {
         if ($c.ContainsKey('anchorPrompt')) { $aa.prompt = $c.anchorPrompt }
         if ($c.ContainsKey('maxAnchorsPerDay')) { $aa.maxPerDay = $c.maxAnchorsPerDay }
         if ($c.ContainsKey('minimumAnchorGapMinutes')) { $aa.minimumGapMinutes = $c.minimumAnchorGapMinutes }
+        if ($c.ContainsKey('anchorKeepaliveMinutes')) { $aa.keepaliveIntervalMinutes = $c.anchorKeepaliveMinutes }
+        if ($c.ContainsKey('anchorOnApply')) { $aa.anchorOnApply = ($c.anchorOnApply -eq $true) }
         $Config.codex.autoAnchor = $aa
     }
     $Config.schemaVersion = 2
@@ -536,6 +547,20 @@ function Test-ConfigShape {
         }
         if ([int]$aa.minimumGapMinutes -lt 1) {
             $issues += 'codex.autoAnchor.minimumGapMinutes must be >= 1'
+        }
+        if ([int]$aa.keepaliveIntervalMinutes -lt 0) {
+            $issues += 'codex.autoAnchor.keepaliveIntervalMinutes must be >= 0 (0 = off)'
+        }
+        if ([int]$aa.keepaliveIntervalMinutes -gt 0 -and [int]$aa.keepaliveIntervalMinutes -lt [int]$aa.minimumGapMinutes) {
+            $issues += ("codex.autoAnchor.keepaliveIntervalMinutes ({0}) must be >= minimumGapMinutes ({1}) when enabled" -f [int]$aa.keepaliveIntervalMinutes, [int]$aa.minimumGapMinutes)
+        }
+        foreach ($slot in @($aa.schedule)) {
+            if ([string]$slot -notmatch '^([01]\d|2[0-3]):[0-5]\d$') {
+                $issues += ("codex.autoAnchor.schedule entries must be zero-padded 24h 'HH:mm'; got '$slot'")
+            }
+        }
+        if (@($aa.schedule).Count -gt [int]$aa.maxPerDay) {
+            $issues += ("codex.autoAnchor.schedule has {0} slot(s) but maxPerDay is {1}; the daily cap would block later slots" -f @($aa.schedule).Count, [int]$aa.maxPerDay)
         }
     }
     if ([int]$Config.logging.retentionDays -lt 1) {

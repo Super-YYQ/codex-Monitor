@@ -76,7 +76,6 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
 | `task.startWithWindows` | `true` | 开机自启 |
 | `task.runIfNetworkAvailable` | `true` | 仅在有网络时运行 |
 | `task.wakeToRun` | `false` | 是否允许唤醒计算机执行 |
-| `task.runAtInstall` | `false` | 安装（install.cmd）注册完任务后立即触发一次，便于马上验证链路 |
 
 > **触发节奏**：任务以「安装时刻 +1 分钟」为锚点（`-Once` 触发器），按 `poll.intervalMinutes`
 > 重复；`startWithWindows=true`（默认）另加登录触发；关机错过的周期由 `StartWhenAvailable`
@@ -136,7 +135,10 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
 | `codex.autoAnchor.enabled` | `false` | **实验功能开关，默认关闭，安装器不会自动开启** |
 | `codex.autoAnchor.prompt` | `Reply exactly OK.` | 锚定用的最小 Prompt（支持中文等 Unicode，长度 ≤ 200；仍禁用换行与 shell 元字符） |
 | `codex.autoAnchor.maxPerDay` | `6` | 每日最大执行次数 |
-| `codex.autoAnchor.minimumGapMinutes` | `60` | 两次锚定的最小间隔 |
+| `codex.autoAnchor.minimumGapMinutes` | `300` | 「静默期」：两次锚定的最小间隔（分钟）；一次 CLI 调用后至少等这么久才会再触发（anchorOnApply 强制触发除外） |
+| `codex.autoAnchor.keepaliveIntervalMinutes` | `300` | 空闲**兜底**触发间隔（分钟）：存在首次锚定后，距上次锚定超过该值仍未观测到窗口重置即由 keeper 再触发一次（默认 = 一个 5 小时窗口）；`0` = 关闭兜底（空闲判定与重置触发仍生效） |
+| `codex.autoAnchor.anchorOnApply` | `false` | **立即触发 CLI**：设为 `true` 后，每次运行 `install.cmd` / `apply-config.cmd` 都立刻强制执行一次锚定（不等 300 分钟静默期、不受最小间隔限制；仍受每日上限与 fail-closed 约束，同一分钟内的重复请求只执行一次） |
+| `codex.autoAnchor.schedule` | `[]` | **每日定时模式**：`"HH:mm"` 数组（本地时间、24 小时制、必须补零）。每个时间点后的第一次轮询触发一次 CLI——纯定时，不判断重置/空闲场景；同一时间点每天最多一次，不受静默期限制（仍受每日上限与 fail-closed 约束）；空 = 关闭 |
 
 > **关于模型与思考等级**：keeper 从不指定模型或推理等级——额度读取是 app-server 的
 > `account/rateLimits/read` 协议方法，**不调用模型**；AutoAnchor 的 `codex exec` 不带
@@ -160,12 +162,28 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
 
 ## AutoAnchor（实验，默认关闭）
 
-检测到额度窗口重置后，自动发送一个无业务意义的最小 Prompt 以锚定下一轮窗口。
+触发方式（真正调用 Codex CLI 模型）：
 
-- **官方未明确背书该用途**；OpenAI《使用条款》对“规避限制”存在解释风险，本项目不承诺零风控。
+1. **窗口重置触发**：检测到额度窗口重置后，自动发送一个无业务意义的最小 Prompt
+   以锚定下一轮窗口（需要你先使用过 Codex）。
+2. **空闲判定触发（从没启动过 Codex 的场景）**：keeper 从未锚定过，且第二次轮询记录
+   （默认 60 分钟一轮）仍是零用量时，判定"Codex 没人用"，自动执行一次 CLI 调用；
+   随后 5 小时静默（`minimumGapMinutes` 默认 300），要等窗口真正滚动才会再次触发。
+3. **空闲兜底触发（keepalive，默认 300 分钟）**：存在首次锚定后，连续 5 小时仍未观测到
+   任何重置（也没人使用 Codex），keeper 再自触发一次；`0` = 关闭兜底。
+4. **立即触发（anchorOnApply）**：`codex.autoAnchor.anchorOnApply=true` 时，每次运行
+   `install.cmd` / `apply-config.cmd` 后会立刻强制执行一次锚定——"现在就来一次"，
+   不等静默期、不需要重置、也不需要你本人使用 Codex。
+5. **每日定时（schedule）**：`codex.autoAnchor.schedule`（如 `["09:30","21:00"]`）时，
+   每个时间点后的第一次轮询触发一次 CLI——固定时刻、纯定时，不做任何重置/空闲判断，
+   也不需要你使用过 Codex；适合"每天固定几点保持账户活跃"的场景（与重置/空闲/兜底
+   触发按需组合，槽位去重后同一时间点每天最多一次）。
+
+- **官方未明确背书该用途**；OpenAI《使用条款》对"规避限制"存在解释风险，本项目不承诺零风控。
 - 默认 `codex.autoAnchor.enabled=false`，安装器不会自动开启。
-- 开启后仍有完整约束：分布式 CAS Claim（同一事件全局最多一次副作用）、
-  执行前租约重验证、每日上限、最小间隔、429/认证/未知 schema/远程不可达一律 fail-closed。
+- 开启后仍有完整约束：每日上限、最小间隔、429/认证/未知 schema/远程不可达一律 fail-closed；
+  多机（配置了协调仓库）另有分布式 CAS Claim（同一事件全局最多一次副作用）与执行前租约重验证；
+  **单机（未配置协调仓库）同样可用**——本地 runner 锁 + state 去重保证至少一次副作用语义。
 - 每次执行的 before/after 额度快照写入 history，便于审计。
 
 ---

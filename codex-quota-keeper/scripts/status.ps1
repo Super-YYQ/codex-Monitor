@@ -62,6 +62,7 @@ function Get-KeeperStatus {
         configOk  = $false
         mode      = $null
         autoAnchor = $false
+        anchorKeepalive = @{ intervalMinutes = $null; lastAnchorAt = $null }
         pollIntervalMinutes = $null
         machineId = $null
         machineLabel = $null
@@ -82,7 +83,7 @@ function Get-KeeperStatus {
     $cfg = $loaded.config
     $status.configOk = (@($loaded.issues).Count -eq 0)
     $status.mode = [string]$cfg.mode
-    $status.autoAnchor = [bool]($cfg.codex.autoAnchor -eq $true)
+    $status.autoAnchor = Test-AutoAnchorEnabled $cfg
     $status.pollIntervalMinutes = (Get-PollConfig $cfg).intervalMinutes
 
     $machine = Get-MachineIdentity -Root $KeeperRoot -Label ([string]$cfg.leader.label)
@@ -131,6 +132,9 @@ function Get-KeeperStatus {
 
     # ---- role + lease ----------------------------------------------------------
     $state = Load-KeeperState $KeeperRoot
+    $aaCfg = Get-AutoAnchorConfig $cfg
+    $status.anchorKeepalive = @{ intervalMinutes = [int]$aaCfg.keepaliveIntervalMinutes; lastAnchorAt = [string]$state.anchors.lastAnchorAt }
+    $status.anchorSchedule = @{ slots = @($aaCfg.schedule) }
     $coord = Get-CoordinationConfig $cfg
     if ($coord.enabled -ne $true) {
         $status.role.role = $(if ($state.role) { $state.role } else { 'LEADER' })
@@ -198,6 +202,16 @@ function Write-StatusText {
     $lines += ('Mode                : {0}' -f $Status.mode)
     if ($Status.autoAnchor) {
         $lines += 'AutoAnchor          : *** ON - EXPERIMENTAL, consumes quota ***'
+        $ka = [int]$Status.anchorKeepalive.intervalMinutes
+        $kaText = if ($ka -le 0) { 'off (reset/idle triggers only)' } else { "every $ka min" }
+        $lastAnchor = [string]$Status.anchorKeepalive.lastAnchorAt
+        $lastText = if ($lastAnchor) { $lastAnchor } else { 'never' }
+        $lines += ('Anchor backstop     : {0} (last anchor: {1})' -f $kaText, $lastText)
+        if ($Status.anchorSchedule) {
+            $slots = @($Status.anchorSchedule.slots)
+            $slotText = if ($slots.Count -gt 0) { $slots -join ', ' } else { 'none' }
+            $lines += ('Scheduled anchor    : {0}' -f $slotText)
+        }
     } else {
         $lines += 'AutoAnchor          : OFF (experimental feature)'
     }

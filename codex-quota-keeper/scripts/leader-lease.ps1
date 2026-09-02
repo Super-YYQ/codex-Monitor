@@ -73,14 +73,16 @@ function Invoke-LeaderElection {
     # caller must surface it as MULTI-PC UNSAFE in status output.
     param([hashtable]$Config, [string]$KeeperRoot, [hashtable]$Machine, [DateTime]$Now = (Get-Date))
 
-    $out = @{ role = 'LEADER'; lease = $null; otherOwner = $null; reason = $null; remoteReachable = $false }
+    $out = @{ role = 'LEADER'; lease = $null; otherOwner = $null; reason = $null; remoteReachable = $false; localOnly = $false }
 
     if ($Config.leader.enabled -ne $true) {
         $out.reason = 'local-only: leader coordination disabled'
+        $out.localOnly = $true
         return $out
     }
     if (-not (Test-CoordinationEnabled $Config)) {
         $out.reason = 'local-only: github coordination disabled'
+        $out.localOnly = $true
         return $out
     }
 

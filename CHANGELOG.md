@@ -3,10 +3,41 @@
 ## Unreleased
 
 ### Added
-- 新增 `task.runAtInstall` 配置（默认 `false`）：`install.cmd` 注册完计划任务后立即触发一次
-  （fire-and-forget，启动失败不影响安装），便于马上验证链路。
+- AutoAnchor 新增**空闲判定触发（场景 1）**：keeper 从未锚定过、第二次轮询记录仍是零用量
+  时（默认 60 分钟一轮，约一小时后），判定"Codex 没人用"并自动执行一次 CLI 调用；
+  触发 eventId 按天确定性生成（`idle|yyyy-MM-dd`），当日只触发一次。随后进入
+  `minimumGapMinutes`（默认 300 = 5 小时）静默期，再次触发等窗口真正滚动。
+- AutoAnchor 的 keepalive 语义改为**空闲兜底**：存在首次锚定后，距上次锚定超过
+  `keepaliveIntervalMinutes`（默认 `300`，`0` = 关闭）仍未观测到窗口重置时再自触发一次；
+  此前"从未锚定即自触发"的行为由空闲判定取代。触发 eventId 按 keepalive 时间槽确定性生成，
+  与重置触发共用幂等守卫与每日上限。
+- AutoAnchor **单机（LOCAL_ONLY）可用**：未配置协调仓库时跳过远端 CAS Claim 与租约重验证，
+  以本地 runner 锁 + `state.processedEventIds` 去重承担 at-most-once；此前单机配置下
+  AutoAnchor 会被「无租约/无远端 Claim」fail-closed 拦截，永远无法触发。
+- 新增 `codex.autoAnchor.anchorOnApply`（默认 `false`）：设为 `true` 后每次运行
+  `install.cmd` / `apply-config.cmd` 都立刻强制执行一次锚定（等不及静默期时
+  "现在就来一次"）——不受最小间隔限制、不需要重置，仍受每日上限与 fail-closed
+  约束，同一分钟内的重复请求只执行一次（`-ForceAnchor` 增量参数）。
+- 新增 `codex.autoAnchor.schedule`（每日定时模式，默认 `[]` = 关闭）：`"HH:mm"` 数组
+  （本地时间、24 小时制、必须补零）——每个时间点后的第一次轮询触发一次 CLI，
+  纯定时、不判断重置/空闲/兜底场景；eventId 按天+槽位确定性生成
+  （`schedule|yyyy-MM-dd|HH:mm`），同一槽位每天最多一次，不受静默期限制
+  （仍受每日上限与 fail-closed 约束）；多槽位与重置触发在同一轮轮询合并为一次调用。
 
 ### Changed
+- `codex.autoAnchor.minimumGapMinutes` 默认 60 → **300**（5 小时静默期：一次锚定后窗口内
+  不再触发，force 除外）；`keepaliveIntervalMinutes` 默认 240 → **300**（一个 5 小时窗口，
+  与静默期一致）。
+- 计划任务 action 增加 `-WindowStyle Hidden`：定时/安装触发的 runner 运行不再弹出可见
+  PowerShell 控制台窗口（原先每次轮询都会闪一个黑色窗口）。
+- 修复 status 中 AutoAnchor 恒显 OFF：`status.ps1` 改用 shape-agnostic 访问器
+  `Test-AutoAnchorEnabled`（v2 嵌套配置下旧写法 `codex.autoAnchor -eq $true` 恒为 false）。
+- status 新增「Anchor backstop」行：显示空闲兜底间隔与上次锚定时间（AutoAnchor 开启时）。
+- status 新增「Scheduled anchor」行：显示每日定时槽位列表（AutoAnchor 开启时）。
+- runner 的 lastReadAt 改为在 AutoAnchor 钩子之后记录：空闲判定依赖上一次轮询记录来区分
+  "第一次观测"与"第二次观测"，首轮不得被误判为已有人观测过。
+- runner 的 AutoAnchor 租约判定兼容本地选举：`role=LEADER` 且无远端租约（LOCAL_ONLY）
+  同样视为可锚定。配置校验：`keepaliveIntervalMinutes` 非 0 时必须 ≥ `minimumGapMinutes`。
 - `github.coordination.enabled` 与 `github.historySync.enabled` 示例默认改为 `false`：
   单机复制配置即可零配置运行；多机需先 `setup-log-repo.ps1` 再开启。
   代码内置默认值（`Get-DefaultConfig`）同步为 `false`（此前代码默认仍为 true）。

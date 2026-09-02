@@ -51,8 +51,10 @@ function Clear-AnchorEvents {
 }
 
 function Invoke-RunnerSub {
-    param([string]$KeeperRoot, [string]$ConfigFile)
-    $out = & $pwsh -NoProfile -ExecutionPolicy Bypass -File $runnerPath -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile 2>&1
+    param([string]$KeeperRoot, [string]$ConfigFile, [switch]$ForceAnchor)
+    $subArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runnerPath, '-KeeperRoot', $KeeperRoot, '-ConfigFile', $ConfigFile)
+    if ($ForceAnchor) { $subArgs += '-ForceAnchor' }
+    $out = & $pwsh @subArgs 2>&1
     return @{ exitCode = $LASTEXITCODE; output = ($out | Out-String) }
 }
 
@@ -86,7 +88,10 @@ try {
     $cfgFile = Join-Path $keeperRoot 'config.json'
     $cfg = New-TestConfig @{
         mode  = 'AutoAnchor'
-        codex = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 1 } }
+        # keepalive=0 here: these scenarios exercise reset-triggered anchoring,
+        # where the first run must be a passive baseline (no trigger may fire on
+        # the first observation - idle detection also needs a second record).
+        codex = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 1; keepaliveIntervalMinutes = 0 } }
         github = @{ coordination = @{ enabled = $true; repoPath = $repos.clone; branch = 'cqk/coordination' }; historySync = @{ enabled = $true; push = $true; branch = 'cqk/history'; eventsOnly = $true } }
     }
     $null = Write-TestConfigFile $cfgFile $cfg
@@ -253,7 +258,7 @@ try {
     $cfgFile5 = Join-Path $keeperRoot5 'config.json'
     $cfgCap = New-TestConfig @{
         mode  = 'AutoAnchor'
-        codex = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 1; minimumGapMinutes = 1 } }
+        codex = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 1; minimumGapMinutes = 1; keepaliveIntervalMinutes = 0 } }
         github = @{ coordination = @{ enabled = $true; repoPath = $repos.clone; branch = 'cqk/coordination' }; historySync = @{ enabled = $true; push = $true; branch = 'cqk/history'; eventsOnly = $true } }
     }
     $null = Write-TestConfigFile $cfgFile5 $cfgCap
@@ -279,6 +284,125 @@ try {
     Assert-Equal 1 $state5b.anchors.count 'daily cap blocks the second anchor'
     $evts11 = Get-LogEventNames $keeperRoot5
     Assert-False ($evts11 -contains 'ANCHOR_EXECUTED_2') 'no duplicate executed event'
+    $env:CQK_MOCK_MODE = 'normal'
+
+    Start-TestGroup 'anchor: scenario-1 idle detection (never used Codex, fires on the second observation)'
+
+    # Local-only machine (no coordination repo), keepalive=0: the only trigger
+    # left is the idle detection. Run 1 is a baseline; run 2 sees a second
+    # observation with zero usage and fires exactly one CLI call; run 3 (no
+    # reset, keepalive=0) must stay quiet.
+    $keeperRoot6 = Join-Path $ws 'keeper6'
+    New-Item -ItemType Directory -Path $keeperRoot6 -Force | Out-Null
+    $cfgFile6 = Join-Path $keeperRoot6 'config.json'
+    $cfgLocal = New-TestConfig @{
+        mode   = 'AutoAnchor'
+        codex  = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 300; keepaliveIntervalMinutes = 0 } }
+        github = @{ coordination = @{ enabled = $false }; historySync = @{ enabled = $false } }
+    }
+    $null = Write-TestConfigFile $cfgFile6 $cfgLocal
+    $env:CQK_MOCK_MODE = 'idle'
+    $env:CQK_MOCK_EXEC = 'ok'
+    # Run 1: one poll record is only a baseline - the keeper needs a SECOND
+    # observation before concluding "nobody is using Codex".
+    $rIdle1 = Invoke-RunnerSub -KeeperRoot $keeperRoot6 -ConfigFile $cfgFile6
+    Assert-Equal 0 $rIdle1.exitCode "first idle run ok ($($rIdle1.output))"
+    $stateL0 = Read-JsonFile (Join-Path $keeperRoot6 'runtime\state.json')
+    Assert-Equal 0 $stateL0.anchors.count 'first observation records a baseline, no anchor'
+    $evtsIdle1 = Get-LogEventNames $keeperRoot6
+    Assert-False ($evtsIdle1 -contains 'ANCHOR_EXECUTED') 'no CLI call on the very first run'
+    # Run 2: second observation, still zero usage -> idle detection fires the CLI.
+    $rIdle2 = Invoke-RunnerSub -KeeperRoot $keeperRoot6 -ConfigFile $cfgFile6
+    Assert-Equal 0 $rIdle2.exitCode "idle run 2 ok ($($rIdle2.output))"
+    $evtsIdle2 = Get-LogEventNames $keeperRoot6
+    Assert-Contains $evtsIdle2 'ANCHOR_LOCAL' 'local claim path used'
+    Assert-Contains $evtsIdle2 'ANCHOR_EXECUTED' 'idle detection anchors a never-used Codex account'
+    Assert-False ($evtsIdle2 -contains 'ANCHOR_ABORTED') 'no abort on the idle happy path'
+    $stateL = Read-JsonFile (Join-Path $keeperRoot6 'runtime\state.json')
+    Assert-Equal 1 $stateL.anchors.count 'idle anchor counted'
+    Assert-NotNull $stateL.anchors.lastAnchorAt 'idle anchor timestamp recorded'
+    Assert-Equal 1 @($stateL.processedEventIds).Count 'idle eventId marked processed'
+    # Run 3: the 5h quiet must hold - keepalive=0, no reset, minGap=300.
+    $rIdle3 = Invoke-RunnerSub -KeeperRoot $keeperRoot6 -ConfigFile $cfgFile6
+    Assert-Equal 0 $rIdle3.exitCode "third idle run ok ($($rIdle3.output))"
+    $stateL2 = Read-JsonFile (Join-Path $keeperRoot6 'runtime\state.json')
+    Assert-Equal 1 $stateL2.anchors.count 'no re-trigger after the idle anchor'
+    $env:CQK_MOCK_MODE = 'normal'
+
+    Start-TestGroup 'anchor: anchorOnApply forces an immediate CLI call'
+
+    # keepalive=0 + minGap=60 + no reset: nothing fires without the force.
+    $keeperRoot7 = Join-Path $ws 'keeper7'
+    New-Item -ItemType Directory -Path $keeperRoot7 -Force | Out-Null
+    $cfgFile7 = Join-Path $keeperRoot7 'config.json'
+    $cfgForce = New-TestConfig @{
+        mode   = 'AutoAnchor'
+        codex  = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; keepaliveIntervalMinutes = 0 } }
+        github = @{ coordination = @{ enabled = $false }; historySync = @{ enabled = $false } }
+    }
+    $null = Write-TestConfigFile $cfgFile7 $cfgForce
+    $r14 = Invoke-RunnerSub -KeeperRoot $keeperRoot7 -ConfigFile $cfgFile7
+    Assert-Equal 0 $r14.exitCode "baseline run ok ($($r14.output))"
+    $stF0 = Read-JsonFile (Join-Path $keeperRoot7 'runtime\state.json')
+    Assert-Equal 0 $stF0.anchors.count 'no anchor without reset/keepalive/force'
+
+    # runner -ForceAnchor (what install/apply-config fire on anchorOnApply=true):
+    # the CLI runs immediately even though keepalive=0, minGap=60 and no reset.
+    $r15 = Invoke-RunnerSub -KeeperRoot $keeperRoot7 -ConfigFile $cfgFile7 -ForceAnchor
+    Assert-Equal 0 $r15.exitCode "forced anchor run ok ($($r15.output))"
+    $evts15 = Get-LogEventNames $keeperRoot7
+    Assert-Contains $evts15 'ANCHOR_EXECUTED' 'forced run executes the CLI'
+    Assert-Contains $evts15 'ANCHOR_LOCAL' 'forced run used the local path'
+    Assert-False ($evts15 -contains 'ANCHOR_ABORTED') 'no abort on the forced happy path'
+    $stF1 = Read-JsonFile (Join-Path $keeperRoot7 'runtime\state.json')
+    Assert-Equal 1 $stF1.anchors.count 'forced anchor counted'
+    Assert-NotNull $stF1.anchors.lastAnchorAt 'forced anchor timestamp recorded'
+    Assert-Equal 1 @($stF1.processedEventIds).Count 'force eventId marked processed (exact id unit-tested)'
+
+    Start-TestGroup 'anchor: schedule timer mode - a due daily slot fires without any reset'
+
+    # Pure timer mode (codex.autoAnchor.schedule): the first poll at/after a
+    # configured HH:mm fires the CLI - no second observation, no reset, no
+    # keepalive. The slot is computed as "one minute ago" so it is due on run 1;
+    # run 2 (same day) must not re-fire. keepalive=0 and minGap=300 prove the
+    # timer bypasses both. mock 'idle' keeps usage at zero so no other trigger
+    # can be responsible.
+    $keeperRoot8 = Join-Path $ws 'keeper8'
+    New-Item -ItemType Directory -Path $keeperRoot8 -Force | Out-Null
+    $cfgFile8 = Join-Path $keeperRoot8 'config.json'
+    $slotBase = (Get-Date).AddMinutes(-1)
+    $slotAt = if ($slotBase.Date -ne (Get-Date).Date) { (Get-Date).Date } else { $slotBase }
+    $slotText = $slotAt.ToString('HH:mm')
+    $cfgSch = New-TestConfig @{
+        mode   = 'AutoAnchor'
+        codex  = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 300; keepaliveIntervalMinutes = 0; schedule = @($slotText) } }
+        github = @{ coordination = @{ enabled = $false }; historySync = @{ enabled = $false } }
+    }
+    $null = Write-TestConfigFile $cfgFile8 $cfgSch
+    $env:CQK_MOCK_MODE = 'idle'
+    $env:CQK_MOCK_EXEC = 'ok'
+    # Run 1: the due slot triggers on the very first run, with no usage history.
+    $rSch1 = Invoke-RunnerSub -KeeperRoot $keeperRoot8 -ConfigFile $cfgFile8
+    Assert-Equal 0 $rSch1.exitCode "schedule run 1 ok ($($rSch1.output))"
+    $evtsSch1 = Get-LogEventNames $keeperRoot8
+    Assert-Contains $evtsSch1 'ANCHOR_LOCAL' 'local claim path used'
+    Assert-Contains $evtsSch1 'ANCHOR_EXECUTED' 'due slot executes the CLI on the first run'
+    Assert-False ($evtsSch1 -contains 'ANCHOR_ABORTED') 'no abort on the schedule happy path'
+    $stSch = Read-JsonFile (Join-Path $keeperRoot8 'runtime\state.json')
+    Assert-Equal 1 $stSch.anchors.count 'scheduled anchor counted'
+    Assert-Equal 1 @($stSch.processedEventIds).Count 'schedule eventId marked processed'
+    $histSchItem = Get-ChildItem -LiteralPath (Join-Path $keeperRoot8 'history') -Filter 'events-*.jsonl' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($histSchItem) {
+        $histSchText = [System.IO.File]::ReadAllText($histSchItem.FullName)
+        Assert-True ("$histSchText" -match '"trigger":"schedule"') 'history records trigger=schedule'
+    } else {
+        Assert-True $false 'schedule anchor history event file written'
+    }
+    # Run 2: same day - the slot is already processed, nothing re-fires.
+    $rSch2 = Invoke-RunnerSub -KeeperRoot $keeperRoot8 -ConfigFile $cfgFile8
+    Assert-Equal 0 $rSch2.exitCode "schedule run 2 ok ($($rSch2.output))"
+    $stSch2 = Read-JsonFile (Join-Path $keeperRoot8 'runtime\state.json')
+    Assert-Equal 1 $stSch2.anchors.count 'same-day slot does not re-fire'
     $env:CQK_MOCK_MODE = 'normal'
 } finally {
     Remove-Item Env:\CQK_MOCK_MODE -ErrorAction SilentlyContinue

@@ -129,6 +129,7 @@ try {
     $eLocal = Invoke-LeaderElection -Config $cfgLocal -KeeperRoot $keeper.root -Machine $machineA -Now $now
     Assert-Equal 'LEADER' $eLocal.role 'local-only leader'
     Assert-True ("$($eLocal.reason)" -match 'local-only') 'local-only reason surfaced'
+    Assert-True ([bool]$eLocal.localOnly) 'localOnly flag set'
 } finally {
     Remove-TestWorkspace $ws
 }

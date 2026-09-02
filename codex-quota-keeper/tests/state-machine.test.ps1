@@ -127,6 +127,22 @@ $failed.errorKind = 'TIMEOUT'
 $events = Get-StateEvents -Previous (New-KeeperState) -Current $failed -Now $now
 Assert-Equal 'READ_FAILED' $events[0].event 'transient failure is READ_FAILED (state untouched)'
 
+Start-TestGroup 'events: unified reset - both windows renew at once'
+
+$prevUni = New-KeeperState
+$prevUni.buckets = @((New-StateBucket 'default' @(
+    (New-StateWindow 'primary' 300 100 $expired), (New-StateWindow 'secondary' 10080 100 ($nowEpoch - 1200)))))
+$evUni = Get-StateEvents -Previous $prevUni -Current (New-ReadOk @(
+    (New-StateWindow 'primary' 300 1 $future2), (New-StateWindow 'secondary' 10080 2 ($nowEpoch + 500000)))) -Now $now
+$resetsUni = @($evUni | Where-Object { $_.event -eq 'WINDOW_RESET_OBSERVED' })
+Assert-Equal 2 @($resetsUni).Count 'both windows produce a reset event'
+Assert-True ($resetsUni[0].eventId -ne $resetsUni[1].eventId) 'distinct event ids per window'
+Assert-Equal 'primary' "$($resetsUni[0].windowType)" 'first reset is the primary window'
+$cfgUni = New-TestConfig @{ mode = 'AutoAnchor'; codex = @{ autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 1; keepaliveIntervalMinutes = 0 } } }
+$allowUni = Test-ShouldAnchor -Config $cfgUni -State (New-KeeperState) -Events $evUni -IsLeader $true -Now $now
+Assert-True $allowUni.should 'unified reset anchors'
+Assert-Equal 2 @($allowUni.eventIds).Count 'both reset ids pending for one call'
+
 Start-TestGroup 'events: LEADER_CHANGED only when owner actually changes'
 
 Assert-Null (Get-LeaderChangedEvent -PreviousOwnerId $null -CurrentOwnerId 'A') 'first sight: no event'
@@ -205,6 +221,167 @@ $allowV2 = Test-ShouldAnchor -Config $cfgV2 -State (New-KeeperState) -Events $re
 Assert-True $allowV2.should 'guard works with v2 config shape'
 $cfgV2Off = New-TestConfig @{ codex = @{ autoAnchor = @{ enabled = $false } } }
 Assert-False (Test-AutoAnchorEnabled $cfgV2Off) 'v2 disabled flag respected'
+
+Start-TestGroup 'anchor guard: idle detection - never used Codex, second observation fires once'
+
+$cfgIdle = New-TestConfig @{
+    mode  = 'AutoAnchor'
+    codex = @{ command = 'auto'; queryTimeoutSeconds = 20; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 300; keepaliveIntervalMinutes = 0 } }
+}
+$zeroBuckets = @((New-StateBucket 'default' @((New-StateWindow 'primary' 300 0 $future1), (New-StateWindow 'secondary' 10080 0 ($nowEpoch + 400000)))))
+
+# First observation: only a baseline, no second record yet -> no anchor.
+$denyIdle1 = Test-ShouldAnchor -Config $cfgIdle -State (New-KeeperState) -Events @() -IsLeader $true -Now $now
+Assert-False $denyIdle1.should 'first observation never anchors'
+Assert-True ("$($denyIdle1.reason)" -match 'first observation') 'reason says first observation'
+
+# Second record, still zero usage, never anchored -> FIRST anchor fires (keepalive=0!).
+$stIdle = New-KeeperState
+$stIdle.lastReadAt = '2026-08-29T12:00:00+08:00'
+$stIdle.buckets = $zeroBuckets
+$allowIdle = Test-ShouldAnchor -Config $cfgIdle -State $stIdle -Events @() -IsLeader $true -Now $now
+Assert-True $allowIdle.should 'second observation with zero usage anchors even with keepalive=0'
+Assert-Equal 'idle' $allowIdle.triggerKind 'trigger kind reported as idle'
+$expectedIdle = Get-IdleDetectionEventId -Now $now
+Assert-Contains $allowIdle.eventIds $expectedIdle 'idle eventId deterministic per day'
+
+# Usage > 0: not idle - the rollover trigger will handle it later.
+$stUsed = New-KeeperState
+$stUsed.lastReadAt = '2026-08-29T12:00:00+08:00'
+$stUsed.buckets = @((New-StateBucket 'default' @((New-StateWindow 'primary' 300 25 $future1))))
+$denyIdle2 = Test-ShouldAnchor -Config $cfgIdle -State $stUsed -Events @() -IsLeader $true -Now $now
+Assert-False $denyIdle2.should 'usage in progress -> idle detection waits'
+
+# Same-day processed idle id -> no second fire.
+$stProc = New-KeeperState
+$stProc.lastReadAt = '2026-08-29T12:00:00+08:00'
+$stProc.processedEventIds = @($expectedIdle)
+$stProc.buckets = $zeroBuckets
+$denyIdle3 = Test-ShouldAnchor -Config $cfgIdle -State $stProc -Events @() -IsLeader $true -Now $now
+Assert-False $denyIdle3.should 'processed idle id denies (once per day)'
+
+# This cycle's read failed -> fail closed.
+$stFail = New-KeeperState
+$stFail.lastReadAt = '2026-08-29T12:00:00+08:00'
+$stFail.buckets = $zeroBuckets
+$denyIdle4 = Test-ShouldAnchor -Config $cfgIdle -State $stFail -Events @(@{ event = 'READ_FAILED' }) -IsLeader $true -Now $now
+Assert-False $denyIdle4.should 'failed read -> idle detection fails closed'
+
+Start-TestGroup 'anchor guard: keepalive idle backstop (after a first anchor)'
+
+$cfgKa = New-TestConfig @{
+    mode  = 'AutoAnchor'
+    codex = @{ command = 'auto'; queryTimeoutSeconds = 20; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 300; keepaliveIntervalMinutes = 300 } }
+}
+$expectedKa = Get-KeepaliveEventId -KeepaliveMinutes 300 -Now $now
+
+# Never anchored is the idle-detection path, not a keepalive trigger.
+$denyKa1 = Test-ShouldAnchor -Config $cfgKa -State (New-KeeperState) -Events @() -IsLeader $true -Now $now
+Assert-False $denyKa1.should 'never anchored + first observation -> idle detection path, not keepalive'
+
+# Anchored recently -> not due yet.
+$stKa2 = New-KeeperState
+$stKa2.anchors = @{ day = $now.ToString('yyyy-MM-dd'); count = 1; lastAnchorAt = $now.AddMinutes(-10).ToString('yyyy-MM-ddTHH:mm:sszzz') }
+$denyKa2 = Test-ShouldAnchor -Config $cfgKa -State $stKa2 -Events @() -IsLeader $true -Now $now
+Assert-False $denyKa2.should 'keepalive not due shortly after an anchor'
+
+# Anchored > 5h ago -> due again, same deterministic slot id.
+$stKa3 = New-KeeperState
+$stKa3.anchors = @{ day = $now.AddDays(-1).ToString('yyyy-MM-dd'); count = 1; lastAnchorAt = $now.AddHours(-5.2).ToString('yyyy-MM-ddTHH:mm:sszzz') }
+$allowKa3 = Test-ShouldAnchor -Config $cfgKa -State $stKa3 -Events @() -IsLeader $true -Now $now
+Assert-True $allowKa3.should 'keepalive fires once the interval elapsed'
+Assert-Equal 'keepalive' $allowKa3.triggerKind 'trigger kind reported as keepalive'
+Assert-Contains $allowKa3.eventIds $expectedKa 'keepalive eventId deterministic per slot'
+
+# Processed slot id -> denied (no double-anchor of the same slot).
+$stKa4 = New-KeeperState
+$stKa4.anchors = @{ day = $now.ToString('yyyy-MM-dd'); count = 1; lastAnchorAt = $now.AddHours(-6).ToString('yyyy-MM-ddTHH:mm:sszzz') }
+$stKa4.processedEventIds = @($expectedKa)
+$denyKa4 = Test-ShouldAnchor -Config $cfgKa -State $stKa4 -Events @() -IsLeader $true -Now $now
+Assert-False $denyKa4.should 'processed keepalive slot denied'
+
+# keepalive=0 disables the backstop (idle detection remains the never-used path).
+$cfgKa0 = New-TestConfig @{ mode = 'AutoAnchor'; codex = @{ autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; keepaliveIntervalMinutes = 0 } } }
+$stKa0 = New-KeeperState
+$stKa0.anchors = @{ day = $now.ToString('yyyy-MM-dd'); count = 1; lastAnchorAt = $now.AddHours(-9).ToString('yyyy-MM-ddTHH:mm:sszzz') }
+$denyKa0 = Test-ShouldAnchor -Config $cfgKa0 -State $stKa0 -Events @() -IsLeader $true -Now $now
+Assert-False $denyKa0.should 'keepalive=0 disables the backstop'
+
+Start-TestGroup 'anchor guard: daily schedule (timer mode)'
+
+$cfgSch = New-TestConfig @{
+    mode  = 'AutoAnchor'
+    codex = @{ command = 'auto'; queryTimeoutSeconds = 20; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 300; keepaliveIntervalMinutes = 0; schedule = @('09:30', '21:00') } }
+}
+$schSlot = '09:30'
+$schNow = [DateTime]::Parse('2026-08-30 09:45:00')
+$schId = Get-ScheduleEventId -Day '2026-08-30' -Slot $schSlot
+
+# Slot not reached yet (09:15) -> falls through to the idle path, no timer fire.
+$denySch1 = Test-ShouldAnchor -Config $cfgSch -State (New-KeeperState) -Events @() -IsLeader $true -Now $schNow.AddMinutes(-30)
+Assert-False $denySch1.should 'scheduled slot not reached yet'
+
+# Due slot: fires on the very first run - pure timer, no second observation,
+# keepalive=0, no reset event.
+$allowSch = Test-ShouldAnchor -Config $cfgSch -State (New-KeeperState) -Events @() -IsLeader $true -Now $schNow
+Assert-True $allowSch.should 'due schedule slot fires on a run with no history at all'
+Assert-Equal 'schedule' $allowSch.triggerKind 'trigger kind reported as schedule'
+Assert-Contains $allowSch.eventIds $schId 'schedule eventId deterministic per day+slot'
+Assert-Equal 1 @($allowSch.eventIds).Count 'the 21:00 slot is not due yet -> only 09:30 pending'
+
+# Processed same-day slot -> denied.
+$stSchProc = New-KeeperState
+$stSchProc.processedEventIds = @($schId)
+$denySch2 = Test-ShouldAnchor -Config $cfgSch -State $stSchProc -Events @() -IsLeader $true -Now $schNow
+Assert-False $denySch2.should 'processed schedule slot denied'
+
+# Explicit user time -> the minimum gap does not apply.
+$stSchGap = New-KeeperState
+$stSchGap.anchors = @{ day = '2026-08-30'; count = 1; lastAnchorAt = $schNow.AddMinutes(-10).ToString('yyyy-MM-ddTHH:mm:sszzz') }
+$allowSchGap = Test-ShouldAnchor -Config $cfgSch -State $stSchGap -Events @() -IsLeader $true -Now $schNow
+Assert-True $allowSchGap.should 'due schedule slot bypasses the minimum gap'
+
+# Read failure -> fails closed.
+$denySch3 = Test-ShouldAnchor -Config $cfgSch -State (New-KeeperState) -Events @(@{ event = 'READ_FAILED' }) -IsLeader $true -Now $schNow
+Assert-False $denySch3.should 'scheduled anchor fails closed on a failed read'
+
+# A reset and a due slot in the same poll -> one allow carrying both ids.
+$allowSchRes = Test-ShouldAnchor -Config $cfgSch -State (New-KeeperState) -Events $resetEvent -IsLeader $true -Now $schNow
+Assert-True $allowSchRes.should 'reset + due slot both pending in one poll'
+Assert-Contains $allowSchRes.eventIds 'abc123' 'reset id pending alongside schedule'
+Assert-Contains $allowSchRes.eventIds $schId 'schedule id pending alongside reset'
+Assert-Equal 'reset' $allowSchRes.triggerKind 'reset remains the reported kind'
+
+Start-TestGroup 'anchor guard: forced anchor (anchorOnApply)'
+
+# Force fires with keepalive=0 and no reset event at all.
+$allowForce = Test-ShouldAnchor -Config $cfgKa0 -State (New-KeeperState) -Events @() -IsLeader $true -Now $now -Force $true
+Assert-True $allowForce.should 'force fires with zero keepalive and no reset'
+Assert-Equal 'force' $allowForce.triggerKind 'trigger kind reported as force'
+$expectedForce = Get-ForceAnchorEventId -Now $now
+Assert-Contains $allowForce.eventIds $expectedForce 'force eventId deterministic per minute'
+
+# Force bypasses the minimum gap: anchored 10 min ago, minGap 60, keepalive 0.
+$stForce = New-KeeperState
+$stForce.anchors = @{ day = $now.ToString('yyyy-MM-dd'); count = 1; lastAnchorAt = $now.AddMinutes(-10).ToString('yyyy-MM-ddTHH:mm:sszzz') }
+$allowForce2 = Test-ShouldAnchor -Config $cfgKa0 -State $stForce -Events @() -IsLeader $true -Now $now -Force $true
+Assert-True $allowForce2.should 'force bypasses the minimum gap'
+
+# The non-forced guard on the same state still denies (gap + no trigger).
+$denyForce0 = Test-ShouldAnchor -Config $cfgKa0 -State $stForce -Events @() -IsLeader $true -Now $now
+Assert-False $denyForce0.should 'non-forced guard still denies on the same state'
+
+# Same-minute processed force id -> no double fire.
+$stForce2 = New-KeeperState
+$stForce2.processedEventIds = @($expectedForce)
+$denyForce2 = Test-ShouldAnchor -Config $cfgKa0 -State $stForce2 -Events @() -IsLeader $true -Now $now -Force $true
+Assert-False $denyForce2.should 'same-minute force id denied (no double fire)'
+
+# Daily cap still blocks a forced anchor.
+$stForce3 = New-KeeperState
+$stForce3.anchors = @{ day = $now.ToString('yyyy-MM-dd'); count = 6; lastAnchorAt = $now.AddMinutes(-10).ToString('yyyy-MM-ddTHH:mm:sszzz') }
+$denyForce3 = Test-ShouldAnchor -Config $cfgKa0 -State $stForce3 -Events @() -IsLeader $true -Now $now -Force $true
+Assert-False $denyForce3.should 'daily cap still blocks a forced anchor'
 
 Start-TestGroup 'state: processed ids bounded, roundtrip persisted, legacy migration'
 

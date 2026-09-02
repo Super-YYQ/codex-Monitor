@@ -35,7 +35,7 @@ function New-KeeperTaskParameters {
     $runner = Join-Path (Get-KeeperRoot $KeeperRoot) 'scripts\runner.ps1'
 
     $action = New-ScheduledTaskAction -Execute $exe `
-        -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$runner`"" `
+        -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$runner`"" `
         -WorkingDirectory (Get-KeeperRoot $KeeperRoot)
 
     $interval = New-TimeSpan -Minutes (Get-PollConfig $Config).intervalMinutes
@@ -72,16 +72,32 @@ function New-KeeperTaskParameters {
     }
 }
 
-function Invoke-ImmediateRunIfRequested {
-    # task.runAtInstall=true: start the freshly registered task right away so the
-    # user can watch the first run without waiting for the poll interval. Fire and
-    # forget: a start failure is reported but never fails the install.
-    param([hashtable]$Config, [string]$TaskName)
-    if ($Config.task -isnot [hashtable] -or $Config.task.runAtInstall -ne $true) {
-        return @{ started = $false; reason = 'runAtInstall not enabled' }
+function Get-ForcedAnchorLaunchSpec {
+    # codex.autoAnchor.anchorOnApply=true: build the one-shot runner launch that
+    # forces a CLI anchor right away (no waiting for keepalive or a reset). The
+    # runner applies its own guards (daily cap, fail-closed errors, local lock).
+    # Pure construction so tests can inspect it without spawning a process.
+    param([hashtable]$Config, [string]$KeeperRoot, [string]$ConfigFile)
+    $aa = Get-AutoAnchorConfig $Config
+    if (-not $aa.enabled) { return @{ skip = $true; reason = 'codex.autoAnchor not enabled'; exe = $null; arguments = $null } }
+    if ($aa.anchorOnApply -ne $true) { return @{ skip = $true; reason = 'anchorOnApply not enabled'; exe = $null; arguments = $null } }
+    $exe = Get-KeeperPowerShellPath
+    if (-not $exe) { return @{ skip = $true; reason = 'no PowerShell executable found'; exe = $null; arguments = $null } }
+    $runner = Join-Path (Get-KeeperRoot $KeeperRoot) 'scripts\runner.ps1'
+    return @{
+        skip = $false; reason = $null; exe = $exe
+        arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$runner`" -KeeperRoot `"$KeeperRoot`" -ConfigFile `"$ConfigFile`" -ForceAnchor"
     }
+}
+
+function Invoke-ForcedAnchorIfRequested {
+    # Fire and forget a runner with -ForceAnchor when the config asks for it.
+    # A start failure is reported but never fails install/apply-config.
+    param([hashtable]$Config, [string]$KeeperRoot, [string]$ConfigFile)
+    $spec = Get-ForcedAnchorLaunchSpec -Config $Config -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile
+    if ($spec.skip) { return @{ started = $false; reason = $spec.reason } }
     try {
-        Start-ScheduledTask -TaskName $TaskName
+        Start-Process -FilePath $spec.exe -ArgumentList $spec.arguments -WindowStyle Hidden
         return @{ started = $true; reason = $null }
     } catch {
         return @{ started = $false; reason = $_.Exception.Message }
@@ -137,9 +153,9 @@ function Invoke-KeeperInstall {
     # 4/5. Register the per-user scheduled task.
     $loaded = Load-Config $ConfigFile
     $taskName = Register-KeeperTask -Config $loaded.config -KeeperRoot $KeeperRoot
-    $immediateRun = Invoke-ImmediateRunIfRequested -Config $loaded.config -TaskName $taskName
+    $forcedAnchor = Invoke-ForcedAnchorIfRequested -Config $loaded.config -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile
 
-    return @{ ok = $true; issues = @(); taskName = $taskName; machine = $pf.machine; probe = $probe; codexPath = $pf.codexPath; immediateRun = $immediateRun }
+    return @{ ok = $true; issues = @(); taskName = $taskName; machine = $pf.machine; probe = $probe; codexPath = $pf.codexPath; forcedAnchor = $forcedAnchor }
 }
 
 # Direct execution (pwsh -File / install.cmd): run the install interactively.
@@ -152,7 +168,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         Write-Host "  Installed        : YES (task '$($result.taskName)')"
         Write-Host "  Machine identity : $($result.machine.label) [$($result.machine.machineId)]"
         Write-Host "  Quota probe      : $(if ($SkipProbe) { 'SKIPPED (-SkipProbe)' } else { 'OK (read-only, no model call)' })"
-        Write-Host "  Immediate run    : $(if ($result.immediateRun.started) { 'STARTED (task.runAtInstall=true)' } else { "no ($($result.immediateRun.reason))" })"
+        Write-Host "  Forced anchor    : $(if ($result.forcedAnchor.started) { 'STARTED (codex.autoAnchor.anchorOnApply=true)' } else { "no ($($result.forcedAnchor.reason))" })"
         Write-Host ''
         Write-Host '  Next: double-click status.cmd to verify.'
     } else {

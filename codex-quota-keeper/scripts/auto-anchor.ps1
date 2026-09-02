@@ -1,7 +1,13 @@
 # Codex Quota Keeper - AutoAnchor (EXPERIMENTAL, default disabled).
-# After a quota window reset is observed, optionally send one minimal prompt via
-# `codex exec` to anchor the next window. Every guard is fail-closed (doc 01 §6,
-# doc 03 §8). Enabling requires mode=AutoAnchor AND codex.autoAnchor=true.
+# After a quota window reset is observed - or, on the keeper's own idle judgment
+# (never anchored + second observation still shows zero usage), via the
+# keepalive backstop (no anchor within keepaliveIntervalMinutes since the last
+# one), or via a due daily schedule slot (codex.autoAnchor.schedule: pure timer,
+# no reset/idle judgment) - send one minimal prompt via `codex exec` to anchor
+# the next window. Every guard is fail-closed (doc 01 §6, doc 03 §8). Enabling
+# requires mode=AutoAnchor AND codex.autoAnchor=true. Without a coordination repo
+# (single machine) the distributed CAS claim is replaced by the local runner
+# lock + state dedup.
 
 $script:CqkAutoAnchorDir = Split-Path -Parent $PSCommandPath
 if (-not (Get-Command Get-KeeperRoot -ErrorAction SilentlyContinue)) {
@@ -144,6 +150,9 @@ function Test-LeaseRevalidation {
 function Invoke-AutoAnchorIfNeeded {
     # Called by runner when mode=AutoAnchor and codex.autoAnchor=true.
     # Returns @{ anchored; events; historyFiles }.
+    # -ForceAnchor (codex.autoAnchor.anchorOnApply -> install/apply-config) fires
+    # one anchor right away, bypassing keepalive and the minimum gap; the guard
+    # still enforces the daily cap and all fail-closed checks.
     param(
         [hashtable]$Config,
         [string]$KeeperRoot,
@@ -152,12 +161,13 @@ function Invoke-AutoAnchorIfNeeded {
         [bool]$IsLeader,
         [hashtable]$Machine,
         [hashtable]$Election,
-        [string]$CodexPath = ''
+        [string]$CodexPath = '',
+        [bool]$ForceAnchor = $false
     )
     $out = @{ anchored = $false; events = @() }
     $now = Get-Date
 
-    $guard = Test-ShouldAnchor -Config $Config -State $State -Events $Events -IsLeader $IsLeader -Now $now
+    $guard = Test-ShouldAnchor -Config $Config -State $State -Events $Events -IsLeader $IsLeader -Now $now -Force $ForceAnchor
     if (-not $guard.should) {
         # Guard denial before anything was executed: a skip, not an abort.
         $out.events += ,@{ event = 'ANCHOR_SKIPPED'; reason = $guard.reason }
@@ -166,32 +176,40 @@ function Invoke-AutoAnchorIfNeeded {
 
     # Distributed claim (CQK-013): CAS-create the event file for every pending
     # eventId. Any existing/blocked event fails closed for that event.
+    # Local-only machines (github.coordination disabled, single machine) have no
+    # remote CAS: the local runner lock + state.processedEventIds dedup are the
+    # at-most-once guarantee, so claim and lease revalidation are skipped.
     $execWindowMinutes = [Math]::Max(2, [int][Math]::Ceiling([int]$Config.codex.queryTimeoutSeconds * 3 / 60.0) + 1)
+    $localOnly = ($null -ne $Election -and [bool]$Election.localOnly)
     $claimed = @()
-    foreach ($id in @($guard.eventIds)) {
-        $claim = Claim-AnchorEvent -Config $Config -KeeperRoot $KeeperRoot -EventId $id -Machine $Machine -ClaimMinutes ($execWindowMinutes * 2)
-        if ($claim.ok) { $claimed += $id }
-        else {
-            $out.events += ,@{ event = 'ANCHOR_ABORTED'; reason = "event $id not claimed: $($claim.reason)"
-                              anchor = @{ phase = 'CLAIM'; eventId = $id; reason = $claim.reason } }
+    if ($localOnly) {
+        $claimed = @($guard.eventIds)
+    } else {
+        foreach ($id in @($guard.eventIds)) {
+            $claim = Claim-AnchorEvent -Config $Config -KeeperRoot $KeeperRoot -EventId $id -Machine $Machine -ClaimMinutes ($execWindowMinutes * 2)
+            if ($claim.ok) { $claimed += $id }
+            else {
+                $out.events += ,@{ event = 'ANCHOR_ABORTED'; reason = "event $id not claimed: $($claim.reason)"
+                                  anchor = @{ phase = 'CLAIM'; eventId = $id; reason = $claim.reason } }
+            }
         }
-    }
-    if ($claimed.Count -eq 0) { return $out }
+        if ($claimed.Count -eq 0) { return $out }
 
-    # CQK-014: revalidate the leader lease BEFORE any model call. If it cannot be
-    # proven, the claimed events are marked EXPIRED: uncertain outcome never retries.
-    $revalid = Test-LeaseRevalidation -Config $Config -KeeperRoot $KeeperRoot -Machine $Machine -RequiredMinutes $execWindowMinutes
-    if (-not $revalid.ok) {
-        foreach ($id in $claimed) {
-            $null = Push-AnchorEventState -Config $Config -KeeperRoot $KeeperRoot -EventId $id `
-                -Record @{ schema = 1; eventId = $id; state = 'EXPIRED'; ownerId = [string]$Machine.machineId;
-                           claimedAt = Get-IsoTimestamp; claimExpiresAt = Get-IsoTimestamp; completedAt = $null;
-                           result = "lease revalidation failed: $($revalid.reason)" } -Machine $Machine
-            Add-ProcessedEvent -State $State -EventId $id
+        # CQK-014: revalidate the leader lease BEFORE any model call. If it cannot be
+        # proven, the claimed events are marked EXPIRED: uncertain outcome never retries.
+        $revalid = Test-LeaseRevalidation -Config $Config -KeeperRoot $KeeperRoot -Machine $Machine -RequiredMinutes $execWindowMinutes
+        if (-not $revalid.ok) {
+            foreach ($id in $claimed) {
+                $null = Push-AnchorEventState -Config $Config -KeeperRoot $KeeperRoot -EventId $id `
+                    -Record @{ schema = 1; eventId = $id; state = 'EXPIRED'; ownerId = [string]$Machine.machineId;
+                               claimedAt = Get-IsoTimestamp; claimExpiresAt = Get-IsoTimestamp; completedAt = $null;
+                               result = "lease revalidation failed: $($revalid.reason)" } -Machine $Machine
+                Add-ProcessedEvent -State $State -EventId $id
+            }
+            $out.events += ,@{ event = 'ANCHOR_ABORTED'; reason = "lease revalidation failed: $($revalid.reason); no model call"
+                              anchor = @{ phase = 'REVALIDATE'; reason = $revalid.reason } }
+            return $out
         }
-        $out.events += ,@{ event = 'ANCHOR_ABORTED'; reason = "lease revalidation failed: $($revalid.reason); no model call"
-                          anchor = @{ phase = 'REVALIDATE'; reason = $revalid.reason } }
-        return $out
     }
 
     if (-not (Test-AnchorPromptAllowed -Prompt ([string](Get-AutoAnchorConfig $Config).prompt))) {
@@ -206,6 +224,9 @@ function Invoke-AutoAnchorIfNeeded {
     }
 
     # ---- ANCHORING: one minimal exec in an empty work dir --------------------
+    if ($localOnly) {
+        $out.events += ,@{ event = 'ANCHOR_LOCAL'; reason = 'coordination disabled; local lock + state dedup only' }
+    }
     $before = $State.buckets
     $workDir = Join-Path (Get-RuntimeDir $KeeperRoot) 'anchor-work'
     Ensure-Directory $workDir | Out-Null
@@ -224,6 +245,8 @@ function Invoke-AutoAnchorIfNeeded {
 
     $anchorInfo = @{
         phase        = $(if ($verified -and $exec.ok) { 'ANCHORED' } else { 'ABORTED' })
+        trigger      = [string]$guard.triggerKind
+        localOnly    = $localOnly
         eventIds     = $claimed
         startedAt    = $startedAt
         endedAt      = $endedAt
@@ -252,13 +275,15 @@ function Invoke-AutoAnchorIfNeeded {
 
     # Complete the claimed events: COMPLETED on verified success, FAILED otherwise.
     # A failed completion push leaves CLAIMED, which blocks every other machine
-    # (uncertain outcome is never retried).
-    $finalState = $(if ($verified -and $exec.ok) { 'COMPLETED' } else { 'FAILED' })
-    foreach ($id in $claimed) {
-        $null = Push-AnchorEventState -Config $Config -KeeperRoot $KeeperRoot -EventId $id `
-            -Record @{ schema = 1; eventId = $id; state = $finalState; ownerId = [string]$Machine.machineId;
-                       claimedAt = $startedAt; claimExpiresAt = $null; completedAt = $endedAt;
-                       result = $anchorInfo.reason } -Machine $Machine
+    # (uncertain outcome is never retried). Local-only mode has no remote files.
+    if (-not $localOnly) {
+        $finalState = $(if ($verified -and $exec.ok) { 'COMPLETED' } else { 'FAILED' })
+        foreach ($id in $claimed) {
+            $null = Push-AnchorEventState -Config $Config -KeeperRoot $KeeperRoot -EventId $id `
+                -Record @{ schema = 1; eventId = $id; state = $finalState; ownerId = [string]$Machine.machineId;
+                           claimedAt = $startedAt; claimExpiresAt = $null; completedAt = $endedAt;
+                           result = $anchorInfo.reason } -Machine $Machine
+        }
     }
 
     # History record with before/after snapshots (doc 01 §6): durable outbox

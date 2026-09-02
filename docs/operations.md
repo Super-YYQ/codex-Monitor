@@ -7,8 +7,10 @@
    确认 `mode=MonitorOnly`、`codex.autoAnchor.enabled=false`，设置 `poll.intervalMinutes`（>=5）
    与 `leader.label`。
 3. `install.cmd` —— 只读 quota probe 通过后注册当前用户计划任务（无需管理员）。
-   需要安装后立即跑一轮验证链路时，在 `config.json` 设 `task.runAtInstall=true`（默认 false，
-   fire-and-forget，启动失败不影响安装）。
+   **想让 CLI 在安装/改配置后立即被调用一次**：`codex.autoAnchor.anchorOnApply=true`
+   （需已启用 AutoAnchor）——`install.cmd` 与 `apply-config.cmd` 都会立刻触发一次锚定。
+   另一个可选模式：`codex.autoAnchor.schedule=["09:30","21:00"]` 每天固定时刻触发一次
+   CLI（纯定时，不判断重置/空闲场景；详见 README「AutoAnchor」）。
 4. `status.cmd` 验证。
 5. 多机：准备专用 Private Git 仓库；每台机器运行
    `pwsh scripts/setup-log-repo.ps1 -RepoPath <路径>` 完成绑定，然后把
@@ -24,7 +26,9 @@
 - **重锚点**：`apply-config.cmd` 用 `-Force` 重注册任务，锚点重置为执行当时 +1 分钟
   （改间隔后新一轮周期从那一刻起算）。
 - **首轮**：安装时的只读 quota probe 只验证连通性、不保存状态；计划任务首次正式运行是
-  first observation（空历史），不产生事件——窗口重置检测最早第二轮才可能出现。
+  first observation（空历史）——窗口重置检测最早第二轮才可能出现，AutoAnchor 的
+  空闲判定也要求第二次观测（从未锚定 + 零用量）才触发一次 CLI；之后静默 5 小时
+  （`minimumGapMinutes` 默认 300），等待窗口真正滚动。
 
 ## 日常
 

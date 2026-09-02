@@ -11,7 +11,8 @@
 param(
     [string]$ConfigFile = '',
     [string]$KeeperRoot = '',
-    [switch]$NoSync
+    [switch]$NoSync,
+    [switch]$ForceAnchor
 )
 
 $ErrorActionPreference = 'Stop'
@@ -152,7 +153,6 @@ try {
             -ErrorText ("$($read.message) (consecutive failures: $($state.consecutiveReadFailures))") `
             -ErrorKind ([string]$read.errorKind)
     }
-    $state.lastReadAt = Get-IsoTimestamp
 
     # ---- leader changed ------------------------------------------------------
     $newOwnerId = $null
@@ -161,16 +161,25 @@ try {
     if ($lcEvent) { $events += $lcEvent }
 
     # ---- AutoAnchor hook (experimental; module optional, default disabled) ---
-    $isLeader = ($election.role -eq 'LEADER' -and $null -ne $election.lease)
+    # Local-only election (no coordination repo) returns role=LEADER with a null
+    # lease; that is still the single machine, so it may anchor.
+    # -ForceAnchor = the explicit "anchor right now" request from install/apply
+    # config (codex.autoAnchor.anchorOnApply).
+    $isLeader = ($election.role -eq 'LEADER' -and ($null -ne $election.lease -or [bool]$election.localOnly))
     if ($cfg.mode -eq 'AutoAnchor' -and (Test-AutoAnchorEnabled $cfg)) {
         if (Get-Command Invoke-AutoAnchorIfNeeded -ErrorAction SilentlyContinue) {
             $anchorOutcome = Invoke-AutoAnchorIfNeeded -Config $cfg -KeeperRoot $KeeperRoot `
-                -State $state -Events $events -IsLeader $isLeader -Machine $machine -Election $election
+                -State $state -Events $events -IsLeader $isLeader -Machine $machine -Election $election `
+                -ForceAnchor:$ForceAnchor
             if ($anchorOutcome -and $anchorOutcome.events) { $events += @($anchorOutcome.events) }
         } else {
             Write-RunnerLog -Event 'ANCHOR_UNAVAILABLE' -Level 'ERROR' -ErrorText 'autoAnchor enabled but auto-anchor module missing'
         }
     }
+    # Record the observation AFTER the anchor hook: idle detection must see the
+    # PREVIOUS poll record (lastReadAt) to tell a first observation from a second
+    # one. State on disk is updated with this run's timestamp either way.
+    $state.lastReadAt = Get-IsoTimestamp
 
     # ---- mark observed reset events processed (idempotency, doc 03 §8) ------
     foreach ($ev in @($events)) {

@@ -18,7 +18,10 @@ Assert-False ([bool]$defaults.github.coordination.enabled) 'coordination default
 Assert-False ([bool]$defaults.github.historySync.enabled) 'historySync default off'
 Assert-Equal 'cqk/coordination' $defaults.github.coordination.branch 'coordination branch name'
 Assert-Equal 'cqk/history' $defaults.github.historySync.branch 'history branch name'
-Assert-False ([bool]$defaults.task.runAtInstall) 'runAtInstall default off (no immediate run)'
+Assert-True ([bool]$defaults.task.startWithWindows) 'startWithWindows default true'
+Assert-Equal 300 $defaults.codex.autoAnchor.minimumGapMinutes 'minimumGap default 300 (5h quiet after a call)'
+Assert-Equal 300 $defaults.codex.autoAnchor.keepaliveIntervalMinutes 'keepalive default 300 (idle backstop, one 5h window)'
+Assert-False ([bool]$defaults.codex.autoAnchor.anchorOnApply) 'anchorOnApply default off (opt-in immediate trigger)'
 
 Start-TestGroup 'config: Load-Config merges defaults and validates'
 
@@ -45,6 +48,86 @@ try {
     [void](Write-TestConfigFile $cfgFile $bad2)
     $loaded3 = Load-Config $cfgFile
     Assert-True (@($loaded3.issues).Count -ge 1) 'autoAnchor without AutoAnchor mode rejected'
+
+    Start-TestGroup 'config: keepalive interval validation'
+
+    $kaOk = New-TestConfig @{
+        mode   = 'AutoAnchor'
+        github = @{ coordination = @{ enabled = $false; repoPath = '' }; historySync = @{ enabled = $false } }
+        codex  = @{ autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; keepaliveIntervalMinutes = 240 } }
+    }
+    [void](Write-TestConfigFile $cfgFile $kaOk)
+    $lkaOk = Load-Config $cfgFile
+    Assert-Equal 0 @($lkaOk.issues).Count 'keepalive >= minimumGap accepted'
+    Assert-Equal 240 (Get-AutoAnchorConfig $lkaOk.config).keepaliveIntervalMinutes 'keepalive interval parsed'
+
+    $kaBelow = New-TestConfig @{
+        mode   = 'AutoAnchor'
+        github = @{ coordination = @{ enabled = $false; repoPath = '' }; historySync = @{ enabled = $false } }
+        codex  = @{ autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; keepaliveIntervalMinutes = 30 } }
+    }
+    [void](Write-TestConfigFile $cfgFile $kaBelow)
+    $lkaBelow = Load-Config $cfgFile
+    Assert-True (@($lkaBelow.issues).Count -ge 1) 'keepalive below minimumGap rejected'
+
+    $kaOff = New-TestConfig @{
+        mode   = 'AutoAnchor'
+        github = @{ coordination = @{ enabled = $false; repoPath = '' }; historySync = @{ enabled = $false } }
+        codex  = @{ autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; keepaliveIntervalMinutes = 0 } }
+    }
+    [void](Write-TestConfigFile $cfgFile $kaOff)
+    $lkaOff = Load-Config $cfgFile
+    Assert-Equal 0 @($lkaOff.issues).Count 'keepalive=0 (off) accepted'
+
+    Start-TestGroup 'config: daily schedule validation (timer mode)'
+
+    $schOk = New-TestConfig @{
+        mode   = 'AutoAnchor'
+        github = @{ coordination = @{ enabled = $false; repoPath = '' }; historySync = @{ enabled = $false } }
+        codex  = @{ autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 300; keepaliveIntervalMinutes = 0; schedule = @('09:30', '21:00') } }
+    }
+    [void](Write-TestConfigFile $cfgFile $schOk)
+    $lschOk = Load-Config $cfgFile
+    Assert-Equal 0 @($lschOk.issues).Count 'schedule of zero-padded HH:mm accepted'
+    Assert-Equal 2 @( (Get-AutoAnchorConfig $lschOk.config).schedule ).Count 'schedule slots parsed'
+    Assert-Equal '21:00' @( (Get-AutoAnchorConfig $lschOk.config).schedule )[1] 'slot order preserved'
+
+    $schDup = New-TestConfig @{
+        mode   = 'AutoAnchor'
+        github = @{ coordination = @{ enabled = $false; repoPath = '' }; historySync = @{ enabled = $false } }
+        codex  = @{ autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 300; keepaliveIntervalMinutes = 0; schedule = @('09:30', '09:30', '21:00') } }
+    }
+    [void](Write-TestConfigFile $cfgFile $schDup)
+    $lschDup = Load-Config $cfgFile
+    Assert-Equal 0 @($lschDup.issues).Count 'duplicate slots accepted'
+    Assert-Equal 2 @( (Get-AutoAnchorConfig $lschDup.config).schedule ).Count 'duplicate slots deduplicated'
+
+    $schBadFmt = New-TestConfig @{
+        mode   = 'AutoAnchor'
+        github = @{ coordination = @{ enabled = $false; repoPath = '' }; historySync = @{ enabled = $false } }
+        codex  = @{ autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 300; keepaliveIntervalMinutes = 0; schedule = @('9:30') } }
+    }
+    [void](Write-TestConfigFile $cfgFile $schBadFmt)
+    $lschBad = Load-Config $cfgFile
+    Assert-True (@($lschBad.issues).Count -ge 1) 'slot without zero padding rejected'
+
+    $schBadHour = New-TestConfig @{
+        mode   = 'AutoAnchor'
+        github = @{ coordination = @{ enabled = $false; repoPath = '' }; historySync = @{ enabled = $false } }
+        codex  = @{ autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 300; keepaliveIntervalMinutes = 0; schedule = @('25:00') } }
+    }
+    [void](Write-TestConfigFile $cfgFile $schBadHour)
+    $lschBad2 = Load-Config $cfgFile
+    Assert-True (@($lschBad2.issues).Count -ge 1) 'slot hour out of range rejected'
+
+    $schMany = New-TestConfig @{
+        mode   = 'AutoAnchor'
+        github = @{ coordination = @{ enabled = $false; repoPath = '' }; historySync = @{ enabled = $false } }
+        codex  = @{ autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 2; minimumGapMinutes = 300; keepaliveIntervalMinutes = 0; schedule = @('09:00', '12:00', '18:00') } }
+    }
+    [void](Write-TestConfigFile $cfgFile $schMany)
+    $lschMany = Load-Config $cfgFile
+    Assert-True (@($lschMany.issues).Count -ge 1) 'more slots than maxPerDay rejected'
 
     Start-TestGroup 'config: coordination enabled without repoPath rejected'
 

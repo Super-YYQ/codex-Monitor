@@ -24,7 +24,9 @@
 
 ## AutoAnchor 副作用控制（实验）
 
-- 分布式 CAS Claim：同一 reset 事件全局最多一次副作用。
+- 分布式 CAS Claim：同一 reset/idle/keepalive/schedule 事件全局最多一次副作用。
 - Claim 后重验证租约归属与剩余时间；不确定结果（EXPIRED/FAILED/COMPLETED push 失败）永不重试。
 - 每日上限 + 最小间隔 + 本地 processedEventIds + 远程 claim 多层限制。
+- LOCAL_ONLY 单机（未配置协调仓库）：无远端 Claim，改为本地 runner 锁 + state 去重承担
+  at-most-once；执行中不重试、失败计入当日上限后由静默期/兜底间隔再触发。
 - 429 / AUTH_ERROR / SCHEMA_UNKNOWN / 远程不可达一律 fail-closed。

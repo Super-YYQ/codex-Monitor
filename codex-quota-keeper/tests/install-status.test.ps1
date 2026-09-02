@@ -43,6 +43,7 @@ try {
     Assert-True ("$($tp.Action.Execute)" -match 'pwsh|powershell') 'action uses powershell'
     Assert-True ("$($tp.Action.Arguments)" -match 'runner\.ps1') 'action runs runner.ps1'
     Assert-True ("$($tp.Action.Arguments)" -match '-NoProfile') 'action uses -NoProfile'
+    Assert-True ("$($tp.Action.Arguments)" -match 'WindowStyle Hidden') 'action hides console window (no popup on scheduled run)'
     Assert-Equal (Join-Path $keeperRoot '') "$($tp.Action.WorkingDirectory)\" 'working directory pinned to project'
     $onceTrigger = @($tp.Trigger)[0]
     Assert-Equal 15 (Get-TaskIntervalMinutes $onceTrigger) 'repetition interval from config'
@@ -64,26 +65,23 @@ try {
     $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
     Assert-NotNull $info 'task info readable'
 
-    Start-TestGroup 'install: task.runAtInstall decides immediate start'
+    Start-TestGroup 'install: anchorOnApply decides the forced anchor launch'
 
-    $script:startedTaskCalls = @()
-    function Start-ScheduledTask { param([string]$TaskName) $script:startedTaskCalls += $TaskName }
-    try {
-        $cfgOff = New-Cfg 15
-        $r1 = Invoke-ImmediateRunIfRequested -Config $cfgOff -TaskName $taskName
-        Assert-False $r1.started 'no start when runAtInstall is off'
-        Assert-Equal 0 @($script:startedTaskCalls).Count 'Start-ScheduledTask not called when off'
+    $cfgAaOn = New-Cfg 15
+    $cfgAaOn.codex.autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; keepaliveIntervalMinutes = 240; anchorOnApply = $true }
+    $spec = Get-ForcedAnchorLaunchSpec -Config $cfgAaOn -KeeperRoot $keeperRoot -ConfigFile $cfgFile
+    Assert-False $spec.skip 'spec produced when anchorOnApply=true and autoAnchor enabled'
+    Assert-True ("$($spec.arguments)" -match 'runner\.ps1') 'spec runs runner.ps1'
+    Assert-True ("$($spec.arguments)" -match '\-ForceAnchor') 'spec passes -ForceAnchor'
+    Assert-True ("$($spec.arguments)" -match 'WindowStyle Hidden') 'spec hides the console window'
 
-        $cfgOn = New-Cfg 15
-        $cfgOn.task.runAtInstall = $true
-        $r2 = Invoke-ImmediateRunIfRequested -Config $cfgOn -TaskName $taskName
-        Assert-True $r2.started 'start requested when runAtInstall is on'
-        Assert-Equal 1 @($script:startedTaskCalls).Count 'Start-ScheduledTask called exactly once'
-        Assert-Equal $taskName $script:startedTaskCalls[0] 'task name passed through'
-    } finally {
-        Remove-Item Function:\Start-ScheduledTask -ErrorAction SilentlyContinue
-        Remove-Variable startedTaskCalls -Scope Script -ErrorAction SilentlyContinue
-    }
+    $specOff = Get-ForcedAnchorLaunchSpec -Config (New-Cfg 15) -KeeperRoot $keeperRoot -ConfigFile $cfgFile
+    Assert-True $specOff.skip 'autoAnchor off -> no forced launch'
+
+    $cfgAaOff = New-Cfg 15
+    $cfgAaOff.codex.autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; keepaliveIntervalMinutes = 240; anchorOnApply = $false }
+    $specAaOff = Get-ForcedAnchorLaunchSpec -Config $cfgAaOff -KeeperRoot $keeperRoot -ConfigFile $cfgFile
+    Assert-True $specAaOff.skip 'anchorOnApply=false -> no forced launch'
 
     Start-TestGroup 'apply-config: interval update 15 -> 30'
 
@@ -119,6 +117,24 @@ try {
     Assert-True ("$text" -match 'Task installed      : YES') 'task line'
     Assert-True ("$text" -match 'AutoAnchor          : OFF') 'anchor OFF line'
     Assert-True ("$text" -match 'MULTI-PC UNSAFE') 'local-only warning shown'
+
+    Start-TestGroup 'status: autoAnchor reported ON when mode+enabled'
+
+    $cfgAa = New-Cfg 30
+    $cfgAa.mode = 'AutoAnchor'
+    $cfgAa.codex.autoAnchor = @{ enabled = $true; schedule = @('09:30') }
+    $null = Write-TestConfigFile $cfgFile $cfgAa
+    $statusAa = Get-KeeperStatus -KeeperRoot $keeperRoot -ConfigFile $cfgFile
+    Assert-True $statusAa.configOk "autoAnchor config valid ($($statusAa.lastError))"
+    Assert-True $statusAa.autoAnchor 'autoAnchor reported ON (v2 nested config shape)'
+    Assert-Equal 300 $statusAa.anchorKeepalive.intervalMinutes 'keepalive interval reported'
+    Assert-Equal 1 @($statusAa.anchorSchedule.slots).Count 'schedule slots reported'
+    Assert-Equal '09:30' $statusAa.anchorSchedule.slots[0] 'schedule slot preserved'
+    $textAa = (Write-StatusText $statusAa | Out-String)
+    Assert-True ("$textAa" -match '\*\*\* ON') 'ON warning shown in status text'
+    Assert-True ("$textAa" -match 'Anchor backstop') 'backstop line shown'
+    Assert-True ("$textAa" -match 'Scheduled anchor\s+: 09:30') 'schedule line shown'
+    $null = Write-TestConfigFile $cfgFile (New-Cfg 30)
 
     Start-TestGroup 'status-json: machine-readable output'
 

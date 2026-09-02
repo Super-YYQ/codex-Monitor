@@ -19,6 +19,7 @@
 #   unknown-meta  unknown metadata keys must not break parsing
 #   limit-reached rateLimitReachedType set on the result
 #   rate-limit    error response mentioning 429/usage limit (backoff path)
+#   idle          zero usage on both windows (never-used account, scenario-1 idle detection)
 #   reset         primary window renewed: old resetsAt past, new resetsAt future
 #   unknown-schema rateLimits shape unrecognized -> client must fail closed
 #   unrecognized-root result has no rateLimits structure at all
@@ -259,6 +260,14 @@ while ($true) {
                 'limit-reached' {
                     $windows.primary = Get-MockWindow 300 100 1788062400
                     $extra.rateLimitReachedType = 'primary'
+                    $extra.limitId = 'codex-default'
+                }
+                'idle' {
+                    # Never-used account: zero usage, window boundary fixed (never
+                    # slides) so consecutive polls observe no reset - exactly the
+                    # input the real server gives a fresh, unused ChatGPT plan.
+                    $windows.primary = Get-MockWindow 300 0 1788062400
+                    $windows.secondary = Get-MockWindow 10080 0 1788667200
                     $extra.limitId = 'codex-default'
                 }
                 'reset' {
