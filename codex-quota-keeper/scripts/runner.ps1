@@ -315,6 +315,11 @@ try {
     # Retention cleanup at completion; failure must not affect the core run.
     try {
         $null = Invoke-LogRetention -Root $KeeperRoot -RetentionDays $script:CqkLogging.retentionDays
+        # Local durable anchor claims (CQK-023): terminal files only. The store
+        # module is optional, so guard the call the same way the anchor hook does.
+        if (Get-Command Invoke-AnchorClaimRetention -ErrorAction SilentlyContinue) {
+            $null = Invoke-AnchorClaimRetention -KeeperRoot $KeeperRoot -RetentionDays $script:CqkLogging.retentionDays
+        }
     } catch {
         Write-RunnerLog -Event 'RETENTION_FAILED' -Level 'ERROR' -ErrorText $_.Exception.Message
     }

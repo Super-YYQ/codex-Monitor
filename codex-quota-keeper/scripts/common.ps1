@@ -38,6 +38,13 @@ function Get-MachinePath  { param([string]$Root) Join-Path (Get-RuntimeDir $Root
 function Get-BackoffPath  { param([string]$Root) Join-Path (Get-RuntimeDir $Root) 'backoff.json' }
 # CQK-024: durable queue for a cluster backoff marker whose remote write failed.
 function Get-PendingGlobalBackoffPath { param([string]$Root) Join-Path (Get-RuntimeDir $Root) 'pending-global-backoff.json' }
+# CQK-023: LOCAL_ONLY durable anchor claims. Without a coordination repo there is
+# no Git CAS, so the at-most-once marker lives here instead.
+function Get-AnchorClaimsDir  { param([string]$Root) Join-Path (Get-RuntimeDir $Root) 'anchor-claims' }
+function Get-AnchorClaimPath {
+    param([string]$Root, [string]$EventId)
+    return Join-Path (Get-AnchorClaimsDir $Root) ($EventId + '.json')
+}
 
 function Ensure-Directory {
     param([string]$Path)

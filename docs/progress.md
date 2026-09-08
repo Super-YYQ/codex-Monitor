@@ -300,7 +300,47 @@ R13. `本次 commit` **CQK-024 Backoff 期间继续 coordination maintenance**�
       deadline 断言把 JSON 文档当时间戳解析（`[DateTime]::MinValue` → 永真假绿，改为比较
       `Get-GlobalBackoff.until`）。
 
+R14. `本次 commit` **CQK-023 LOCAL_ONLY AutoAnchor 本地 durable Claim**（本次 commit）
+    - 修掉两个产品缺陷：
+      ① 单机从来没有 claim 工件——at-most-once 全靠 runner 互斥体 + `state.processedEventIds`，
+        而后者只在 `codex exec` **返回之后**才落盘（runner.ps1:240）。崩在 exec 与 persist 之间
+        = 下一个滴答重新锚定 = 用户被重复计费。
+      ② 旧的 `if (-not $localOnly)` 直接跳过 COMPLETED/FAILED 终态写回，单机 claim 无从收尾。
+    - 新增 `scripts/anchor-claim.ps1`：统一 Claim/Complete/Fail/Exists/Mark-Expired 门面 +
+      `$LocalOnly` 存储选择器。LOCAL_ONLY → `runtime/anchor-claims/<eventId>.json`
+      （`FileMode.CreateNew` 独占创建，本地版 CAS）；Distributed → `coordination/events/<eventId>.json`
+      （Git CAS push，从 auto-anchor.ps1 原样搬来，保留同名薄包装给 concurrency.test.ps1）。
+      两侧同一记录形状（8 键固定顺序）、同一条规则：**任何已存在的 claim（CLAIMED/COMPLETED/
+      FAILED/EXPIRED）都拦住执行**——结果不确定永不再试。
+    - CLAIMED 在模型调用**之前**写；`claimExpiresAt` 只是 TTL 提示（`max(2, ceil(qtos×3/60)+1)×2` 分钟），
+      不是释放键。exec 前跳过（prompt 不合规 / 找不到 codex）释放为 FAILED 并标 processed，
+      否则 idle 一天一次会把这个 eventId 永久钉死。
+    - CQK-014 租约复核仍走统一门面：`Mark-AnchorClaimExpired`（EXPIRED，不重试）。
+    - 新增 `Invoke-AnchorClaimRetention`：只扫终态（CLAIMED 永不老化），按文件 mtime 判定，
+      `≤0` / 目录不存在直接返回 0；挂在 runner 收尾（runner.ps1:315-325），与日志保留期同一
+      `Get-Command` 守卫、同一个 try。
+    - 序列化器 `ConvertTo-AnchorClaimRecordJson`：逐键手写、`-Depth 1`、显式 `$null → 'null'`。
+      PS5.1 的 `ConvertTo-Json -Depth 0` 抛异常，且把 `$null` 标量渲染成空串。
+    - 测试期发现并修掉第 3 个真实缺陷：`[string]$Result` 参数在 **5.1 和 7 上都会**把传入的
+      `$null`（以及它自己的 `$null` 默认值）强制成 `''`，于是干净的 COMPLETED claim 在**两种
+      backing**里都写成 `"result":""`——凭空捏造一个失败原因，且打破「两侧记录逐字段一致」的承诺。
+      修法是 `Get-AnchorClaimResultValue` 在三处构造点把空白归一为 `$null`，不是放宽断言。
+    - `tests/anchor-claim.test.ps1` 10 组：LOCAL_ONLY 记录形状（exec 前即可读到 CLAIMED +
+      可解析 result）、四种已存在状态全部拒、崩溃窗口（CLAIMED 残留 → 下一滴答零模型调用）、
+      执行与 state 落盘之间对端 claim 落地仍被拒、store 不可读时 fail closed 而非「看起来是空的」、
+      finalize 不能复活 EXPIRED/终态、retention 只清终态不清 CLAIMED、四进程抢同一
+      CreateNew 恰好一个赢、统一门面按 backing 路由且两侧措辞一致、分布式回归。双运行时通过。
+    - 测试自身踩坑：`ProcessStartInfo` 在两侧都没有实例 `Start()`（用静态
+      `[Diagnostics.Process]::Start($psi)`），且该调用位于顶层 try 内——异常被吞掉导致第 9、10 组
+      **静默不跑**；`Assert-False/True` 形参是 `[bool]`，PowerShell 拒绝把 `$null`（报错里显示成 `""`）
+      或 `''` 转成 `[bool]`，字段可能为 null 时必须用 `Assert-Null` 或显式比较。
+    - 全量 13 文件 PS7 + PS5.1 双运行时通过；PSScriptAnalyzer Error=0（新增 warning 全部是
+      Approved Verbs 家族对 `Claim-`/`Finalize-`/`Mark-` 的既有风格告警，与 auto-anchor 同源）。
+    - 文档：docs/scenarios.md 新增 §5.1「锚定的至多一次保证」（含崩溃时间线 Mermaid + 真实
+      CLAIMED 文件内容），§8 fail-closed 表补 5 行 claim 相关原因文本。
+
 ### 下一步
-- CQK-023：LOCAL_ONLY AutoAnchor 本地 durable Claim（统一 Claim/Complete/Fail/Exists 抽象）。
-- 之后：Status 组（025~030）→ P2 组（031~035）→ 收尾。
+- CQK-025~030：Status 中文诊断面板（assessment 层 + 中文渲染，`status-json.ps1` 英文 schema 不动；
+  与 runner 改动分开 commit）。
+- 之后：P2 组（031~035）→ 收尾（双机 soak + 故障注入 + v0.9.0-beta）。
 

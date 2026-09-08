@@ -88,7 +88,7 @@ codex-quota-keeper/
     marker、写 heartbeat/status；新增 runtime/pending-global-backoff.json 持久化远程写失败；
   - 每次任务滴答即使 local backoff active 也尝试补写 pending marker；
   - coordination 不可达时本地安全退避，AutoAnchor 继续失败关闭 (fail closed)。
-- [ ] CQK-023 LOCAL_ONLY AutoAnchor 本地 durable Claim
+- [x] CQK-023 LOCAL_ONLY AutoAnchor 本地 durable Claim
   - 统一 Claim 抽象（IAnchorClaimStore 语义）：Claim/Complete/Fail/Exists；
   - LocalOnly → runtime/anchor-claims/<eventId>.json；Distributed → coordination/events（Git CAS）；
   - LOCAL_ONLY 在 codex exec 前原子创建 CLAIMED 文件；任何 CLAIMED/COMPLETED/FAILED/UNKNOWN

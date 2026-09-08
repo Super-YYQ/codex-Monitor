@@ -235,6 +235,65 @@ sequenceDiagram
 
 （`ownerLabel` 默认不写：`logging.includeMachineLabel=false`，隐私默认关闭。）
 
+### 5.1 锚定的至多一次保证（统一 Claim，CQK-023）
+
+§2.1 / §2.3 的每个 `CLI 一次` 前面都有一步**先落盘的 CLAIMED**：无论单机还是有
+Private 仓库，都在 `codex exec` **之前**原子写入同一种记录，无论后面是崩在 exec
+里还是 COMPLETED 没推出去，这个 eventId 都不会被重试。
+
+| | 存储位置 | 原子手段 | 被拒原因文本 |
+|---|---|---|---|
+| 多机（`github.coordination.enabled`） | `coordination/events/<eventId>.json` | Git CAS push（`ParentCommit`） | `claim push rejected (…); another machine claimed first` |
+| 单机（LOCAL_ONLY） | `runtime/anchor-claims/<eventId>.json` | `FileMode.CreateNew` | `event already CLAIMED (by …); no retry` |
+
+两个 backing 的记录形状、字段顺序、状态机完全一致
+（`schema/eventId/state/ownerId/claimedAt/claimExpiresAt/completedAt/result`），只是命名空间
+不同；同一台机器由选举结果只会落在其中一个上。
+
+```mermaid
+sequenceDiagram
+    participant A as Home PC（无 coordination）
+    participant C as runtime/anchor-claims
+    participant X as codex exec
+    A->>C: 11:00 CreateNew CLAIMED（TTL=4min，claim 时长=执行窗口×2）
+    A->>X: "Reply exactly OK."
+    Note over A,X: 11:02 进程被 kill / 蓝屏 / 断电
+    A->>A: 12:00 计划任务下一个滴答，idle 槽位仍是同一 eventId
+    A->>C: CreateNew 失败：文件已存在且状态 CLAIMED
+    A-->>A: ANCHOR_ABORTED（denial 指向 owner DEAD-PID），零模型调用
+    Note over A,C: 同一次尝试不改写陈旧 claim，retention 也不清它——<br/>它是拦重试的闸门，不是垃圾
+```
+
+**模拟数据 —— 崩溃前写下的 `runtime/anchor-claims/d75480fc…7039.json`**
+（`eventId = SHA-256("idle|2026-09-02")`，与 §2.1 同一条触发）：
+
+```json
+{
+  "schema": 1,
+  "eventId": "d75480fc55c8c255ad2e0f7e0ab75f3bf43581e888094376df21415eb8537039",
+  "state": "CLAIMED",
+  "ownerId": "a1b2c3d4e5f64789a0b1c2d3e4f5a6b7",
+  "claimedAt": "2026-09-02T11:00:04+08:00",
+  "claimExpiresAt": "2026-09-02T11:04:04+08:00",
+  "completedAt": null,
+  "result": null
+}
+```
+
+成功路径把它改写成 `COMPLETED`，`completedAt` 落时刻、`result` 保持 JSON `null`
+（一次干净的锚定没有失败原因——空字符串会被当成假原因）。exec 失败但确实调用了模型
+的写成 `FAILED` 并带 `result`。
+
+`claimExpiresAt` 是 TTL 提示（`max(2, ceil(queryTimeoutSeconds×3/60)+1) × 2` 分钟），
+**不是**释放键：过期不会让 eventId 重新可锚。只有 CQK-014 的租约复核失败会主动把
+自己的 CLAIMED 盖成 `EXPIRED`（结果不确定，永不再试）。
+
+清理只发生在**终态**：`Invoke-AnchorClaimRetention` 每次运行结束时按
+`logging.retentionDays` 扫 `runtime/anchor-claims/`（用文件 mtime，不用 `completedAt`，
+因为旧记录里的 `completedAt` 恰恰是最可能解析不出来的那个字段），`CLAIMED` 永不老化——
+把它清掉就等于把重复模型调用的口子重新打开。多机侧 `coordination/events/` 沿用 CQK-013
+的行为，本地不做清理（那是共享仓库的历史，不是本机 runtime 垃圾）。
+
 ## 6. 集群级退避（Global Backoff）
 
 一台机器遇到 429 / 认证错误后写入 `coordination/backoff.json`，
@@ -370,6 +429,11 @@ history/
 | 集群退避生效 | 角色直接 `BACKOFF`，日志 `GLOBAL_BACKOFF_SKIP` |
 | 远程仓库不可达（多机） | `remote coordination unreachable (unreachable); fail closed` |
 | 租约丢失 | `lease lost during claim (role=PASSIVE)` |
+| 该事件已被占用（多机 CAS 被抢） | `claim push rejected (push-rejected); another machine claimed first` |
+| 该事件已被占用（单机本地文件） | `event already CLAIMED (by a1b2…); no retry` |
+| 崩溃遗留的 CLAIMED | 同上（`event already CLAIMED`）——结果不确定，永不重试、永不老化 |
+| 本地 claim 目录读不出来（ACL/卷错误） | `claim store unreadable; fail closed` |
+| 终态写回失败（单机） | `finalize write failed: …`（记录保持 CLAIMED，继续拦住重试） |
 | 认证错误 | `open error present: AUTH_ERROR` |
 | 首次观测就想锚定 | `first observation; idle detection needs two poll records` |
 

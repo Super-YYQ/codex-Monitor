@@ -32,7 +32,8 @@ codex-quota-keeper/
   apply-config.cmd 修改配置后应用
   config.example.jsonc
   scripts/         实现脚本
-  runtime/         gitignored（machine.json / state.json / lock / logs）
+  runtime/         gitignored（machine.json / state.json / lock / logs / backoff.json /
+                   pending-global-backoff.json / anchor-claims/）
   history/         净化日志（可选 Git 同步）
   tests/           单元测试（mock app-server，无需真实凭证）
 ```
