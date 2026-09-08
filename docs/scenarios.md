@@ -437,9 +437,41 @@ history/
 | 认证错误 | `open error present: AUTH_ERROR` |
 | 首次观测就想锚定 | `first observation; idle detection needs two poll records` |
 
+### 8.1 诊断面板的 fail-closed 顺序（Get-StatusAnchorBlock，CQK-025）
+
+`status.cmd` 的「当前自动锚定被安全阻止」不是把上面那张表逐行抄一遍，而是复刻
+**runner 真实的判定链**。链上有两道门在 `Test-ShouldAnchor` **之外**：
+
+- 退避（`runtime/backoff.json`）——角色直接是 `BACKOFF`，runner 根本不会去问守卫
+  「这一轮快照可信吗」；
+- Leader 租约——非 Leader 没有自己的快照，守卫无从判定。
+
+所以面板里它们的优先级最高。守卫内部（`scripts/state-machine.ps1`）的顺序原样保留，
+关键是**每日上限排在额度新鲜度之前**：既封顶又读到过期数据的一轮，两句都成立，但只有
+「你今天的次数用完了」是用户能操作的，过期读取本身另有 `QUOTA_STALE` 一条。
+
+| 顺序 | 条件 | 结论（code / severity） | 真实 detail 文本 |
+|------|------|------|------|
+| 1 | 本机退避中 | `BACKOFF_ACTIVE` / WARNING | `in backoff until 2026-09-02 11:00:00 (429)` |
+| 2 | 多机且非 Leader | `AUTOANCHOR_BLOCKED` / ERROR | `machine does not hold the leader lease (role=PASSIVE)` |
+| 3 | 存在未闭合的 usage limit | `AUTOANCHOR_BLOCKED` / ERROR | `usage limit reached (primary) is still open` |
+| 4 | 最近一次读取出现未知 schema | `AUTOANCHOR_BLOCKED` / ERROR | `unknown rate-limit schema in the last read` |
+| 5 | 当日已锚定 ≥ maxPerDay | `ANCHOR_CAP_REACHED` / WARNING | `daily anchor cap reached (6/6)` |
+| 6 | 额度快照过期 | `AUTOANCHOR_BLOCKED` / ERROR | `quota read failed last cycle; the guard fails closed on a snapshot it cannot trust` |
+| 7 | 最小间隔未到（仅周期判断模式） | `ANCHOR_GAP_COOLDOWN` / INFO | `minimum anchor gap not elapsed (42 < 300 min)` |
+| — | 以上都不成立 | `$null` | 面板不显示阻止横幅 |
+
+两点与 §16.5 一致：定时模式下第 7 条不适用（守卫只在周期判断时检查最小间隔，面板照抄）；
+AutoAnchor **自身的开关横幅**永不把系统整体判成 ERROR——第 1 条退避与第 5 条封顶只是
+WARNING、第 7 条冷却是 INFO，`AUTOANCHOR_ENABLED`/`AUTOANCHOR_OFF` 横幅固定 INFO。
+第 2~4、6 条的 `AUTOANCHOR_BLOCKED` 是 fail-closed 的如实陈述：走到这几条时面板里本就
+另有对应的 ERROR（租约丢失、`QUOTA_READ_FAILED`、`COORDINATION_UNREACHABLE`），
+横幅只是把它们说成人话，而不是自己制造异常。
+
 ---
 
 **与代码的对应关系**：本页所有 eventId 格式、字段名、路径、reason 文本均摘自
 `scripts/state-machine.ps1` / `scripts/leader-lease.ps1` / `scripts/global-backoff.ps1` /
-`scripts/github-sync.ps1` / `scripts/logger.ps1` / `scripts/status.ps1`。
+`scripts/github-sync.ps1` / `scripts/logger.ps1` / `scripts/status.ps1` /
+`scripts/anchor-claim.ps1` / `scripts/auto-anchor.ps1` / `scripts/status-assessment.ps1`。
 数据为演示用模拟值（时间戳、machineId、百分比），不是真实账号数据。

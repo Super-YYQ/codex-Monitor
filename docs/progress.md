@@ -339,8 +339,44 @@ R14. `本次 commit` **CQK-023 LOCAL_ONLY AutoAnchor 本地 durable Claim**（�
     - 文档：docs/scenarios.md 新增 §5.1「锚定的至多一次保证」（含崩溃时间线 Mermaid + 真实
       CLAIMED 文件内容），§8 fail-closed 表补 5 行 claim 相关原因文本。
 
+R15. `本次 commit` **CQK-025 Get-StatusAssessment 健康诊断层**（本次 commit）
+    - 新增 `scripts/status-assessment.ps1`（三层架构的中间层，§8/§15.1）：
+      `Get-KeeperStatus`（事实）→ **`Get-StatusAssessment`（overall + findings）** → 渲染层（CQK-026 起）。
+      本层**只读**：从不调用 `Set-*`、不写 state、不写日志（§9.2 红线，测试直接断言
+      state.json 逐字节不变、runtime 无新文件、日志零新增行）。
+    - §9.2 契约：`overall = HEALTHY|WARNING|ERROR`；`summary` 固定三串中文之一
+      （`运行正常` / `存在需要注意的配置` / `运行异常`）；`findings[] = {code,severity,title,action,
+      titleEn,actionEn,detail?,observedAt}`。code/severity 英文、title/action 中文、detail 英文并携带
+      原始值，一律过 `Hide-SensitiveText`；detail 为空时**键整个消失**（不是空串）。
+    - §10.1 `Get-StatusOverall` 纯函数：任一 ERROR→ERROR；否则任一 WARNING→WARNING；否则 HEALTHY，
+      INFO 永不降级。`Set-StatusSummary` 是 summary 的唯一改写点。
+    - §10/§16 规则表全部落地：配置/任务/认证/额度新鲜度/coordination/租约/退避/锚定/AutoAnchor
+      模式与横幅/lastError 与 verdict 流恢复降级（`LAST_ERROR_RECENT` 在 verdict 显示已恢复时降为 INFO）。
+      fail-fast 头部：status 为空或 `configOk=false` 时**只出一条** `CONFIG_INVALID`。
+    - `Get-StatusAnchorBlock`（面板「当前自动锚定被安全阻止」）复刻 **runner 完整判定链**而非只抄守卫：
+      退避（`runtime/backoff.json`）与 Leader 租约是 `Test-ShouldAnchor` **之外**的门，故上提为第 1、2 步；
+      守卫内部顺序原样保留，**每日上限排在额度新鲜度之前**（封顶才有人能操作，过期另有 `QUOTA_STALE`）。
+      详见 docs/scenarios.md §8.1（8 行条件→code/severity→真实 detail 文本对照表）。
+    - 不新增 `Get-KeeperStatus` 字段——派生事实（backoff、claim、processedEventIds、verdict 尾行）
+      全部经 `Load-KeeperState` / `Get-BackoffState` / 只读日志尾部取得，守住 §7/§22 的 schema 红线。
+    - 新增 `tests/status-assessment.test.ps1`（15 个 `Start-TestGroup`、201 处断言）：规则表逐条、守卫链优先级与直连
+      （`-LocalOnly`+PASSIVE→`$null`、`-QuotaStale`+`-BackoffActive`→BACKOFF_ACTIVE、`maxPerDay 0`→`$null`）、
+      形状容错（缺字段/畸形时间戳不抛异常）、§9.2 契约（含零写入）、脱敏组。
+    - **修掉一个阻塞性可移植缺陷**：两个新文件此前无 BOM，Windows PowerShell 5.1 按 cp936 解码，
+      中文字节对会吃掉右引号使 tokenizer 错位（38 + 5 个 UnexpectedToken 报错，特征 `未开?`）。
+      加 UTF-8 BOM 后 5.1 原生解析 0 错误。规则：**`.ps1` 里只要非 ASCII 出现在字符串字面量中就必须带 BOM**
+      （对应 PSScriptAnalyzer 规则 `PSUseBOMForUnicodeEncodedFile`）。
+      注意仓库里 3 个既有文件（`scripts/common.ps1` 的中文只在注释里，但 `tests/common.test.ps1:52` 的
+      `≈`、`tests/auto-anchor.test.ps1:73` 的中文 prompt 字面量在引号内）今天无 BOM 也能解析通过——
+      那是 UTF-8 字节对与紧随其后的引号是否恰好配成 cp936 双字的**字节巧合**，不是可以依赖的规律；
+      5.1 全仓 35 个 .ps1 原生解析当前 0 错误，本次不改它们以把改动限制在 CQK-025 范围内。
+    - PS7 下另修 4 处测试夹具自身缺陷（clock 注入边界、`rateLimitReachedType` 样例值应为 `'primary'`
+      而非 `'rate_limit_reached'`、退避时间戳格式为 `yyyy-MM-dd HH:mm:ss`、`Clear-Backoff` 缺失导致
+      相邻用例串状态）。全量 14 文件 PS7 + PS5.1 双运行时通过；PSScriptAnalyzer Error=0。
+
 ### 下一步
-- CQK-025~030：Status 中文诊断面板（assessment 层 + 中文渲染，`status-json.ps1` 英文 schema 不动；
-  与 runner 改动分开 commit）。
+- CQK-026~030：Status 中文分区渲染（术语映射 §12、配额百分比与窗口中文名、AutoAnchor 友好展示、
+  颜色/NoColor/PS5.1 中文兼容、golden output 快照）。`status-json.ps1` 英文 schema 仍不动；
+  渲染层改动与 assessment 层分开 commit。
 - 之后：P2 组（031~035）→ 收尾（双机 soak + 故障注入 + v0.9.0-beta）。
 

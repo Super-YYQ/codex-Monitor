@@ -95,7 +95,7 @@ codex-quota-keeper/
     阻止自动重试；COMPLETED/FAILED 由 retention 清理；并发与崩溃 (crash) 测试基于统一接口。
 
 ## 阶段 B：Status 中文诊断面板（CQK-025~030）
-- [ ] CQK-025 Get-StatusAssessment 健康诊断层（overall/findings，§10 规则表、§16 新增规则）
+- [x] CQK-025 Get-StatusAssessment 健康诊断层（overall/findings，§10 规则表、§16 新增规则）
 - [ ] CQK-026 默认中文分区输出 + 中文术语映射（§11/§12；采集/判断/渲染三层分离；
       不改 Get-KeeperStatus 字段；LOCAL_ONLY 单机=INFO 不警告）
 - [ ] CQK-027 Quota 剩余百分比、窗口中文名、数据新鲜度
