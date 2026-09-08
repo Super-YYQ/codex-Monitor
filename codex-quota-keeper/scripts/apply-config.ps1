@@ -34,10 +34,12 @@ function Invoke-ApplyConfig {
     $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     if ($existing) {
         # Re-register with the new trigger/settings (keeps it simple and consistent).
-        Register-KeeperTask -Config $cfg -KeeperRoot $KeeperRoot | Out-Null
+        # CQK-022: thread the resolved ConfigFile so the scheduled runner keeps
+        # using this exact config (a custom path would otherwise be lost here).
+        Register-KeeperTask -Config $cfg -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile | Out-Null
         $taskCreated = $false
     } else {
-        Register-KeeperTask -Config $cfg -KeeperRoot $KeeperRoot | Out-Null
+        Register-KeeperTask -Config $cfg -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile | Out-Null
         $taskCreated = $true
     }
     # codex.autoAnchor.anchorOnApply=true: the config was just applied, so honor

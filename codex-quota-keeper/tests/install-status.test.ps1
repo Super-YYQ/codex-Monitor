@@ -22,7 +22,10 @@ $ws = New-TestWorkspace
 try {
     $keeperRoot = Join-Path $ws 'keeper'
     New-Item -ItemType Directory -Path $keeperRoot -Force | Out-Null
-    $cfgFile = Join-Path $keeperRoot 'config.json'
+    # CQK-022: deliberately a custom (non-default) config name - the default
+    # fallback path <KeeperRoot>\config.json does not exist in this workspace,
+    # so any code path that drops -ConfigFile is caught by these tests.
+    $cfgFile = Join-Path $keeperRoot 'custom-config.json'
 
     function New-Cfg {
         param([int]$Poll = 15)
@@ -41,7 +44,7 @@ try {
     Start-TestGroup 'install: task definition objects'
 
     $cfg15 = New-Cfg 15
-    $tp = New-KeeperTaskParameters -Config $cfg15 -KeeperRoot $keeperRoot
+    $tp = New-KeeperTaskParameters -Config $cfg15 -KeeperRoot $keeperRoot -ConfigFile $cfgFile
     Assert-Equal $taskName $tp.TaskName 'task name from config'
     Assert-True ("$($tp.Action.Execute)" -match 'wscript') 'action launches via wscript (windowless host, no console flash)'
     Assert-True ("$($tp.Action.Arguments)" -match 'hidden-launch\.vbs') 'action points at the generated hidden-launch.vbs'
@@ -50,6 +53,12 @@ try {
     Assert-True ("$vbsContent" -match '-NoProfile') 'vbs uses -NoProfile'
     Assert-True ("$vbsContent" -match 'WindowStyle Hidden') 'vbs hides console window (no popup on scheduled run)'
     Assert-True ("$vbsContent" -match '", 0, False') 'vbs Run uses window style 0 (hidden from creation)'
+    # CQK-022: the custom config path must be baked into the scheduled command,
+    # otherwise every poll silently falls back to <KeeperRoot>\config.json.
+    Assert-True ("$vbsContent" -match '-ConfigFile') 'vbs passes -ConfigFile (custom config survives polling)'
+    Assert-True ("$vbsContent" -match [regex]::Escape([System.IO.Path]::GetFullPath($cfgFile))) 'vbs carries the exact custom config path'
+    Assert-True ("$vbsContent" -match '-KeeperRoot') 'vbs pins -KeeperRoot'
+    Assert-True ("$vbsContent" -notmatch '-ForceAnchor') 'scheduled poll vbs does not force an anchor'
     Assert-Equal (Join-Path $keeperRoot '') "$($tp.Action.WorkingDirectory)\" 'working directory pinned to project'
     $onceTrigger = @($tp.Trigger)[0]
     Assert-Equal 15 (Get-TaskIntervalMinutes $onceTrigger) 'repetition interval from config'
@@ -70,6 +79,10 @@ try {
     Assert-True ($task.State -ne 'Disabled') 'task enabled'
     $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
     Assert-NotNull $info 'task info readable'
+    # CQK-022 end-to-end: after a real install with a custom -ConfigFile, the
+    # generated launcher VBS must point the scheduled runner at that same file.
+    $installedVbs = [System.IO.File]::ReadAllText((Join-Path $keeperRoot 'runtime\hidden-launch.vbs'))
+    Assert-True ("$installedVbs" -match [regex]::Escape([System.IO.Path]::GetFullPath($cfgFile))) 'installed task vbs pins the custom config path'
 
     Start-TestGroup 'install: anchorOnApply decides the forced anchor launch'
 
@@ -81,6 +94,7 @@ try {
     $forcedVbs = [System.IO.File]::ReadAllText("$($spec.vbsPath)")
     Assert-True ("$forcedVbs" -match 'runner\.ps1') 'spec vbs runs runner.ps1'
     Assert-True ("$forcedVbs" -match '\-ForceAnchor') 'spec vbs passes -ForceAnchor'
+    Assert-True ("$forcedVbs" -match [regex]::Escape([System.IO.Path]::GetFullPath($cfgFile))) 'spec vbs passes the custom config path'
     Assert-True ("$forcedVbs" -match 'WindowStyle Hidden') 'spec vbs hides the console window'
 
     $specOff = Get-ForcedAnchorLaunchSpec -Config (New-Cfg 15) -KeeperRoot $keeperRoot -ConfigFile $cfgFile
@@ -100,6 +114,9 @@ try {
     $task30 = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     $minutes = Get-TaskIntervalMinutes $task30
     Assert-Equal 30 $minutes 'task trigger now 30 minutes'
+    # CQK-022: apply-config re-registers the task - the vbs must keep the config path.
+    $vbs30 = [System.IO.File]::ReadAllText((Join-Path $keeperRoot 'runtime\hidden-launch.vbs'))
+    Assert-True ("$vbs30" -match [regex]::Escape([System.IO.Path]::GetFullPath($cfgFile))) 'vbs still pins the custom config after apply-config'
 
     Start-TestGroup 'apply-config: below-floor interval rejected'
 
