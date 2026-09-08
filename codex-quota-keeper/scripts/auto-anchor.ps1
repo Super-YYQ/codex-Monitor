@@ -38,9 +38,16 @@ function Test-AnchorPromptAllowed {
 
 function Get-AnchorExecCommand {
     # Any codex shape (exe / npm codex.cmd / mock .ps1) through the unified
-    # launcher (CQK-004). Argument arrays only.
-    param([string]$CodexPath, [string]$Prompt)
-    return (Resolve-ExecutableLaunchSpec -Executable $CodexPath -ArgumentList @('exec', '--skip-git-repo-check', $Prompt))
+    # launcher (CQK-004). Argument arrays only. Optional model / reasoning
+    # effort overrides go in as -m <model> / -c model_reasoning_effort=<effort>
+    # (codex exec flags); when unset nothing is passed and the local
+    # ~/.codex/config.toml defaults apply.
+    param([string]$CodexPath, [string]$Prompt, [string]$Model = '', [string]$ReasoningEffort = '')
+    $execArgs = @('exec', '--skip-git-repo-check')
+    if (-not [string]::IsNullOrWhiteSpace($Model)) { $execArgs += @('-m', $Model) }
+    if (-not [string]::IsNullOrWhiteSpace($ReasoningEffort)) { $execArgs += @('-c', "model_reasoning_effort=$ReasoningEffort") }
+    $execArgs += $Prompt
+    return (Resolve-ExecutableLaunchSpec -Executable $CodexPath -ArgumentList $execArgs)
 }
 
 function Get-AnchorEventCoordPath {
@@ -230,7 +237,9 @@ function Invoke-AutoAnchorIfNeeded {
     $before = $State.buckets
     $workDir = Join-Path (Get-RuntimeDir $KeeperRoot) 'anchor-work'
     Ensure-Directory $workDir | Out-Null
-    $execInfo = Get-AnchorExecCommand -CodexPath $CodexPath -Prompt ([string](Get-AutoAnchorConfig $Config).prompt)
+    $anchorCfgExec = Get-AutoAnchorConfig $Config
+    $execInfo = Get-AnchorExecCommand -CodexPath $CodexPath -Prompt ([string]$anchorCfgExec.prompt) `
+        -Model ([string]$anchorCfgExec.model) -ReasoningEffort ([string]$anchorCfgExec.reasoningEffort)
     $startedAt = Get-IsoTimestamp
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $exec = Invoke-External -FilePath $execInfo.exe -ArgumentList $execInfo.args -RawArguments "$($execInfo.rawArgs)" `
@@ -244,18 +253,20 @@ function Invoke-AutoAnchorIfNeeded {
     $endedAt = Get-IsoTimestamp
 
     $anchorInfo = @{
-        phase        = $(if ($verified -and $exec.ok) { 'ANCHORED' } else { 'ABORTED' })
-        trigger      = [string]$guard.triggerKind
-        localOnly    = $localOnly
-        eventIds     = $claimed
-        startedAt    = $startedAt
-        endedAt      = $endedAt
-        durationSecs = [int]$sw.Elapsed.TotalSeconds
-        execExitCode = $exec.exitCode
-        verified     = $verified
-        before       = $before
-        after        = $(if ($verify.ok) { $verify.buckets } else { $null })
-        reason       = $(if (-not $exec.ok) { "exec failed ($($exec.exitCode))" } elseif (-not $verified) { 'post-anchor verification failed; no retry' } else { $null })
+        phase           = $(if ($verified -and $exec.ok) { 'ANCHORED' } else { 'ABORTED' })
+        trigger         = [string]$guard.triggerKind
+        localOnly       = $localOnly
+        eventIds        = $claimed
+        startedAt       = $startedAt
+        endedAt         = $endedAt
+        durationSecs    = [int]$sw.Elapsed.TotalSeconds
+        execExitCode    = $exec.exitCode
+        verified        = $verified
+        model           = $(if ([string]::IsNullOrWhiteSpace([string]$anchorCfgExec.model)) { $null } else { [string]$anchorCfgExec.model })
+        reasoningEffort = $(if ([string]::IsNullOrWhiteSpace([string]$anchorCfgExec.reasoningEffort)) { $null } else { [string]$anchorCfgExec.reasoningEffort })
+        before          = $before
+        after           = $(if ($verify.ok) { $verify.buckets } else { $null })
+        reason          = $(if (-not $exec.ok) { "exec failed ($($exec.exitCode))" } elseif (-not $verified) { 'post-anchor verification failed; no retry' } else { $null })
     }
 
     # Execution consumed quota regardless of verification: count it.

@@ -181,9 +181,13 @@ RESET_SEEN -> 幂等守卫(eventId) -> ANCHORING -> VERIFY -> ANCHORED
 - 遇到 429、usage-limit、认证异常、未知 schema 时立即 fail closed，不调用模型。
 - Anchor 提示词 `codex.autoAnchor.prompt` 支持中文等 Unicode，长度上限 200 字符；仍禁用换行与
   shell 元字符（`.cmd` 安装经 cmd.exe 展开，防注入）。
-- **模型与思考等级**：本项目从不指定 `--model` / 推理等级参数——额度读取走 app-server
-  协议方法不调用模型；AutoAnchor 的 `codex exec` 沿用你本机 Codex CLI 的默认配置
-  （`~/.codex/config.toml` 的 `model` / `model_reasoning_effort`），此处无对应配置项。
+- **模型与思考等级**：额度读取走 app-server 协议方法，不调用模型、不涉及这些参数。
+  AutoAnchor 的 `codex exec` **默认**沿用你本机 Codex CLI 的默认配置
+  （`~/.codex/config.toml` 的 `model` / `model_reasoning_effort`）；如需为锚定单独
+  指定模型或思考等级，可在 `config.json` 的 `codex.autoAnchor` 下配置
+  `model`（传 `-m`，如 `"gpt-5-codex"`）与 `reasoningEffort`
+  （传 `-c model_reasoning_effort=<值>`，如 `"low"`），仅作用于锚定执行，其余行为不变；
+  每次锚定的 history 审计记录会写入实际使用的值（未配置时省略）。
 
 ## 重试与代理
 

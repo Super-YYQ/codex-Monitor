@@ -4,6 +4,7 @@
 $testsDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $testsDir 'test-helper.ps1')
 . (Join-Path (Split-Path -Parent $testsDir) 'scripts\common.ps1')
+. (Join-Path (Split-Path -Parent $testsDir) 'scripts\auto-anchor.ps1')
 
 Start-TestGroup 'config: defaults are conservative'
 
@@ -22,6 +23,8 @@ Assert-True ([bool]$defaults.task.startWithWindows) 'startWithWindows default tr
 Assert-Equal 300 $defaults.codex.autoAnchor.minimumGapMinutes 'minimumGap default 300 (5h quiet after a call)'
 Assert-Equal 300 $defaults.codex.autoAnchor.keepaliveIntervalMinutes 'keepalive default 300 (idle backstop, one 5h window)'
 Assert-False ([bool]$defaults.codex.autoAnchor.anchorOnApply) 'anchorOnApply default off (opt-in immediate trigger)'
+Assert-Equal '' $defaults.codex.autoAnchor.model 'anchor model default empty (CLI config.toml default applies)'
+Assert-Equal '' $defaults.codex.autoAnchor.reasoningEffort 'anchor reasoningEffort default empty (CLI config.toml default applies)'
 
 Start-TestGroup 'config: Load-Config merges defaults and validates'
 
@@ -128,6 +131,65 @@ try {
     [void](Write-TestConfigFile $cfgFile $schMany)
     $lschMany = Load-Config $cfgFile
     Assert-True (@($lschMany.issues).Count -ge 1) 'more slots than maxPerDay rejected'
+
+    Start-TestGroup 'config: anchor model / reasoning effort validation'
+
+    $modelOk = New-TestConfig @{
+        mode   = 'AutoAnchor'
+        github = @{ coordination = @{ enabled = $false; repoPath = '' }; historySync = @{ enabled = $false } }
+        codex  = @{ autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; keepaliveIntervalMinutes = 0; model = 'gpt-5-codex'; reasoningEffort = 'low' } }
+    }
+    [void](Write-TestConfigFile $cfgFile $modelOk)
+    $lmOk = Load-Config $cfgFile
+    Assert-Equal 0 @($lmOk.issues).Count 'anchor model + reasoningEffort accepted'
+    $aaParsed = Get-AutoAnchorConfig $lmOk.config
+    Assert-Equal 'gpt-5-codex' $aaParsed.model 'model parsed'
+    Assert-Equal 'low' $aaParsed.reasoningEffort 'reasoningEffort parsed'
+
+    $modelEmpty = New-TestConfig @{
+        mode   = 'AutoAnchor'
+        github = @{ coordination = @{ enabled = $false; repoPath = '' }; historySync = @{ enabled = $false } }
+        codex  = @{ autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; keepaliveIntervalMinutes = 0; model = ''; reasoningEffort = '' } }
+    }
+    [void](Write-TestConfigFile $cfgFile $modelEmpty)
+    $lmEmpty = Load-Config $cfgFile
+    Assert-Equal 0 @($lmEmpty.issues).Count 'empty model/effort accepted (defaults apply)'
+
+    $modelBad = New-TestConfig @{
+        mode   = 'AutoAnchor'
+        github = @{ coordination = @{ enabled = $false; repoPath = '' }; historySync = @{ enabled = $false } }
+        codex  = @{ autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; keepaliveIntervalMinutes = 0; model = 'gpt 5 codex'; reasoningEffort = 'low' } }
+    }
+    [void](Write-TestConfigFile $cfgFile $modelBad)
+    $lmBad = Load-Config $cfgFile
+    Assert-True (@($lmBad.issues).Count -ge 1) 'model with whitespace rejected'
+
+    $effortBad = New-TestConfig @{
+        mode   = 'AutoAnchor'
+        github = @{ coordination = @{ enabled = $false; repoPath = '' }; historySync = @{ enabled = $false } }
+        codex  = @{ autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; keepaliveIntervalMinutes = 0; model = 'gpt-5-codex'; reasoningEffort = 'super high' } }
+    }
+    [void](Write-TestConfigFile $cfgFile $effortBad)
+    $leBad = Load-Config $cfgFile
+    Assert-True (@($leBad.issues).Count -ge 1) 'reasoningEffort with whitespace rejected'
+
+    $effortShell = New-TestConfig @{
+        mode   = 'AutoAnchor'
+        github = @{ coordination = @{ enabled = $false; repoPath = ''; }; historySync = @{ enabled = $false } }
+        codex  = @{ autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; keepaliveIntervalMinutes = 0; reasoningEffort = 'low&calc' } }
+    }
+    [void](Write-TestConfigFile $cfgFile $effortShell)
+    $leShell = Load-Config $cfgFile
+    Assert-True (@($leShell.issues).Count -ge 1) 'reasoningEffort with shell metacharacters rejected'
+
+    $effortUpper = New-TestConfig @{
+        mode   = 'AutoAnchor'
+        github = @{ coordination = @{ enabled = $false; repoPath = '' }; historySync = @{ enabled = $false } }
+        codex  = @{ autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; keepaliveIntervalMinutes = 0; reasoningEffort = 'Medium' } }
+    }
+    [void](Write-TestConfigFile $cfgFile $effortUpper)
+    $leUpper = Load-Config $cfgFile
+    Assert-True (@($leUpper.issues).Count -ge 1) 'reasoningEffort uppercase rejected (CLI takes lowercase tokens)'
 
     Start-TestGroup 'config: coordination enabled without repoPath rejected'
 
@@ -408,6 +470,32 @@ Assert-True ($spec.args -contains 'C:\Tools\mock.ps1') 'ps1 script path in args'
 $spec = Resolve-ExecutableLaunchSpec -Executable 'C:\Tools\codex.cmd' -ArgumentList @('app-server')
 Assert-True ("$($spec.exe)" -match 'cmd\.exe$') 'cmd wrapped in ComSpec'
 Assert-Equal '/d /s /c ""C:\Tools\codex.cmd" "app-server"""' "$($spec.rawArgs)" 'cmd raw command line double-quoted for /s'
+
+Start-TestGroup 'anchor exec: Get-AnchorExecCommand model/effort passthrough'
+
+# Direct unit test of the exec argument builder: model and reasoningEffort must
+# land as '-m <model>' / '-c model_reasoning_effort=<effort>' when configured,
+# and be entirely absent when left empty (current behavior unchanged).
+$anchorSpecOff = Get-AnchorExecCommand -CodexPath 'C:\Tools\codex.cmd' -Prompt 'Reply exactly OK.'
+$offRaw = "$($anchorSpecOff.rawArgs)"
+Assert-True ($offRaw -match 'exec') 'plain anchor still runs exec'
+Assert-False ($offRaw -match '-m ') 'no -m flag when model unset'
+Assert-False ($offRaw -match 'model_reasoning_effort') 'no effort override when reasoningEffort unset'
+
+$anchorSpecFull = Get-AnchorExecCommand -CodexPath 'C:\Tools\codex.cmd' -Prompt 'Reply exactly OK.' -Model 'gpt-5-codex' -ReasoningEffort 'low'
+$fullRaw = "$($anchorSpecFull.rawArgs)"
+Assert-True ($fullRaw -match '"-m" "gpt-5-codex"') 'model passed as -m argument'
+Assert-True ($fullRaw -match 'model_reasoning_effort=low') 'effort passed as -c model_reasoning_effort=low'
+# flag order: model/effort overrides go before the prompt so the prompt stays
+# the last positional argument
+$promptIdx = $fullRaw.IndexOf('Reply exactly OK.')
+$mIdx = $fullRaw.IndexOf('"-m"')
+Assert-True ($mIdx -lt $promptIdx) 'model flag precedes the prompt argument'
+
+$anchorSpecEffortOnly = Get-AnchorExecCommand -CodexPath 'C:\Tools\codex.cmd' -Prompt 'Reply exactly OK.' -ReasoningEffort 'minimal'
+$effortOnlyRaw = "$($anchorSpecEffortOnly.rawArgs)"
+Assert-False ($effortOnlyRaw -match '-m ') 'no -m when only effort configured'
+Assert-True ($effortOnlyRaw -match 'model_reasoning_effort=minimal') 'effort-only override applied'
 
 $spec = Resolve-ExecutableLaunchSpec -Executable 'pwsh' -ArgumentList @('-NoProfile')
 Assert-NotNull $spec 'PATH-resolved executable'

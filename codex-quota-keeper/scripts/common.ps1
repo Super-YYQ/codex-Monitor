@@ -244,12 +244,13 @@ function Sanitize-Record {
 # Config accessors (shape-agnostic: v2 nested schema and v1 flat schema both work)
 
 function Get-AutoAnchorConfig {
-    # v2: codex.autoAnchor = @{ enabled; prompt; maxPerDay; minimumGapMinutes; keepaliveIntervalMinutes; anchorOnApply }
+    # v2: codex.autoAnchor = @{ enabled; prompt; maxPerDay; minimumGapMinutes; keepaliveIntervalMinutes; anchorOnApply;
+    #                           schedule; model; reasoningEffort }
     # v1: codex.autoAnchor = bool + codex.anchorPrompt / maxAnchorsPerDay / minimumAnchorGapMinutes /
     #                        anchorKeepaliveMinutes / anchorOnApply
     param([hashtable]$Config)
     if ($null -eq $Config -or $null -eq $Config.codex) {
-        return @{ enabled = $false; prompt = ''; maxPerDay = 0; minimumGapMinutes = 0; keepaliveIntervalMinutes = 0; anchorOnApply = $false }
+        return @{ enabled = $false; prompt = ''; maxPerDay = 0; minimumGapMinutes = 0; keepaliveIntervalMinutes = 0; anchorOnApply = $false; model = ''; reasoningEffort = '' }
     }
     $aa = $Config.codex.autoAnchor
     if ($aa -is [hashtable]) {
@@ -261,6 +262,8 @@ function Get-AutoAnchorConfig {
             keepaliveIntervalMinutes = [int]$aa.keepaliveIntervalMinutes
             anchorOnApply      = [bool]($aa.anchorOnApply -eq $true)
             schedule           = @(@($aa.schedule) | Where-Object { $_ -and -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ } | Select-Object -Unique)
+            model              = [string]$aa.model
+            reasoningEffort    = [string]$aa.reasoningEffort
         }
     }
     return @{
@@ -271,6 +274,8 @@ function Get-AutoAnchorConfig {
         keepaliveIntervalMinutes = [int]$Config.codex.anchorKeepaliveMinutes
         anchorOnApply      = [bool]($Config.codex.anchorOnApply -eq $true)
         schedule           = @()
+        model              = ''
+        reasoningEffort    = ''
     }
 }
 
@@ -427,6 +432,8 @@ function Get-DefaultConfig {
                 keepaliveIntervalMinutes = 300    # 0 = off; >0 = idle backstop: 距上次锚定超过该值仍未观测到滚动则自触发（默认 = 一个 5 小时窗口）
                 anchorOnApply = $false   # true = install.cmd/apply-config.cmd fire one forced anchor right away
                 schedule = @()           # 每日定时触发（"HH:mm" 本地时间数组）：到点后第一次轮询触发一次；空 = 关闭
+                model = ''               # 锚定用的模型（-m）；空 = 沿用 ~/.codex/config.toml 默认
+                reasoningEffort = ''     # 锚定用的思考等级（-c model_reasoning_effort=）；空 = 沿用 CLI 默认
             }
         }
         task = @{
@@ -561,6 +568,21 @@ function Test-ConfigShape {
         }
         if (@($aa.schedule).Count -gt [int]$aa.maxPerDay) {
             $issues += ("codex.autoAnchor.schedule has {0} slot(s) but maxPerDay is {1}; the daily cap would block later slots" -f @($aa.schedule).Count, [int]$aa.maxPerDay)
+        }
+        # Model / reasoning effort passthrough (codex exec -m / -c model_reasoning_effort=).
+        # Deliberately NOT a semantic whitelist: valid values (e.g. reasoning tiers)
+        # evolve with CLI/model versions, so only the safe shape is enforced. A
+        # typo'd value surfaces at exec time through the existing fail-closed
+        # ANCHOR_ABORTED path - after the config check would have had its chance.
+        if (-not [string]::IsNullOrWhiteSpace([string]$aa.model)) {
+            if ([string]$aa.model -cnotmatch '^[A-Za-z0-9._-]{1,100}$') {
+                $issues += ("codex.autoAnchor.model must be 1-100 chars of letters/digits/dot/underscore/dash (got '{0}')" -f [string]$aa.model)
+            }
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$aa.reasoningEffort)) {
+            if ([string]$aa.reasoningEffort -cnotmatch '^[a-z][a-z0-9-]{0,29}$') {
+                $issues += ("codex.autoAnchor.reasoningEffort must be 1-30 chars, lowercase letters/digits/dash, letter-first (got '{0}')" -f [string]$aa.reasoningEffort)
+            }
         }
     }
     if ([int]$Config.logging.retentionDays -lt 1) {

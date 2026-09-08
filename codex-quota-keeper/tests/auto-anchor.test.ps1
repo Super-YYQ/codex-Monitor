@@ -404,10 +404,81 @@ try {
     $stSch2 = Read-JsonFile (Join-Path $keeperRoot8 'runtime\state.json')
     Assert-Equal 1 $stSch2.anchors.count 'same-day slot does not re-fire'
     $env:CQK_MOCK_MODE = 'normal'
+
+    Start-TestGroup 'anchor: model / reasoningEffort passthrough reaches the CLI'
+
+    # Local-only machine + a due slot (fires on run 1, no second observation
+    # needed). The mock appends the exec argument line it received to
+    # CQK_MOCK_EXEC_ARGS_FILE; the assertions prove the keeper forwarded
+    # model/effort as CLI flags, and recorded them in the anchor history.
+    $keeperRoot9 = Join-Path $ws 'keeper9'
+    New-Item -ItemType Directory -Path $keeperRoot9 -Force | Out-Null
+    $cfgFile9 = Join-Path $keeperRoot9 'config.json'
+    $slotBase9 = (Get-Date).AddMinutes(-1)
+    $slotAt9 = if ($slotBase9.Date -ne (Get-Date).Date) { (Get-Date).Date } else { $slotBase9 }
+    $cfgModel = New-TestConfig @{
+        mode   = 'AutoAnchor'
+        codex  = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 300; keepaliveIntervalMinutes = 0; schedule = @($slotAt9.ToString('HH:mm')); model = 'gpt-5-codex'; reasoningEffort = 'low' } }
+        github = @{ coordination = @{ enabled = $false }; historySync = @{ enabled = $false } }
+    }
+    $null = Write-TestConfigFile $cfgFile9 $cfgModel
+    $execArgsFile9 = Join-Path $ws 'exec-args-9.txt'
+    $env:CQK_MOCK_MODE = 'idle'
+    $env:CQK_MOCK_EXEC = 'ok'
+    $env:CQK_MOCK_EXEC_ARGS_FILE = $execArgsFile9
+    $rMdl = Invoke-RunnerSub -KeeperRoot $keeperRoot9 -ConfigFile $cfgFile9
+    Assert-Equal 0 $rMdl.exitCode "model-passthrough run ok ($($rMdl.output))"
+    $evtsMdl = Get-LogEventNames $keeperRoot9
+    Assert-Contains $evtsMdl 'ANCHOR_EXECUTED' 'model-configured anchor executed'
+    Assert-True (Test-Path -LiteralPath $execArgsFile9) 'mock recorded the exec argument line'
+    if (Test-Path -LiteralPath $execArgsFile9) {
+        $argLine9 = [System.IO.File]::ReadAllText($execArgsFile9)
+        Assert-True ("$argLine9" -match '(^|\s)-m(\s|$)' -or "$argLine9" -match '^-m ') 'CLI received the -m flag'
+        Assert-True ("$argLine9" -match 'gpt-5-codex') 'CLI received the configured model name'
+        Assert-True ("$argLine9" -match 'model_reasoning_effort=low') 'CLI received the configured reasoning effort'
+    }
+    # History audit: the anchor record must carry what was actually used.
+    $histMdlItem = Get-ChildItem -LiteralPath (Join-Path $keeperRoot9 'history') -Filter 'events-*.jsonl' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($histMdlItem) {
+        $histMdlText = [System.IO.File]::ReadAllText($histMdlItem.FullName)
+        Assert-True ("$histMdlText" -match '"model":"gpt-5-codex"') 'history records the model used'
+        Assert-True ("$histMdlText" -match '"reasoningEffort":"low"') 'history records the reasoning effort used'
+    } else {
+        Assert-True $false 'model-passthrough anchor history event file written'
+    }
+
+    Start-TestGroup 'anchor: no model/effort config keeps the CLI call bare'
+
+    # Same shape, but model/reasoningEffort left at their empty defaults: the
+    # exec line must contain NO -m / -c flags (current behavior preserved).
+    $keeperRoot10 = Join-Path $ws 'keeper10'
+    New-Item -ItemType Directory -Path $keeperRoot10 -Force | Out-Null
+    $cfgFile10 = Join-Path $keeperRoot10 'config.json'
+    $cfgBare = New-TestConfig @{
+        mode   = 'AutoAnchor'
+        codex  = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 300; keepaliveIntervalMinutes = 0; schedule = @($slotAt9.ToString('HH:mm')) } }
+        github = @{ coordination = @{ enabled = $false }; historySync = @{ enabled = $false } }
+    }
+    $null = Write-TestConfigFile $cfgFile10 $cfgBare
+    $execArgsFile10 = Join-Path $ws 'exec-args-10.txt'
+    $env:CQK_MOCK_EXEC_ARGS_FILE = $execArgsFile10
+    $rBare = Invoke-RunnerSub -KeeperRoot $keeperRoot10 -ConfigFile $cfgFile10
+    Assert-Equal 0 $rBare.exitCode "bare-exec run ok ($($rBare.output))"
+    $evtsBare = Get-LogEventNames $keeperRoot10
+    Assert-Contains $evtsBare 'ANCHOR_EXECUTED' 'bare anchor executed'
+    Assert-True (Test-Path -LiteralPath $execArgsFile10) 'mock recorded the bare exec argument line'
+    if (Test-Path -LiteralPath $execArgsFile10) {
+        $argLine10 = [System.IO.File]::ReadAllText($execArgsFile10)
+        Assert-False ("$argLine10" -match '(^|\s)-m(\s|$)') 'no -m flag when model unset'
+        Assert-False ("$argLine10" -match 'model_reasoning_effort') 'no effort override when reasoningEffort unset'
+    }
+    Remove-Item Env:\CQK_MOCK_EXEC_ARGS_FILE -ErrorAction SilentlyContinue
+    $env:CQK_MOCK_MODE = 'normal'
 } finally {
     Remove-Item Env:\CQK_MOCK_MODE -ErrorAction SilentlyContinue
     Remove-Item Env:\CQK_MOCK_EXEC -ErrorAction SilentlyContinue
     Remove-Item Env:\CQK_MOCK_READ_COUNTDOWN_FILE -ErrorAction SilentlyContinue
+    Remove-Item Env:\CQK_MOCK_EXEC_ARGS_FILE -ErrorAction SilentlyContinue
     Remove-TestWorkspace $ws
 }
 

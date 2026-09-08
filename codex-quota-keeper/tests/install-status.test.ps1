@@ -141,6 +141,35 @@ try {
     Assert-True ("$textAa" -match 'Scheduled anchor\s+: 09:30') 'schedule line shown'
     $null = Write-TestConfigFile $cfgFile (New-Cfg 30)
 
+    Start-TestGroup 'status: anchor model/effort line when configured'
+
+    $cfgMdl = New-Cfg 30
+    $cfgMdl.mode = 'AutoAnchor'
+    $cfgMdl.codex.autoAnchor = @{ enabled = $true; model = 'gpt-5-codex'; reasoningEffort = 'low' }
+    $null = Write-TestConfigFile $cfgFile $cfgMdl
+    $statusMdl = Get-KeeperStatus -KeeperRoot $keeperRoot -ConfigFile $cfgFile
+    Assert-True $statusMdl.configOk "model config valid ($($statusMdl.lastError))"
+    Assert-Equal 'gpt-5-codex' $statusMdl.anchorExec.model 'anchor model reported'
+    Assert-Equal 'low' $statusMdl.anchorExec.reasoningEffort 'anchor effort reported'
+    $textMdl = (Write-StatusText $statusMdl | Out-String)
+    Assert-True ("$textMdl" -match 'Anchor exec\s+: model gpt-5-codex, effort low') 'anchor exec line shown'
+    # Unset sides must surface as CLI default, and nothing shows when both unset.
+    $cfgEffOnly = New-Cfg 30
+    $cfgEffOnly.mode = 'AutoAnchor'
+    $cfgEffOnly.codex.autoAnchor = @{ enabled = $true; reasoningEffort = 'low' }
+    $null = Write-TestConfigFile $cfgFile $cfgEffOnly
+    $statusEff = Get-KeeperStatus -KeeperRoot $keeperRoot -ConfigFile $cfgFile
+    $textEff = (Write-StatusText $statusEff | Out-String)
+    Assert-True ("$textEff" -match 'Anchor exec\s+: model CLI default, effort low') 'unset model shown as CLI default'
+    $cfgOff = New-Cfg 30
+    $cfgOff.mode = 'AutoAnchor'
+    $cfgOff.codex.autoAnchor = @{ enabled = $true }
+    $null = Write-TestConfigFile $cfgFile $cfgOff
+    $statusOff2 = Get-KeeperStatus -KeeperRoot $keeperRoot -ConfigFile $cfgFile
+    $textOff2 = (Write-StatusText $statusOff2 | Out-String)
+    Assert-False ("$textOff2" -match 'Anchor exec') 'no anchor exec line when both unset'
+    $null = Write-TestConfigFile $cfgFile (New-Cfg 30)
+
     Start-TestGroup 'status-json: machine-readable output'
 
     $jsonOut = & $pwsh -NoProfile -ExecutionPolicy Bypass -File (Join-Path $scriptDir 'status-json.ps1') -KeeperRoot $keeperRoot -ConfigFile $cfgFile

@@ -139,12 +139,17 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
 | `codex.autoAnchor.keepaliveIntervalMinutes` | `300` | 空闲**兜底**触发间隔（分钟）：存在首次锚定后，距上次锚定超过该值仍未观测到窗口重置即由 keeper 再触发一次（默认 = 一个 5 小时窗口）；`0` = 关闭兜底（空闲判定与重置触发仍生效） |
 | `codex.autoAnchor.anchorOnApply` | `false` | **立即触发 CLI**：设为 `true` 后，每次运行 `install.cmd` / `apply-config.cmd` 都立刻强制执行一次锚定（不等 300 分钟静默期、不受最小间隔限制；仍受每日上限与 fail-closed 约束，同一分钟内的重复请求只执行一次） |
 | `codex.autoAnchor.schedule` | `[]` | **每日定时模式（与周期判断互斥）**：`"HH:mm"` 数组（本地时间、24 小时制、必须补零）。配置任意槽位即切换为纯定时模式——每个时间点后的第一次轮询触发一次 CLI，不做重置/空闲/兜底判断，重置事件被忽略；清空数组回到周期判断模式（重置/空闲/兜底生效）。同一时间点每天最多一次，不受静默期限制（仍受每日上限与 fail-closed 约束） |
+| `codex.autoAnchor.model` | `""` | **锚定执行的模型**：配置后传 `codex exec -m <model>`（如 `gpt-5-codex`）；留空 = 不传，沿用本机 `~/.codex/config.toml` 默认。仅允许字母/数字/`.`/`_`/`-`，1–100 字符 |
+| `codex.autoAnchor.reasoningEffort` | `""` | **锚定执行的思考等级**：配置后传 `-c model_reasoning_effort=<值>` 覆盖（如 `low`）；留空 = 不覆盖，沿用 CLI 默认。小写字母开头，仅小写字母/数字/`-`，1–30 字符；合法档位随 CLI/模型演进，填错在执行时按 fail-closed 记 ABORTED |
 
-> **关于模型与思考等级**：keeper 从不指定模型或推理等级——额度读取是 app-server 的
-> `account/rateLimits/read` 协议方法，**不调用模型**；AutoAnchor 的 `codex exec` 不带
-> `--model` / 推理等级参数，完全沿用你本机 Codex CLI 的默认配置（`~/.codex/config.toml`
-> 的 `model` / `model_reasoning_effort` 等），所以这里没有也不应有对应配置项。
-> 若 codex CLI 默认模型指向 gpt-5 类主力模型，AutoAnchor 即按该模型发送。
+> **关于模型与思考等级**：额度读取是 app-server 的 `account/rateLimits/read` 协议方法，**不调用模型**、
+> 不涉及模型/推理等级。AutoAnchor 的 `codex exec` 默认不带 `--model` / 推理等级参数，沿用你本机
+> Codex CLI 的默认配置（`~/.codex/config.toml` 的 `model` / `model_reasoning_effort`）；
+> 若需为锚定单独指定更轻量的模型或最低思考等级以省资源，可配置上方
+> `codex.autoAnchor.model` / `codex.autoAnchor.reasoningEffort`，两个参数仅在锚定执行时透传给 CLI
+> （其余一切行为不变）。每次锚定的 history 审计记录会写入实际使用的 `model` / `reasoningEffort`
+> （未配置时省略），便于事后查证。
+> 若 codex CLI 默认模型指向 gpt-5 类主力模型，AutoAnchor 即按该模型发送（除非配置覆盖）。
 
 > 配置 schema 标注为 v2；旧版平铺键（如 `pollIntervalMinutes`、`github.repoPath`）会
 > 在加载时自动迁移，无需手工改写。

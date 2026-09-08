@@ -291,7 +291,8 @@ history/
       9f8e7d6c….json
 ```
 
-**模拟数据 —— `ANCHOR_EXECUTED` 事件文件（净化白名单字段）：**
+**模拟数据 —— `ANCHOR_EXECUTED` 事件文件（净化白名单字段；`model` / `reasoningEffort`
+仅在配置了 `codex.autoAnchor.model` / `reasoningEffort` 时出现，未配置时省略）：**
 
 ```json
 {
@@ -307,7 +308,9 @@ history/
     "trigger": "reset",
     "durationSecs": 12,
     "execExitCode": 0,
-    "verified": true
+    "verified": true,
+    "model": "gpt-5-codex",
+    "reasoningEffort": "low"
   },
   "version": "0.9.0-beta"
 }

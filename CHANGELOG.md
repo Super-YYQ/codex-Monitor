@@ -3,6 +3,14 @@
 ## Unreleased
 
 ### Added
+- AutoAnchor 新增**执行模型与思考等级配置**（`codex.autoAnchor.model` /
+  `codex.autoAnchor.reasoningEffort`，默认均为空）：配置后锚定执行的
+  `codex exec` 分别透传 `-m <model>` 与 `-c model_reasoning_effort=<effort>`；
+  留空则完全不传，沿用本机 `~/.codex/config.toml` 默认（现网行为不变）。
+  校验只约束安全形态（模型：字母/数字/`.`/`_`/`-`、1-100 字符；思考等级：小写字母
+  开头、小写字母/数字/`-`、1-30 字符）而非语义白名单——合法档位随 CLI/模型演进，
+  填错在执行时被 CLI 拒绝并走既有 fail-closed ABORTED 路径。每次锚定的 history
+  审计记录新增实际使用的 `model` / `reasoningEffort` 字段（未配置时省略）。
 - AutoAnchor 新增**空闲判定触发（场景 1）**：keeper 从未锚定过、第二次轮询记录仍是零用量
   时（默认 60 分钟一轮，约一小时后），判定"Codex 没人用"并自动执行一次 CLI 调用；
   触发 eventId 按天确定性生成（`idle|yyyy-MM-dd`），当日只触发一次。随后进入
@@ -72,6 +80,13 @@
   窗口从创建起即隐藏，闪窗消除。`anchorOnApply` 强制锚定的即发即忘启动同样改走
   `runtime/hidden-launch-forced-anchor.vbs`。`.vbs` 在每次 install / apply-config
   时幂等重新生成。
+- **修复读失败分类：传输层故障不再被误判为 429**。app-server 报错包装文本
+  （"failed to fetch codex **rate limits**"）总是包含 "rate limit"，旧的
+  `429|usage.?limit|rate.?limit` 正则让每次断网/代理离线都按 429 设 60 分钟退避。
+  现在按 `errorKind`（TIMEOUT/EOF）+ 传输层措辞（"error sending request"、
+  connection refused/reset 等）识别网络故障，只设 10 分钟 `network` 退避、下一轮
+  轮询即恢复；真正的限流（429 / "too many requests" / "usage limit exceeded" /
+  "rate limit exceeded"）仍保持 60 分钟 `429` 退避。
 
 ## 0.9.0-beta (2026-08-30)
 

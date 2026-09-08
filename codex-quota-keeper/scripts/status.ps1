@@ -135,6 +135,7 @@ function Get-KeeperStatus {
     $aaCfg = Get-AutoAnchorConfig $cfg
     $status.anchorKeepalive = @{ intervalMinutes = [int]$aaCfg.keepaliveIntervalMinutes; lastAnchorAt = [string]$state.anchors.lastAnchorAt }
     $status.anchorSchedule = @{ slots = @($aaCfg.schedule) }
+    $status.anchorExec = @{ model = [string]$aaCfg.model; reasoningEffort = [string]$aaCfg.reasoningEffort }
     $coord = Get-CoordinationConfig $cfg
     if ($coord.enabled -ne $true) {
         $status.role.role = $(if ($state.role) { $state.role } else { 'LEADER' })
@@ -211,6 +212,15 @@ function Write-StatusText {
             $slots = @($Status.anchorSchedule.slots)
             $slotText = if ($slots.Count -gt 0) { $slots -join ', ' } else { 'none' }
             $lines += ('Scheduled anchor    : {0}' -f $slotText)
+        }
+        if ($Status.anchorExec) {
+            $m = [string]$Status.anchorExec.model
+            $e = [string]$Status.anchorExec.reasoningEffort
+            if ($m -or $e) {
+                $mText = if ($m) { $m } else { 'CLI default' }
+                $eText = if ($e) { $e } else { 'CLI default' }
+                $lines += ('Anchor exec         : model {0}, effort {1}' -f $mText, $eText)
+            }
         }
     } else {
         $lines += 'AutoAnchor          : OFF (experimental feature)'

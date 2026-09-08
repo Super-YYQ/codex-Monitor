@@ -106,6 +106,16 @@
       // 不做重置/空闲/兜底判断、重置事件被忽略；清空数组回到周期判断模式（重置/空闲/兜底生效）。
       // 同一时间点每天最多一次，不受静默期限制（仍受每日上限与 fail-closed 约束）。
       // "schedule": ["09:30", "21:00"],
+      // 锚定执行的模型：传给 codex exec 的 -m 参数（如 "gpt-5-codex"）。
+      // 留空（默认）= 不传 -m，沿用你本机 ~/.codex/config.toml 里 Codex CLI 的默认模型。
+      // 填写规则：仅字母/数字/点/下划线/连字符，1-100 字符，如 "gpt-5-codex"、"o3"。
+      // 例："model": "gpt-5-codex",
+      // 锚定执行的思考等级：传给 codex exec 的 -c model_reasoning_effort=<值> 覆盖。
+      // 留空（默认）= 不覆盖，沿用 ~/.codex/config.toml 的 model_reasoning_effort 默认值。
+      // 填写规则：小写字母开头，仅小写字母/数字/连字符，1-30 字符，如 "low"、"minimal"。
+      // 注意：合法档位随 CLI 版本与模型演进（低/中/高/更高档位各有命名），填错会在
+      // 锚定执行时被 CLI 拒绝并按既有 fail-closed 路径记为 ABORTED（仍占用当日次数）。
+      // 例："reasoningEffort": "low",
     },
   },
 
