@@ -79,11 +79,11 @@ codex-quota-keeper/
   - 默认 leaseTtlMinutes 改 180（poll=60）；校验规则：
     leaseTtlMinutes >= max(2*poll.intervalMinutes, poll.intervalMinutes + grace + schedulingJitter)
     违反时校验失败；README / config.example.jsonc / 测试同步。
-- [ ] CQK-022 计划任务持久化自定义 -ConfigFile
+- [x] CQK-022 计划任务持久化自定义 -ConfigFile
   - New-KeeperTaskParameters 增加 ConfigFile；Get-KeeperHiddenLauncherSpec 正常任务路径也传
     ConfigFile；安装时解析绝对路径写入 VBS；端到端测试：自定义 ConfigFile 安装后读 VBS 内容
     确认同一路径。
-- [ ] CQK-024 Backoff 期间继续 coordination maintenance（先于 023，安全闭环）
+- [x] CQK-024 Backoff 期间继续 coordination maintenance（先于 023，安全闭环）
   - Backoff 拆为「禁止 Codex 访问」而非「退出 Runner」；仍续租、补写 pending global backoff
     marker、写 heartbeat/status；新增 runtime/pending-global-backoff.json 持久化远程写失败；
   - 每次任务滴答即使 local backoff active 也尝试补写 pending marker；

@@ -247,5 +247,60 @@ R10. **CQK-017/018/019 工程化 + 版本 0.9.0-beta**（本次 commit）
      - 本机双运行时验证：PS7 与 PS5.1 下 12 个测试文件全部通过。
      - CQK-020（双机 soak test 数天运行）属部署验收，需真实两机环境，交付时由部署方执行。
 
+---
+
+## 第三轮：设计文档 v2.0（CQK-021~035，基线 c7260f7c）
+
+R11. `532f063` **CQK-021 默认 lease TTL 与 poll 周期关系校验**（本次 commit）
+    - 默认 `leader.leaseTtlMinutes` 45→180（poll=60 的 3 倍）。
+    - Test-ConfigShape 新增关系校验：`leaseTtlMinutes >= max(2*poll, poll+grace+CQK_SCHEDULING_JITTER_MINUTES=5)`，
+      违反即拒绝（消除“租约在一轮轮询之间过期 → Leader 双机 flapping”）。
+    - schedulingJitter 取内部常量而非配置键（与关系校验精神一致、避免 schema 变动）。
+    - 同步：config.example.jsonc、两级 README 配置表；测试：common.test.ps1 边界组
+      （2*poll 边界、poll+grace+jitter 边界、grace 抬高要求）、install-status New-Cfg 3x 裕量、
+      legacy fixture 45→90。全量 12 文件 PS7 通过。
+
+R12. `91b0106` **CQK-022 计划任务持久化自定义 -ConfigFile**（本次 commit）
+    - 缺陷：仅 -ForceAnchor 路径向 runner.ps1 传 -ConfigFile，正常定时任务的命令行不带参数，
+      runner 静默回退 `<KeeperRoot>\config.json` —— 自定义配置只在安装那一刻生效。
+    - Get-KeeperHiddenLauncherSpec 正常路径也写 `-KeeperRoot "<abs>" -ConfigFile "<abs>"`
+      （空值解析为 Get-ConfigPath 默认并 GetFullPath）；
+      Register-KeeperTask / New-KeeperTaskParameters / Invoke-KeeperInstall / apply-config
+      重注册全链路贯通 ConfigFile（参数均默认 ''，旧调用签名兼容）。
+    - 测试：install-status 工作区改用非默认 `custom-config.json`（默认回退文件不存在，
+      丢参即断言失败）；新增 VBS 内容断言（-ConfigFile、精确路径、-KeeperRoot、
+      定时 vbs 不含 -ForceAnchor）、安装后端到端读 vbs 验证、apply-config 重注册后仍保持、
+      强制锚定 vbs 同样带自定义路径。全量 12 文件 PS7 通过 + install-status 单文件 PS5.1 通过。
+
+R13. `本次 commit` **CQK-024 Backoff 期间继续 coordination maintenance**（本次 commit）
+    - 原则修正：退避 = 「禁止 Codex 访问」，不是「Runner 直接退出」。原实现在 local backoff
+      分支只写 heartbeat 就 exit，既不重试 marker 也不续租——租约会在退避中途过期，
+      对端接管后立刻开始轮询，正好绕过本机刚受到的 429 惩罚。
+    - 新增 durable 队列 `runtime/pending-global-backoff.json`（common.ps1 三件套
+      Get/Set/Clear-PendingGlobalBackoff）：远程写失败且原因可自愈时落盘，绝不错过静默丢弃。
+    - global-backoff.ps1 重构出 `Resolve-GlobalBackoffWrite`（fetch→单调 deadline 判定→CAS push）
+      供即时写与每轮重试共用；`Set-GlobalBackoff` 失败按 `$CQK_BACKOFF_RETRYABLE` 分类入队，
+      `binding:*`（需人工）与 `push-rejected`（对端已写）不入队；
+      新增 `Sync-PendingGlobalBackoff` 每轮入口，保留**原始绝对 until**（重试不得延长惩罚）、
+      窗口已过直接丢弃、coordination 关闭直接丢弃、队列只保留更长 deadline。
+    - runner.ps1：maintenance 提到 backoff 分支**之前**，因此 BACKOFF / LEADER / PASSIVE /
+      DEGRADED 每条路径都会重试（无队列时零远程访问）；BACKOFF 分支内新增
+      renew-or-acquire 租约（Invoke-LeaderElection 从不动他机活租约，故不会偷租约）+
+      Save-LocalLeaseView，仍零额度读取、`lastReadAt` 不变、角色/心跳保持 BACKOFF，然后 exit 0。
+      事件：`GLOBAL_BACKOFF_PUBLISHED` / `GLOBAL_BACKOFF_RETRY_FAILED`(ERROR)。
+    - 故障注入：`Rename-Item` 移走 bare origin——clone 的 origin URL 不变，故 preflight 与
+      绑定门禁仍通过，只有 fetch/push 失败（= 真实断网形状）。
+    - 测试：global-backoff.test.ps1 新增 10 组（退避滴答续租+零读取、写失败入队、重试保留
+      deadline、真实退避滴答发布、**普通滴答同样排空队列**、重试失败保队列、过期窗口丢弃、
+      最长 deadline 合并、coordination 关闭丢弃、coordination 不可达时仍为安全本地退避且
+      AutoAnchor 失败关闭）。全量 12 文件 PS7 + PS5.1 双运行时通过；PSScriptAnalyzer Error=0。
+    - 文档：docs/scenarios.md 新增 §6.1「marker 没 push 出去怎么办」（含 Mermaid）。
+    - 测试期修掉自身缺陷 3 处：使用了不存在的 `Assert-GreaterOrEqual`；`New-TestConfig` 只合并
+      一层，部分覆盖 autoAnchor 会丢 prompt/maxPerDay 导致配置校验失败（改为完整 hashtable）；
+      deadline 断言把 JSON 文档当时间戳解析（`[DateTime]::MinValue` → 永真假绿，改为比较
+      `Get-GlobalBackoff.until`）。
+
 ### 下一步
-- 第二轮整改完成。执行 git push 推送远端。
+- CQK-023：LOCAL_ONLY AutoAnchor 本地 durable Claim（统一 Claim/Complete/Fail/Exists 抽象）。
+- 之后：Status 组（025~030）→ P2 组（031~035）→ 收尾。
+

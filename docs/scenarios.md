@@ -272,6 +272,33 @@ sequenceDiagram
 { "ts": "2026-09-02T10:31:02+08:00", "level": "INFO", "event": "GLOBAL_BACKOFF_SKIP", "machineId": "9f8e…", "role": "BACKOFF", "error": "until 2026-09-02T11:00:00+08:00 (429, set by a1b2…)" }
 ```
 
+### 6.1 marker 没push出去怎么办（CQK-024）
+
+上面 `A->>G: push` 那一步可能失败——断网、代理离线、GitHub 不可达。如果失败就丢弃，
+**整台集群会在本机正被 429 的时候继续轮询**，正好是最坏情况。所以失败的 marker 会落盘
+`runtime/pending-global-backoff.json`，之后**每一次定时滴答**都重试它。
+
+退避期间的滴答不再直接退出，而是做完协调维护再退：重试 pending marker →
+续持本机租约（不续租的话租约会在退避中途过期，对端接管后就开始轮询）→ 写 heartbeat。
+零 Codex 访问。
+
+```mermaid
+sequenceDiagram
+    participant A as Home PC（本地退避中）
+    participant P as runtime/pending-global-backoff.json
+    participant G as 仓库 coordination/backoff.json
+    A->>G: 10:00 push backoff 失败（unreachable）
+    A->>P: 落盘 {until=11:00, reason=429, minutes=60}
+    Note over A: 10:10 Home PC 恢复联网，但仍在本地退避
+    A->>P: 每次滴答先读队列
+    A->>G: 重试 push（沿用原 until，不重新计时）
+    A-->>A: GLOBAL_BACKOFF_PUBLISHED + BACKOFF_SKIP
+```
+
+三个边界：**重试不延长惩罚**（队列存的是绝对 `until`，不是时长）；**窗口已过期的队列直接丢弃**
+（迟到推送会把集群关进一个不再成立的退避）；**coordination 关闭时丢弃队列**（没有对端可通知，
+不该无限重试）。队列只保留更长的那个 deadline。
+
 ## 7. 可审计历史（history 分支）
 
 普通轮询零写入；只有重要事件（重置/锚定/Leader 变更/错误）经 durable outbox

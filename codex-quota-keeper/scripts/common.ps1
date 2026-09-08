@@ -36,6 +36,8 @@ function Get-ConfigPath   { param([string]$Root) Join-Path (Get-KeeperRoot $Root
 function Get-StatePath    { param([string]$Root) Join-Path (Get-RuntimeDir $Root) 'state.json' }
 function Get-MachinePath  { param([string]$Root) Join-Path (Get-RuntimeDir $Root) 'machine.json' }
 function Get-BackoffPath  { param([string]$Root) Join-Path (Get-RuntimeDir $Root) 'backoff.json' }
+# CQK-024: durable queue for a cluster backoff marker whose remote write failed.
+function Get-PendingGlobalBackoffPath { param([string]$Root) Join-Path (Get-RuntimeDir $Root) 'pending-global-backoff.json' }
 
 function Ensure-Directory {
     param([string]$Path)
@@ -691,6 +693,50 @@ function Clear-Backoff {
 function Test-InBackoff {
     param([string]$Root)
     return ($null -ne (Get-BackoffState $Root))
+}
+
+# ---------------------------------------------------------------------------
+# Pending cluster backoff marker (CQK-024).
+#
+# Set-GlobalBackoff pushes coordination/backoff.json. When that remote write
+# fails for a transient reason (coordination unreachable, git push failure) the
+# marker must not be silently dropped - the whole fleet would keep polling while
+# this machine is being rate-limited. The record is queued on disk here and
+# retried on every task tick, including ticks that happen inside a local backoff
+# window (which is exactly when the marker matters most).
+
+function Get-PendingGlobalBackoff {
+    param([string]$Root)
+    $rec = Read-JsonFile (Get-PendingGlobalBackoffPath $Root)
+    if ($null -eq $rec -or $rec -isnot [hashtable]) { return $null }
+    # ConvertTo-IsoString, not [string]: PS7's ConvertFrom-Json parses the stored
+    # timestamp into a DateTime, and a plain cast would re-emit it in locale format.
+    $until = ConvertTo-IsoString $rec.until
+    if ([string]::IsNullOrWhiteSpace($until)) { return $null }
+    return @{
+        minutes = [int]$rec.minutes
+        reason  = [string]$rec.reason
+        until   = $until
+        setAt   = [string]$rec.setAt
+    }
+}
+
+function Set-PendingGlobalBackoff {
+    param([string]$Root, [int]$Minutes, [string]$Reason, [string]$UntilIso = '')
+    if (-not $UntilIso) { $UntilIso = (Get-Date).AddMinutes($Minutes).ToString('yyyy-MM-ddTHH:mm:sszzz') }
+    Write-JsonFileAtomic (Get-PendingGlobalBackoffPath $Root) @{
+        schema  = 1
+        minutes = $Minutes
+        reason  = $Reason
+        until   = $UntilIso
+        setAt   = Get-IsoTimestamp
+    }
+}
+
+function Clear-PendingGlobalBackoff {
+    param([string]$Root)
+    $path = Get-PendingGlobalBackoffPath $Root
+    if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
 }
 
 # ---------------------------------------------------------------------------
