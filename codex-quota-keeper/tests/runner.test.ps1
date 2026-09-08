@@ -187,6 +187,20 @@ try {
     Assert-Equal 3 $state8.consecutiveReadFailures 'consecutive failures counted across runs (429 + auth + start-failure)'
     $env:CQK_MOCK_MODE = 'normal'
 
+    Start-TestGroup 'runner: transport failure backs off 10 minutes as network, not 429'
+
+    $env:CQK_MOCK_MODE = 'network-error'
+    $r8n = Invoke-Runner -KeeperRoot $keeperRoot -ConfigFile $cfgFile
+    Assert-Equal 0 $r8n.exitCode 'network-failure run exits 0'
+    $backoff8n = Read-JsonFile (Join-Path $keeperRoot 'runtime\backoff.json')
+    Assert-NotNull $backoff8n 'network backoff recorded'
+    Assert-Equal 'network' $backoff8n.reason 'transport failure classified as network (was mislabeled 429 via "rate limits" wrapper text)'
+    $evts8n = Get-LogEventNames $keeperRoot
+    Assert-Contains $evts8n 'READ_FAILED' 'read failure logged'
+    Clear-Backoff $keeperRoot
+    Clear-GlobalBackoff -ClonePath $repos.clone
+    $env:CQK_MOCK_MODE = 'normal'
+
     Start-TestGroup 'runner: invalid config exits 1 with error log'
 
     $badCfg = Join-Path $ws 'bad.json'

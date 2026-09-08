@@ -140,10 +140,20 @@ try {
         $state.stale = $true
         $state.consecutiveReadFailures = [int]$state.consecutiveReadFailures + 1
         $state.lastError = [string]$read.message
+        # Transport failures (proxy down, no route, client timeout) must not be
+        # mislabeled as 429: the app-server wrapper text ("failed to fetch codex
+        # rate limits") contains "rate limit", which the old 429 regex matched on
+        # every outage -> 60-min backoff instead of a quick retry.
+        $msg = "$($read.message)"
+        $transportFailure = ($read.errorKind -in @('TIMEOUT', 'EOF')) -or
+            ($msg -match '(?i)error sending request|connection\s+(refused|reset|closed)|resolving host|unreachable')
         if ($read.errorKind -eq 'AUTH_ERROR') {
             Set-Backoff -Root $KeeperRoot -Minutes 120 -Reason 'auth error'
             $null = Set-GlobalBackoff -Config $cfg -KeeperRoot $KeeperRoot -Minutes 120 -Reason 'auth_error' -Machine $machine
-        } elseif ("$($read.message)" -match '(?i)429|usage.?limit|rate.?limit') {
+        } elseif ($transportFailure) {
+            Set-Backoff -Root $KeeperRoot -Minutes 10 -Reason 'network'
+            $null = Set-GlobalBackoff -Config $cfg -KeeperRoot $KeeperRoot -Minutes 10 -Reason 'network_error' -Machine $machine
+        } elseif ($msg -match '(?i)429|too many requests|usage.?limit|rate.?limit\s+(is\s+)?(exceeded|reached|hit)') {
             Set-Backoff -Root $KeeperRoot -Minutes 60 -Reason '429'
             $null = Set-GlobalBackoff -Config $cfg -KeeperRoot $KeeperRoot -Minutes 60 -Reason '429' -Machine $machine
         }

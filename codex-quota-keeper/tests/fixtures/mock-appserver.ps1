@@ -19,6 +19,7 @@
 #   unknown-meta  unknown metadata keys must not break parsing
 #   limit-reached rateLimitReachedType set on the result
 #   rate-limit    error response mentioning 429/usage limit (backoff path)
+#   network-error transport failure wording ("error sending request", must NOT be classified 429)
 #   idle          zero usage on both windows (never-used account, scenario-1 idle detection)
 #   reset         primary window renewed: old resetsAt past, new resetsAt future
 #   unknown-schema rateLimits shape unrecognized -> client must fail closed
@@ -87,8 +88,18 @@ if ($env:CQK_MOCK_FAIL_WITH_PROXY -eq '1' -and $env:CQK_MOCK_PROXY_URL -and $env
 }
 
 # --- exec subcommand (AutoAnchor tests): CQK_MOCK_EXEC = ok | fail | timeout ---
+# The full argument line is appended to CQK_MOCK_EXEC_ARGS_FILE so tests can
+# assert exactly which flags the keeper passed to the CLI (model / reasoning
+# effort passthrough).
 if ($args.Count -ge 1 -and $args[0] -eq 'exec') {
     Write-MockTrace ("exec: mode={0}" -f $env:CQK_MOCK_EXEC)
+    if ($env:CQK_MOCK_EXEC_ARGS_FILE) {
+        try {
+            $argLine = ($args | ForEach-Object { [string]$_ }) -join ' '
+            [System.IO.File]::AppendAllText($env:CQK_MOCK_EXEC_ARGS_FILE, $argLine + [Environment]::NewLine,
+                (New-Object System.Text.UTF8Encoding($false)))
+        } catch { }
+    }
     switch ($env:CQK_MOCK_EXEC) {
         'fail' { exit 1 }
         'timeout' { Start-Sleep -Seconds 120; exit 1 }
@@ -181,6 +192,13 @@ while ($true) {
                     Send-MockResponse @{
                         jsonrpc = '2.0'; id = $id
                         error   = @{ code = -32601; message = 'method not found' }
+                    }
+                    continue
+                }
+                'network-error' {
+                    Send-MockResponse @{
+                        jsonrpc = '2.0'; id = $id
+                        error   = @{ code = -32603; message = 'failed to fetch codex rate limits: error sending request for url (https://chatgpt.com/backend-api/wham/usage)' }
                     }
                     continue
                 }
