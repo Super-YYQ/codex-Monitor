@@ -30,7 +30,10 @@ try {
             task   = @{ name = $taskName; startWithWindows = $true; runIfNetworkAvailable = $true; wakeToRun = $false }
             github = @{ coordination = @{ enabled = $false }; historySync = @{ enabled = $false } }
             codex  = @{ command = $mockPath; queryTimeoutSeconds = 10; autoAnchor = $false }
-            poll = @{ intervalMinutes = $Poll; minimumIntervalMinutes = 5 }
+            poll   = @{ intervalMinutes = $Poll; minimumIntervalMinutes = 5 }
+            # CQK-021: lease TTL must satisfy >= max(2*poll, poll+grace+jitter).
+            # Keep a 3x margin so every poll value here stays valid.
+            leader = @{ leaseTtlMinutes = [Math]::Max(45, 3 * $Poll) }
         }
     }
     $null = Write-TestConfigFile $cfgFile (New-Cfg 15)

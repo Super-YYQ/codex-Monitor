@@ -89,7 +89,7 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
 |------|------|------|
 | `leader.enabled` | `true` | 是否启用单 Leader 租约**机制**（机制层；多机互斥还需 `github.coordination.enabled=true`） |
 | `leader.label` | `Home PC` | 本机标签（便于在 status/审计里区分机器） |
-| `leader.leaseTtlMinutes` | `45` | 租约 TTL（≈轮询周期 3 倍） |
+| `leader.leaseTtlMinutes` | `180` | 租约 TTL；须 ≥ `max(2×轮询周期, 轮询周期 + grace + 5)`，否则租约会在一轮轮询之间过期导致 Leader 抖动 |
 | `leader.graceMinutes` | `5` | 时钟漂移 / 网络延迟容忍 |
 | `leader.takeoverOnExpiry` | `true` | 租约过期后允许他人接管 |
 

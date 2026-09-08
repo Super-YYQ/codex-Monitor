@@ -45,6 +45,33 @@ try {
     $loaded2 = Load-Config $cfgFile
     Assert-True (@($loaded2.issues).Count -ge 1) 'poll below 5-min floor rejected'
 
+    Start-TestGroup 'config: lease TTL / poll relational validation (CQK-021)'
+
+    $defIssues = @(Test-ConfigShape (Get-DefaultConfig))
+    Assert-Equal 0 $defIssues.Count 'shipped defaults satisfy the lease/poll relation'
+    Assert-Equal 180 (Get-DefaultConfig).leader.leaseTtlMinutes 'default lease TTL 180 (≈3x default poll 60)'
+
+    # Doc §4.1 flapping example: poll=60 with TTL=45 expires between two polls.
+    $noCoord = @{ coordination = @{ enabled = $false; repoPath = '' }; historySync = @{ enabled = $false } }
+    $flap = New-TestConfig @{ poll = @{ intervalMinutes = 60; minimumIntervalMinutes = 5 }; leader = @{ leaseTtlMinutes = 45 }; github = $noCoord }
+    $flapIssues = @(Test-ConfigShape $flap)
+    Assert-True ($flapIssues.Count -ge 1) 'poll=60 with TTL=45 rejected'
+    Assert-True (($flapIssues -join '; ') -match 'leaseTtlMinutes') 'rejection names leader.leaseTtlMinutes'
+    Assert-True (($flapIssues -join '; ') -match '120') 'rejection states the required minimum'
+
+    # Boundary: TTL exactly 2*poll passes.
+    $edge = New-TestConfig @{ poll = @{ intervalMinutes = 60; minimumIntervalMinutes = 5 }; leader = @{ leaseTtlMinutes = 120 }; github = $noCoord }
+    Assert-Equal 0 @(Test-ConfigShape $edge).Count 'TTL = 2*poll accepted (boundary)'
+
+    # Grace branch dominates when grace is large: poll=60 TTL=120 grace=70 needs >= 135.
+    $wide = New-TestConfig @{ poll = @{ intervalMinutes = 60; minimumIntervalMinutes = 5 }; leader = @{ leaseTtlMinutes = 120; graceMinutes = 70 }; github = $noCoord }
+    Assert-True (@(Test-ConfigShape $wide).Count -ge 1) 'large grace raises the required TTL (poll+grace+jitter branch)'
+    $wideOk = New-TestConfig @{ poll = @{ intervalMinutes = 60; minimumIntervalMinutes = 5 }; leader = @{ leaseTtlMinutes = 135; graceMinutes = 70 }; github = $noCoord }
+    Assert-Equal 0 @(Test-ConfigShape $wideOk).Count 'TTL = poll+grace+jitter accepted (boundary)'
+
+    # Helper default TTL=45 must stay valid for the default test poll=15.
+    Assert-Equal 0 @(Test-ConfigShape (New-TestConfig @{ github = $noCoord })).Count 'test-helper default config satisfies the relation'
+
     Start-TestGroup 'config: autoAnchor.enabled=true requires mode=AutoAnchor'
 
     $bad2 = New-TestConfig @{ codex = @{ autoAnchor = @{ enabled = $true } } }
@@ -308,7 +335,7 @@ try {
   "mode": "MonitorOnly",
   "pollIntervalMinutes": 30,
   "minimumPollIntervalMinutes": 10,
-  "leader": { "enabled": true, "leaseTtlMinutes": 45, "graceMinutes": 5, "label": "Legacy PC" },
+  "leader": { "enabled": true, "leaseTtlMinutes": 90, "graceMinutes": 5, "label": "Legacy PC" },
   "codex": { "command": "auto", "queryTimeoutSeconds": 20, "autoAnchor": false, "anchorPrompt": "p", "maxAnchorsPerDay": 4, "minimumAnchorGapMinutes": 30 },
   "github": { "enabled": true, "repoPath": "D:/logrepo", "coordinationBranch": "coordination", "historyBranch": "history", "syncEventsOnly": true, "push": true },
   "logging": { "retentionDays": 30, "includeMachineLabel": true },

@@ -66,3 +66,56 @@ codex-quota-keeper/
 - [x] auto-anchor
 - [x] install/status
 - [x] 收尾核对
+
+---
+
+# 第三轮：设计文档 v2.0（2026-09-08）CQK-021~035
+
+依据 `C:\Users\Administrator\Desktop\codex-Monitor_最新仓库审查与Status中文诊断面板设计_v2.0.docx`。
+基线 c7260f7c。实施顺序按文档 §19。
+
+## 阶段 A：P1 核心修复（CQK-021~024）
+- [x] CQK-021 默认 poll/lease TTL 关系修复 + 配置关系校验
+  - 默认 leaseTtlMinutes 改 180（poll=60）；校验规则：
+    leaseTtlMinutes >= max(2*poll.intervalMinutes, poll.intervalMinutes + grace + schedulingJitter)
+    违反时校验失败；README / config.example.jsonc / 测试同步。
+- [ ] CQK-022 计划任务持久化自定义 -ConfigFile
+  - New-KeeperTaskParameters 增加 ConfigFile；Get-KeeperHiddenLauncherSpec 正常任务路径也传
+    ConfigFile；安装时解析绝对路径写入 VBS；端到端测试：自定义 ConfigFile 安装后读 VBS 内容
+    确认同一路径。
+- [ ] CQK-024 Backoff 期间继续 coordination maintenance（先于 023，安全闭环）
+  - Backoff 拆为「禁止 Codex 访问」而非「退出 Runner」；仍续租、补写 pending global backoff
+    marker、写 heartbeat/status；新增 runtime/pending-global-backoff.json 持久化远程写失败；
+  - 每次任务滴答即使 local backoff active 也尝试补写 pending marker；
+  - coordination 不可达时本地安全退避，AutoAnchor 继续失败关闭 (fail closed)。
+- [ ] CQK-023 LOCAL_ONLY AutoAnchor 本地 durable Claim
+  - 统一 Claim 抽象（IAnchorClaimStore 语义）：Claim/Complete/Fail/Exists；
+  - LocalOnly → runtime/anchor-claims/<eventId>.json；Distributed → coordination/events（Git CAS）；
+  - LOCAL_ONLY 在 codex exec 前原子创建 CLAIMED 文件；任何 CLAIMED/COMPLETED/FAILED/UNKNOWN
+    阻止自动重试；COMPLETED/FAILED 由 retention 清理；并发与崩溃 (crash) 测试基于统一接口。
+
+## 阶段 B：Status 中文诊断面板（CQK-025~030）
+- [ ] CQK-025 Get-StatusAssessment 健康诊断层（overall/findings，§10 规则表、§16 新增规则）
+- [ ] CQK-026 默认中文分区输出 + 中文术语映射（§11/§12；采集/判断/渲染三层分离；
+      不改 Get-KeeperStatus 字段；LOCAL_ONLY 单机=INFO 不警告）
+- [ ] CQK-027 Quota 剩余百分比、窗口中文名、数据新鲜度
+- [ ] CQK-028 AutoAnchor judgment/schedule 模式友好展示（§11.2/11.3）
+- [ ] CQK-029 颜色/NoColor/PS5.1 中文兼容测试（文本前缀 [正常]/[注意]/[异常]/[信息]/[关闭]）
+- [ ] CQK-030 golden output 快照测试（MonitorOnly healthy / AA judgment / AA schedule / Multi-PC error）
+
+## 阶段 C：P2 发布工程（CQK-031~035）
+- [ ] CQK-031 queryTimeout 上限约束（120~180 秒）与 Task ExecutionTimeLimit 关系
+- [ ] CQK-032 Task Description 根据 mode 动态生成
+- [ ] CQK-033 Secret Scan 缩小 tests 排除范围（只 allowlist fake-token fixture）
+- [ ] CQK-034 GitHub Ruleset / required checks（文档仅建议；仓库 API 侧只读检查）
+- [ ] CQK-035 v0.9.0-beta Release 打包流程（ZIP+SHA256+升级说明；推送前遵守用户 push 规则）
+
+## 收尾
+- [ ] 全量测试 PS7 + PS5.1 回归通过
+- [ ] README / config.example.jsonc 默认值同步
+- [ ] CHANGELOG 更新
+
+## 决策记录
+- 阶段顺序采用文档 §19：021 → 022 → 024 → 023 → Status 组 → P2 组。
+- Status 重构不改 status-json.ps1 英文 schema（§7/§22 红线）。
+- CQK-034 Ruleset 创建属 GitHub 平台配置变更，需用户决定；开发侧仅准备/检查。

@@ -31,8 +31,10 @@
     // "enabled": true,
     // 本机标签（status / 审计里区分机器用）
     // "label": "Home PC",
-    // 租约 TTL（分钟，≈轮询周期 3 倍）
-    // "leaseTtlMinutes": 45,
+    // 租约 TTL（分钟，默认 ≈轮询周期 3 倍）。必须满足校验关系：
+    // leaseTtlMinutes >= max(2 * poll.intervalMinutes, poll.intervalMinutes + graceMinutes + 5)，
+    // 否则租约会在一轮轮询之间过期、Leader 在两台机器间反复抖动（flapping）。
+    // "leaseTtlMinutes": 180,
     // 时钟漂移 / 网络延迟容忍（分钟）
     // "graceMinutes": 5,
     // 租约过期后允许他人接管

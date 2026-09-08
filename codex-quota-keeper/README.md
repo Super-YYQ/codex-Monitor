@@ -84,7 +84,7 @@ codex-quota-keeper/
 |------|------|------|
 | `mode` | MonitorOnly | 运行模式（MonitorOnly / AutoAnchor） |
 | `leader.label` | Home PC | 本机标签 |
-| `leader.leaseTtlMinutes` | 45 | 租约 TTL |
+| `leader.leaseTtlMinutes` | 180 | 租约 TTL（默认 ≈轮询周期 3 倍；有关系校验，见下表） |
 | `github.coordination.repoPath` | — | 专用日志仓库本地路径（多机必填） |
 | `github.historySync.push` | true | history 分支推送开关 |
 | `logging.includeMachineLabel` | false | 隐私开关：machineLabel 是否进 history |
@@ -117,7 +117,7 @@ codex-quota-keeper/
 
 | 参数 | 默认 | 说明 |
 |------|------|------|
-| `leader.leaseTtlMinutes` | 45 | 租约 TTL（≈轮询周期 3 倍） |
+| `leader.leaseTtlMinutes` | 180 | 租约 TTL。必须满足 `>= max(2×轮询周期, 轮询周期 + graceMinutes + 5)`，否则租约会在一轮轮询之间过期，Leader 会在两台机器间反复抖动（flapping）；配置校验会直接拒绝该组合 |
 | `leader.graceMinutes` | 5 | 时钟漂移/网络延迟容忍 |
 | `leader.takeoverOnExpiry` | true | 过期后允许他人接管 |
 | `github.coordination.enabled` | false | 租约协调（默认关闭 = 单机 LOCAL_ONLY；多机先 setup-log-repo 再开启，false 时多机不安全） |

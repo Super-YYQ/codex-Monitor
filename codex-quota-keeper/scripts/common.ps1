@@ -11,6 +11,10 @@ $script:CQK_EXIT_RUNTIME     = 2   # unexpected runtime failure
 
 # Program floor: config may raise minimumPollIntervalMinutes above this, never lower it.
 $script:CQK_MIN_POLL_FLOOR_MINUTES = 5
+# Scheduling slack (minutes) folded into the lease/poll relation (CQK-021):
+# Task Scheduler triggers drift; the lease must survive one full poll cycle
+# plus grace plus this jitter before another machine could take over.
+$script:CQK_SCHEDULING_JITTER_MINUTES = 5
 $script:CQK_VERSION = '0.9.0-beta'
 
 function Get-KeeperScriptDir {
@@ -399,7 +403,11 @@ function Get-DefaultConfig {
         }
         leader = @{
             enabled = $true
-            leaseTtlMinutes = 45
+            # ≈3x poll (poll=60 -> 180). A shorter lease can expire between two
+            # polls: the standby takes over, then the old owner re-acquires on
+            # its next run - leader flapping (design doc v2.0 §4.1 / CQK-021).
+            # Test-ConfigShape hard-fails below max(2*poll, poll+grace+jitter).
+            leaseTtlMinutes = 180
             graceMinutes = 5
             takeoverOnExpiry = $true
             label = 'Home PC'
@@ -525,8 +533,16 @@ function Test-ConfigShape {
     if ($poll.intervalMinutes -lt $poll.minimumIntervalMinutes) {
         $issues += "poll.intervalMinutes ($($poll.intervalMinutes)) must be >= poll.minimumIntervalMinutes ($($poll.minimumIntervalMinutes))"
     }
-    if ([int]$Config.leader.leaseTtlMinutes -lt 5) {
+    # CQK-021 (design doc v2.0 §4.1): relational lease validation, not a magic
+    # floor. The lease must outlive a full poll cycle with margin, otherwise it
+    # expires between two runs and the leader flaps between machines.
+    $leaseTtl = [int]$Config.leader.leaseTtlMinutes
+    $graceMinutes = [int]$Config.leader.graceMinutes
+    $minLeaseTtl = [Math]::Max(2 * $poll.intervalMinutes, $poll.intervalMinutes + $graceMinutes + $script:CQK_SCHEDULING_JITTER_MINUTES)
+    if ($leaseTtl -lt 5) {
         $issues += 'leader.leaseTtlMinutes must be >= 5'
+    } elseif ($leaseTtl -lt $minLeaseTtl) {
+        $issues += "leader.leaseTtlMinutes ($leaseTtl) is too short for poll.intervalMinutes ($($poll.intervalMinutes)): it must be >= max(2 * poll, poll + grace + scheduling jitter) = $minLeaseTtl minutes, otherwise the lease expires between polls and the leader flaps"
     }
     if ([int]$Config.leader.graceMinutes -lt 0) {
         $issues += 'leader.graceMinutes must be >= 0'
