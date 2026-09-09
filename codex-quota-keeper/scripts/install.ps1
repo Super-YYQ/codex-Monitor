@@ -125,8 +125,29 @@ function New-KeeperTaskParameters {
         Trigger   = $triggers
         Settings  = $settings
         Principal = $principal
-        Description = 'Codex Quota Keeper: scheduled read-only Codex quota polling (MonitorOnly). One-shot runner, never resident.'
+        # CQK-032: the description shown in Task Scheduler has to state what the
+        # task actually does. Hardcoding "MonitorOnly" told AutoAnchor users their
+        # task was read-only polling, which is the one thing the experimental
+        # anchoring mode is not.
+        Description = Get-KeeperTaskDescription -Config $Config
     }
+}
+
+function Get-KeeperTaskDescription {
+    # One line for the Task Scheduler UI, derived from the effective behaviour:
+    # mode + whether anchoring is really armed (mode=AutoAnchor alone is not
+    # enough - the runner only anchors when codex.autoAnchor.enabled=true). The
+    # configured mode is echoed either way, so a mode=AutoAnchor config with
+    # anchoring disarmed reads as "polling only, AutoAnchor mode" instead of
+    # claiming a mode the config does not have.
+    param([hashtable]$Config)
+    $mode = if ($Config) { [string]$Config.mode } else { 'MonitorOnly' }
+    if ([string]::IsNullOrWhiteSpace($mode)) { $mode = 'MonitorOnly' }
+    $anchoring = ($mode -eq 'AutoAnchor') -and (Test-AutoAnchorEnabled $Config)
+    if ($anchoring) {
+        return 'Codex Quota Keeper: scheduled Codex quota polling + EXPERIMENTAL auto-anchoring (AutoAnchor). One-shot runner, never resident.'
+    }
+    return "Codex Quota Keeper: scheduled read-only Codex quota polling (mode=$mode). One-shot runner, never resident."
 }
 
 function Get-ForcedAnchorLaunchSpec {

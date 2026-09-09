@@ -117,6 +117,34 @@ try {
     Assert-Equal 260 (Get-CodexTickBudgetSeconds $cfgSync) 'sync budget = read + git'
     Assert-Equal 10 (Get-TestTaskLimitMinutes (New-KeeperTaskParameters -Config $cfgSync -KeeperRoot $keeperRoot -ConfigFile $cfgFile).Settings) 'sync still fits the floor'
 
+    Start-TestGroup 'install: task description follows the effective mode (CQK-032)'
+
+    Assert-True ($tp.Description -match 'mode=MonitorOnly') 'default description names the read-only mode'
+    Assert-True ($tp.Description -match 'read-only') 'default description promises read-only polling'
+    Assert-True ($tp.Description -notmatch 'EXPERIMENTAL') 'MonitorOnly description does not mention anchoring'
+    Assert-Equal (Get-KeeperTaskDescription -Config $cfg15) $tp.Description 'description comes from the shared helper'
+
+    # mode=AutoAnchor alone is not enough - the runner only anchors when
+    # codex.autoAnchor.enabled=true, so the description must not claim anchoring.
+    # The configured mode is still echoed, so it does not claim MonitorOnly either.
+    $cfgModeOnly = New-Cfg 15
+    $cfgModeOnly.mode = 'AutoAnchor'
+    $descModeOnly = Get-KeeperTaskDescription -Config $cfgModeOnly
+    Assert-True ($descModeOnly -match 'read-only') 'mode=AutoAnchor with autoAnchor off described as polling only'
+    Assert-True ($descModeOnly -match 'mode=AutoAnchor') 'disarmed AutoAnchor mode still echoed, not mislabelled'
+    Assert-True ($descModeOnly -notmatch 'EXPERIMENTAL') 'no EXPERIMENTAL wording while anchoring is disarmed'
+
+    $cfgArmed = New-Cfg 15
+    $cfgArmed.mode = 'AutoAnchor'
+    $cfgArmed.codex.autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; keepaliveIntervalMinutes = 240 }
+    $descArmed = Get-KeeperTaskDescription -Config $cfgArmed
+    Assert-True ($descArmed -match 'EXPERIMENTAL') 'armed AutoAnchor is flagged EXPERIMENTAL'
+    Assert-True ($descArmed -match 'auto-anchoring') 'armed description says what the task now also does'
+    Assert-True ($descArmed -notmatch 'read-only') 'armed description drops the read-only claim'
+    $tpArmed = New-KeeperTaskParameters -Config $cfgArmed -KeeperRoot $keeperRoot -ConfigFile $cfgFile
+    Assert-Equal $descArmed $tpArmed.Description 'registered parameters carry the mode-derived description'
+    Assert-True ($tpArmed.Description.Length -le 255) 'description fits the Task Scheduler length limit'
+
     Start-TestGroup 'install: full registration with read-only probe'
 
     $env:CQK_MOCK_MODE = 'normal'
