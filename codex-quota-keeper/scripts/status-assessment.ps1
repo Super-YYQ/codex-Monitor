@@ -235,6 +235,18 @@ function Get-StatusMinutesSince {
     return $minutes
 }
 
+function Get-StatusAnchorToday {
+    # How many anchors happened today. Anchors are counted per calendar day in
+    # state.json (anchors.day + anchors.count), so a day stamped yesterday means
+    # today has none yet - reporting yesterday's count as today's would show
+    # "6/6" on a machine that has not run yet. Shared with the display layer
+    # (autoAnchor.today) so the verdict and the panel cannot disagree.
+    param($State, [string]$Today)
+    $st = ConvertTo-StatusHashtable $State
+    if ([string](Get-StatusValue -Map $st -Path 'anchors.day') -ne $Today) { return 0 }
+    return [int](Get-StatusValue -Map $st -Path 'anchors.count')
+}
+
 # ---------------------------------------------------------------------------
 # §16 verdict freshness: is a recorded error still the situation we are in?
 #
@@ -483,7 +495,9 @@ function Get-StatusAssessment {
     $coordCfg = ConvertTo-StatusHashtable (Get-CoordinationConfig $cfg)
     $today = $Now.ToString('yyyy-MM-dd')
     # Anchors are counted per calendar day; a stale day means today has none yet.
-    $anchorToday = $(if ([string](Get-StatusValue -Map $state -Path 'anchors.day') -eq $today) { [int](Get-StatusValue -Map $state -Path 'anchors.count') } else { 0 })
+    # One call to the shared helper rather than a second copy of the rule, so the
+    # verdict's cap check and the panel's 今日已执行 cannot drift apart.
+    $anchorToday = Get-StatusAnchorToday -State $state -Today $today
 
     # ---- scheduled task ----------------------------------------------------
     $taskInstalled = [bool](& $gv 'task.installed')
