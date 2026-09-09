@@ -65,6 +65,58 @@ try {
     Assert-Equal 'IgnoreNew' "$($tp.Settings.MultipleInstances)" 'no overlapping instances'
     Assert-Equal 'Interactive' "$($tp.Principal.LogonType)" 'per-user interactive, no admin'
 
+    Start-TestGroup 'install: ExecutionTimeLimit derived from the config (CQK-031)'
+
+    # The ScheduledTask CimInstance exposes ExecutionTimeLimit as an ISO 8601
+    # duration string (PT10M), not a TimeSpan - so TotalMinutes is never set and
+    # the assertions have to parse it back.
+    function Get-TestTaskLimitMinutes {
+        param($Settings)
+        $raw = "$($Settings.ExecutionTimeLimit)"
+        if ([string]::IsNullOrWhiteSpace($raw)) { return 0 }
+        return [int][System.Xml.XmlConvert]::ToTimeSpan($raw).TotalMinutes
+    }
+
+    # New-Cfg 15 -> 10 s timeout, no proxy, no remote: a 20 s budget, so the
+    # 10-minute floor decides. The old hardcoded 15 min must not come back.
+    Assert-Equal 10 (Get-TestTaskLimitMinutes $tp.Settings) 'defaults get the 10-minute floor, not the old fixed 15'
+    Assert-Equal (Get-KeeperTaskExecutionTimeLimit $cfg15).minutes (Get-TestTaskLimitMinutes $tp.Settings) 'task limit equals the derived limit (single source of truth)'
+
+    # A big timeout needs more room than the floor: 180 s x 2 waits x 2 proxy
+    # attempts = 720 s -> 12 min, and a 60-minute poll leaves it uncapped.
+    $cfgBig = New-Cfg 60
+    $cfgBig.codex.queryTimeoutSeconds = 180
+    $cfgBig.codex.proxy = 'http://proxy.invalid:7890'
+    $tpBig = New-KeeperTaskParameters -Config $cfgBig -KeeperRoot $keeperRoot -ConfigFile $cfgFile
+    Assert-Equal 12 (Get-TestTaskLimitMinutes $tpBig.Settings) 'max timeout + proxy raises the limit to the budget'
+    Assert-False (Get-KeeperTaskExecutionTimeLimit $cfgBig).cappedByPoll 'a 60-minute poll has room for that budget'
+
+    # Tight poll: the clamp (poll - 2) wins over the budget so a hung runner cannot
+    # swallow the next trigger. Legal config (budget 12 min <= poll 13), just no
+    # margin left - which is why the status panel reports cappedByPoll as a warning.
+    $cfgTight = New-Cfg 13
+    $cfgTight.codex.queryTimeoutSeconds = 180
+    $cfgTight.codex.proxy = 'http://proxy.invalid:7890'
+    Assert-Equal 0 @(Test-ConfigShape $cfgTight).Count 'a 12-minute budget inside a 13-minute poll is valid'
+    $limTight = Get-KeeperTaskExecutionTimeLimit $cfgTight
+    Assert-Equal 11 $limTight.minutes 'limit clamped to poll - 2 min'
+    Assert-True $limTight.cappedByPoll 'clamp reported for the status panel'
+    Assert-Equal 11 (Get-TestTaskLimitMinutes (New-KeeperTaskParameters -Config $cfgTight -KeeperRoot $keeperRoot -ConfigFile $cfgFile).Settings) 'installed settings carry the clamped limit'
+
+    # One poll shorter and the same config becomes hard invalid: the install layer
+    # must not be able to register it quietly.
+    $cfgOver = New-Cfg 11
+    $cfgOver.codex.queryTimeoutSeconds = 180
+    $cfgOver.codex.proxy = 'http://proxy.invalid:7890'
+    Assert-True (@(Test-ConfigShape $cfgOver).Count -ge 1) 'budget overrunning the poll is a config error, not a silent clamp'
+
+    # A remote-syncing MonitorOnly config: 20 s read + 240 s git = 260 s, still
+    # under the floor, so coordination alone never inflates the limit.
+    $cfgSync = New-Cfg 15
+    $cfgSync.github = @{ coordination = @{ enabled = $true; repoPath = 'R:\repo' }; historySync = @{ enabled = $false } }
+    Assert-Equal 260 (Get-CodexTickBudgetSeconds $cfgSync) 'sync budget = read + git'
+    Assert-Equal 10 (Get-TestTaskLimitMinutes (New-KeeperTaskParameters -Config $cfgSync -KeeperRoot $keeperRoot -ConfigFile $cfgFile).Settings) 'sync still fits the floor'
+
     Start-TestGroup 'install: full registration with read-only probe'
 
     $env:CQK_MOCK_MODE = 'normal'

@@ -15,6 +15,24 @@ $script:CQK_MIN_POLL_FLOOR_MINUTES = 5
 # Task Scheduler triggers drift; the lease must survive one full poll cycle
 # plus grace plus this jitter before another machine could take over.
 $script:CQK_SCHEDULING_JITTER_MINUTES = 5
+# CQK-031 (design doc v2.0 §5 P2-01): hard ceiling for codex.queryTimeoutSeconds.
+# The timeout is per JSON-RPC wait, not per task run (see
+# Get-CodexAttemptBudgetSeconds), so an unbounded value silently multiplies into a
+# task that Task Scheduler kills mid-flight. 180 s is already 9x the 20 s default
+# and covers a slow proxy round-trip for a read-only call.
+$script:CQK_MAX_QUERY_TIMEOUT_SECONDS = 180
+# JSON-RPC waits one quota attempt performs: `initialize` (id 1) and
+# `account/rateLimits/read` (id 7), each bounded by queryTimeoutSeconds.
+$script:CQK_JSONRPC_WAITS_PER_ATTEMPT = 2
+# Worst-case wall clock of the git operations one tick can issue (fetch 60 +
+# ls-remote 20 + show 15 + push 90 + a few 15 s index calls, rounded up). Folded
+# into the task time limit only when a remote repo is configured at all.
+$script:CQK_GIT_SYNC_BUDGET_SECONDS = 240
+# Floor / poll margin for the derived Scheduled Task ExecutionTimeLimit (minutes).
+# The floor keeps a hanging runner from burning a whole poll slot; the margin is
+# what must stay free between the end of one run and the next trigger.
+$script:CQK_MIN_TASK_LIMIT_MINUTES = 10
+$script:CQK_TASK_LIMIT_POLL_MARGIN_MINUTES = 2
 $script:CQK_VERSION = '0.9.0-beta'
 
 function Get-KeeperScriptDir {
@@ -323,6 +341,96 @@ function Get-CodexProxyEnvironment {
     }
 }
 
+function Get-CodexAttemptBudgetSeconds {
+    # Worst-case wall clock of ONE Invoke-CodexRateLimitsRead (quota-client.ps1),
+    # derived from the two facts the client is built on:
+    #   * queryTimeoutSeconds bounds each JSON-RPC wait, and one attempt has two
+    #     waits (initialize id=1, account/rateLimits/read id=7);
+    #   * a configured proxy doubles the attempt count, because a failed proxy
+    #     path gets exactly one direct fallback (CQK-020: never a third try).
+    # So: 2 waits x timeout, x2 attempts with a proxy. Process spawn/teardown and
+    # the codex binary's own work sit on top of this; callers add slack.
+    # Returns @{ seconds; waitsPerAttempt; attempts; proxyConfigured }.
+    param([hashtable]$Config)
+    $timeout = 20
+    if ($null -ne $Config -and $null -ne $Config.codex) { $timeout = [int]$Config.codex.queryTimeoutSeconds }
+    if ($timeout -le 0) { $timeout = 20 }
+    $attempts = 1
+    if ((Get-ProxyConfig $Config).enabled) { $attempts = 2 }
+    $waits = $script:CQK_JSONRPC_WAITS_PER_ATTEMPT
+    return @{
+        seconds         = $timeout * $waits * $attempts
+        waitsPerAttempt = $waits
+        attempts        = $attempts
+        proxyConfigured = ($attempts -eq 2)
+    }
+}
+
+function Get-AnchorExecBudgetSeconds {
+    # The anchor model call's own ceiling: auto-anchor.ps1 passes
+    # Max(60, queryTimeoutSeconds * 3) to Invoke-External. One function so the
+    # installer's task limit and the anchor module cannot disagree about how long
+    # the most expensive step of a tick may take.
+    param([hashtable]$Config)
+    $timeout = 20
+    if ($null -ne $Config -and $null -ne $Config.codex) { $timeout = [int]$Config.codex.queryTimeoutSeconds }
+    if ($timeout -le 0) { $timeout = 20 }
+    return [Math]::Max(60, $timeout * 3)
+}
+
+function Get-CodexTickBudgetSeconds {
+    # Worst-case wall clock of one runner tick, in seconds, for the pieces CQK
+    # itself bounds: the poll read, plus (AutoAnchor only) the exec and the
+    # post-anchor verify read, plus the git operations a remote-syncing config can
+    # issue. Deliberately pessimistic - this feeds the task time limit, and a limit
+    # that kills a run mid-flight is worse than one that is generous.
+    param([hashtable]$Config)
+    $read = Get-CodexAttemptBudgetSeconds $Config
+    $seconds = $read.seconds
+    $aa = Get-AutoAnchorConfig $Config
+    if ($Config -and [string]$Config.mode -eq 'AutoAnchor' -and $aa.enabled) {
+        $seconds += (Get-AnchorExecBudgetSeconds $Config) + $read.seconds
+    }
+    $coord = Get-CoordinationConfig $Config
+    $hist = Get-HistorySyncConfig $Config
+    if ($coord.enabled -or $hist.enabled) { $seconds += $script:CQK_GIT_SYNC_BUDGET_SECONDS }
+    return $seconds
+}
+
+function Get-KeeperTaskExecutionTimeLimit {
+    # CQK-031: derive the Scheduled Task ExecutionTimeLimit from the config instead
+    # of the old hardcoded 15 minutes. Two failure modes it has to straddle:
+    #   * too tight - Task Scheduler kills a legitimately slow run (big
+    #     queryTimeoutSeconds, AutoAnchor exec) mid-flight, and the operator sees a
+    #     bare 267007 with no quota data;
+    #   * too loose - a hung runner overlaps the next trigger, and MultipleInstances
+    #     = IgnoreNew then silently drops every subsequent poll until it unsticks.
+    # So the limit is the tick budget rounded up to minutes, floored at 10 min, and
+    # never allowed to exceed the poll interval minus a 2-minute margin (a run still
+    # going when the next one is due is a bug to surface, not to absorb). The floor
+    # wins when the poll is shorter than 12 min: Test-ConfigShape already proved the
+    # worst-case budget fits inside the poll, so exceeding it can only mean a hung
+    # runner - and dropping one trigger beats killing a merely slow run.
+    # Returns @{ timeSpan; minutes; budgetSeconds; cappedByPoll } - cappedByPoll
+    # true means the poll-margin bound won, which the status panel should mention.
+    param([hashtable]$Config)
+    $budget = Get-CodexTickBudgetSeconds $Config
+    $minutes = [Math]::Max($script:CQK_MIN_TASK_LIMIT_MINUTES, [int][Math]::Ceiling($budget / 60.0))
+    $poll = 0
+    if ($Config) { $poll = (Get-PollConfig $Config).intervalMinutes }
+    $capped = $false
+    if ($poll -gt $script:CQK_MIN_TASK_LIMIT_MINUTES + $script:CQK_TASK_LIMIT_POLL_MARGIN_MINUTES) {
+        $maxByPoll = $poll - $script:CQK_TASK_LIMIT_POLL_MARGIN_MINUTES
+        if ($minutes -gt $maxByPoll) { $minutes = $maxByPoll; $capped = $true }
+    }
+    return @{
+        timeSpan      = (New-TimeSpan -Minutes $minutes)
+        minutes       = $minutes
+        budgetSeconds = $budget
+        cappedByPoll  = $capped
+    }
+}
+
 function Get-CoordinationConfig {
     # v2: github.coordination = @{ enabled; repoPath; branch }
     # v1: github = @{ enabled; repoPath; coordinationBranch }
@@ -558,6 +666,22 @@ function Test-ConfigShape {
     }
     if ([int]$Config.codex.queryTimeoutSeconds -lt 5) {
         $issues += 'codex.queryTimeoutSeconds must be >= 5'
+    } elseif ([int]$Config.codex.queryTimeoutSeconds -gt $script:CQK_MAX_QUERY_TIMEOUT_SECONDS) {
+        # CQK-031: the timeout is per JSON-RPC wait, so the value multiplies - by 2
+        # waits, by up to 2 proxy attempts, and again by the AutoAnchor verify read.
+        # Without a ceiling a large number silently pushes the worst-case tick past
+        # the task time limit, and Task Scheduler kills the run mid-poll.
+        $issues += ("codex.queryTimeoutSeconds must be <= {0} (got {1}): it bounds each protocol wait, not the whole run, so it multiplies into the task time limit" -f $script:CQK_MAX_QUERY_TIMEOUT_SECONDS, [int]$Config.codex.queryTimeoutSeconds)
+    } else {
+        # The other half of CQK-031: the derived ExecutionTimeLimit must fit inside
+        # a poll cycle, or IgnoreNew starts dropping polls. Compared against the
+        # raw worst-case budget (not the rounded limit) so the message can name the
+        # knob to turn.
+        $budget = Get-CodexTickBudgetSeconds $Config
+        $budgetMinutes = [int][Math]::Ceiling($budget / 60.0)
+        if ($budgetMinutes -gt $poll.intervalMinutes) {
+            $issues += ("worst-case run time for this config is {0} min but poll.intervalMinutes is {1}: raise poll.intervalMinutes (>= {0}) or lower codex.queryTimeoutSeconds / disable remote sync" -f $budgetMinutes, $poll.intervalMinutes)
+        }
     }
     $proxy = Get-ProxyConfig $Config
     if ($proxy.enabled) {

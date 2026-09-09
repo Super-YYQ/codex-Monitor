@@ -58,6 +58,7 @@ $script:CqkStatusFindingCatalog = @{
     TASK_LAST_RESULT            = @{ severity = 'WARNING'; title = '最近任务执行失败'; action = '查看最近错误与 -Live 检测结果；下个周期会自动重试'; titleEn = 'last task run failed'; actionEn = 'check the recent error and -Live output; the next cycle retries' }
     TASK_LAST_RESULT_PERSISTENT = @{ severity = 'ERROR';   title = '任务连续执行失败'; action = '用 status.ps1 -Live 定位原因（Codex 登录、代理、网络）'; titleEn = 'task keeps failing'; actionEn = 'run status.ps1 -Live to find the cause (Codex sign-in, proxy, network)' }
     TASK_INTERVAL_MISMATCH      = @{ severity = 'WARNING'; title = '计划任务周期与配置不一致'; action = '执行 apply-config.cmd 重新注册计划任务'; titleEn = 'task interval does not match config'; actionEn = 'run apply-config.cmd to re-register the scheduled task' }
+    TASK_TIME_LIMIT_TIGHT       = @{ severity = 'WARNING'; title = '单次运行时间余量偏紧'; action = '提高 poll.intervalMinutes，或降低 codex.queryTimeoutSeconds / 关闭远程同步；否则上一次未跑完会被下个周期忽略'; titleEn = 'one run barely fits its poll slot'; actionEn = 'raise poll.intervalMinutes, or lower codex.queryTimeoutSeconds / disable remote sync; otherwise a still-running tick is ignored by the next trigger' }
     QUOTA_NEVER_READ            = @{ severity = 'WARNING'; title = '尚未读取过额度数据'; action = '等待计划任务至少完成一次轮询，或手动运行 runner.ps1'; titleEn = 'no quota data has ever been read'; actionEn = 'wait for one scheduled poll, or run runner.ps1 once' }
     QUOTA_STALE                 = @{ severity = 'WARNING'; title = '额度数据已过期'; action = '查看最近错误，或运行 status.ps1 -Live'; titleEn = 'quota data is stale'; actionEn = 'check the recent error, or run status.ps1 -Live' }
     QUOTA_TOO_OLD               = @{ severity = 'WARNING'; title = '额度数据长时间未更新'; action = '确认计划任务仍在运行；可用 status.ps1 -Live 立即复查'; titleEn = 'quota data is overdue for a refresh'; actionEn = 'confirm the task still runs; status.ps1 -Live re-checks immediately' }
@@ -528,6 +529,20 @@ function Get-StatusAssessment {
         if ($null -ne $taskInterval -and [int]$taskInterval -ne $poll) {
             Add-StatusFinding -Assessment $a -Code 'TASK_INTERVAL_MISMATCH' `
                 -Detail "task repeats every $([int]$taskInterval) min, config says $poll min" -Now $Now
+        }
+        # CQK-031: the derived ExecutionTimeLimit is clamped to poll - 2 min so a
+        # hung runner cannot swallow the next trigger. When that clamp is what
+        # decided the limit, the worst-case run time sits inside 2 minutes of the
+        # poll interval: legal (the validator hard-fails past that) but tight
+        # enough that a slow proxy round-trip shows up as a dropped poll instead.
+        # Every number here comes from the config, because that is what the
+        # installer derived the limit from; the status-side poll would only add a
+        # second, drifting figure (and its own TASK_INTERVAL_MISMATCH row).
+        $limit = Get-KeeperTaskExecutionTimeLimit $cfg
+        if ($limit.cappedByPoll) {
+            $cfgPoll = [int](Get-PollConfig $cfg).intervalMinutes
+            Add-StatusFinding -Assessment $a -Code 'TASK_TIME_LIMIT_TIGHT' `
+                -Detail "worst-case run $([int]$limit.budgetSeconds) s vs a $cfgPoll min poll; task limit clamped to $([int]$limit.minutes) min" -Now $Now
         }
         $nextRun = ConvertTo-StatusDateTime (& $gv 'task.nextRunTime')
         if ($null -ne $nextRun -and ($nextRun - $Now).TotalMinutes -gt (2.5 * $poll)) {

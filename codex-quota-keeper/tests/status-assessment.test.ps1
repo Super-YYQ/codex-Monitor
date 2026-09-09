@@ -128,7 +128,7 @@ try {
         'ROLE_UNKNOWN', 'LAST_ERROR_RECENT', 'GIT_UNREACHABLE',
         'LOCAL_ONLY', 'AUTOANCHOR_ENABLED', 'AUTOANCHOR_OFF', 'ANCHOR_JUDGMENT_SUPPRESSED',
         'KEEPALIVE_OFF', 'BACKOFF_ACTIVE_SINGLE', 'ROLE_PASSIVE', 'RUNNER_RUNNING',
-        'LIVE_PROBE_OK', 'NEXT_RUN_DELAYED', 'ANCHOR_GAP_COOLDOWN'
+        'LIVE_PROBE_OK', 'NEXT_RUN_DELAYED', 'ANCHOR_GAP_COOLDOWN', 'TASK_TIME_LIMIT_TIGHT'
     )
     foreach ($code in $allCodes) {
         $cat = Get-StatusFindingCatalog $code
@@ -261,6 +261,41 @@ try {
     $tg = Get-StatusAssessment -Status (New-StubStatus @{ pollIntervalMinutes = 30; task = @{ intervalMinutes = 30 } }) `
         -Config (New-StubConfig -Poll 30) -KeeperRoot $emptyRoot -Now $Now
     Assert-False ((Get-CodeSet $tg) -contains 'TASK_INTERVAL_MISMATCH') 'task interval vs config poll is compared, not vs an assumption'
+
+    # =====================================================================
+    Start-TestGroup 'CQK-031: task time limit vs poll (warning, never a throw)'
+
+    # q=180 behind a proxy means 180 s x 2 waits x 2 attempts = 720 s worst case,
+    # inside a 13-minute poll. That config is legal (the validator hard-fails only
+    # when the budget overruns the poll) but the installer clamp (poll - 2 min) is
+    # what decides ExecutionTimeLimit, so the margin is gone and the panel has to
+    # say so - the read-only status panel is exactly the tool reached for when the
+    # scheduling is suspect, so it must warn rather than refuse to render.
+    $cfgTightCqk = New-StubConfig -Coordination $false -Poll 13
+    $cfgTightCqk.codex.queryTimeoutSeconds = 180
+    $cfgTightCqk.codex.proxy = 'http://proxy.invalid:7890'
+    $tl = Get-StatusAssessment -Status (New-StubStatus @{ pollIntervalMinutes = 13; task = @{ intervalMinutes = 13; nextRunTime = $Now.AddMinutes(5) } }) `
+        -Config $cfgTightCqk -KeeperRoot $emptyRoot -Now $Now
+    Assert-True (Test-HasCode $tl 'TASK_TIME_LIMIT_TIGHT') 'cappedByPoll surfaces as TASK_TIME_LIMIT_TIGHT'
+    Assert-Equal 'WARNING' (Get-CodeSeverity $tl 'TASK_TIME_LIMIT_TIGHT') 'a tight limit is WARNING, not ERROR'
+    $tlFind = Get-CodeFinding $tl 'TASK_TIME_LIMIT_TIGHT'
+    Assert-True ("$($tlFind.detail)" -match '720') 'detail quotes the worst-case run seconds'
+    Assert-True ("$($tlFind.detail)" -match '13 min poll') 'detail quotes the poll it must fit inside'
+    Assert-True ("$($tlFind.detail)" -match 'clamped to 11 min') 'detail quotes the installed limit'
+    Assert-True ("$($tlFind.action)" -match 'queryTimeoutSeconds') 'action names the knob to turn'
+    Assert-False ((Get-CodeSet $tl) -contains 'CONFIG_INVALID') 'a tight-but-legal config is not reported invalid'
+
+    # The same budget on a roomy poll: the clamp is not what decided the limit.
+    $cfgRoomy = New-StubConfig -Coordination $false -Poll 60
+    $cfgRoomy.codex.queryTimeoutSeconds = 180
+    $cfgRoomy.codex.proxy = 'http://proxy.invalid:7890'
+    $tlOk = Get-StatusAssessment -Status (New-StubStatus -LocalOnly) -Config $cfgRoomy -KeeperRoot $emptyRoot -Now $Now
+    Assert-False ((Get-CodeSet $tlOk) -contains 'TASK_TIME_LIMIT_TIGHT') 'uncapped limit stays silent'
+    Assert-Equal 'HEALTHY' $tlOk.overall 'a 12-minute budget inside a 60-minute poll is healthy'
+
+    # And a default config never trips it either: the 10-minute floor decides.
+    $tlDef = Get-StatusAssessment -Status (New-StubStatus -LocalOnly) -Config (New-StubConfig -Coordination $false) -KeeperRoot $emptyRoot -Now $Now
+    Assert-False ((Get-CodeSet $tlDef) -contains 'TASK_TIME_LIMIT_TIGHT') 'default config has no time-limit warning'
 
     # =====================================================================
     Start-TestGroup '§10 row 5 / §17.1 row 4: Codex not found'

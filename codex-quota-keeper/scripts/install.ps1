@@ -105,7 +105,10 @@ function New-KeeperTaskParameters {
 
     $settingsParams = @{
         MultipleInstances           = 'IgnoreNew'
-        ExecutionTimeLimit          = (New-TimeSpan -Minutes 15)
+        # CQK-031: derived from the config, not a fixed 15 min. A large
+        # queryTimeoutSeconds (or an AutoAnchor exec) needs more than 15 min; a
+        # short poll must not be swamped by a limit that outlives the next trigger.
+        ExecutionTimeLimit          = (Get-KeeperTaskExecutionTimeLimit $Config).timeSpan
         StartWhenAvailable          = $true
         AllowStartIfOnBatteries     = $true
         DontStopIfGoingOnBatteries  = $true
