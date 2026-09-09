@@ -272,7 +272,7 @@ R12. `91b0106` **CQK-022 计划任务持久化自定义 -ConfigFile**（本次 c
       定时 vbs 不含 -ForceAnchor）、安装后端到端读 vbs 验证、apply-config 重注册后仍保持、
       强制锚定 vbs 同样带自定义路径。全量 12 文件 PS7 通过 + install-status 单文件 PS5.1 通过。
 
-R13. `本次 commit` **CQK-024 Backoff 期间继续 coordination maintenance**（本次 commit）
+R13. `91d1dc1` **CQK-024 Backoff 期间继续 coordination maintenance**
     - 原则修正：退避 = 「禁止 Codex 访问」，不是「Runner 直接退出」。原实现在 local backoff
       分支只写 heartbeat 就 exit，既不重试 marker 也不续租——租约会在退避中途过期，
       对端接管后立刻开始轮询，正好绕过本机刚受到的 429 惩罚。
@@ -300,7 +300,7 @@ R13. `本次 commit` **CQK-024 Backoff 期间继续 coordination maintenance**�
       deadline 断言把 JSON 文档当时间戳解析（`[DateTime]::MinValue` → 永真假绿，改为比较
       `Get-GlobalBackoff.until`）。
 
-R14. `本次 commit` **CQK-023 LOCAL_ONLY AutoAnchor 本地 durable Claim**（本次 commit）
+R14. `718893a` **CQK-023 LOCAL_ONLY AutoAnchor 本地 durable Claim**
     - 修掉两个产品缺陷：
       ① 单机从来没有 claim 工件——at-most-once 全靠 runner 互斥体 + `state.processedEventIds`，
         而后者只在 `codex exec` **返回之后**才落盘（runner.ps1:240）。崩在 exec 与 persist 之间
@@ -339,7 +339,7 @@ R14. `本次 commit` **CQK-023 LOCAL_ONLY AutoAnchor 本地 durable Claim**（�
     - 文档：docs/scenarios.md 新增 §5.1「锚定的至多一次保证」（含崩溃时间线 Mermaid + 真实
       CLAIMED 文件内容），§8 fail-closed 表补 5 行 claim 相关原因文本。
 
-R15. `本次 commit` **CQK-025 Get-StatusAssessment 健康诊断层**（本次 commit）
+R15. `07c8c8f` **CQK-025 Get-StatusAssessment 健康诊断层**
     - 新增 `scripts/status-assessment.ps1`（三层架构的中间层，§8/§15.1）：
       `Get-KeeperStatus`（事实）→ **`Get-StatusAssessment`（overall + findings）** → 渲染层（CQK-026 起）。
       本层**只读**：从不调用 `Set-*`、不写 state、不写日志（§9.2 红线，测试直接断言
@@ -374,9 +374,60 @@ R15. `本次 commit` **CQK-025 Get-StatusAssessment 健康诊断层**（本次 c
       而非 `'rate_limit_reached'`、退避时间戳格式为 `yyyy-MM-dd HH:mm:ss`、`Clear-Backoff` 缺失导致
       相邻用例串状态）。全量 14 文件 PS7 + PS5.1 双运行时通过；PSScriptAnalyzer Error=0。
 
+R16. `bf57bc7` + `9e105f7` **CQK-026~030 Status 中文诊断面板（渲染层）**
+    - 新增 `scripts/status-display.ps1`（819 行，三层架构的最外层）：
+      `Get-StatusDisplayModel`（派生字段）→ `Get-StatusDisplayLines`（逻辑行对象）→
+      `Write-StatusConsole`（唯一上色点）。`status-json.ps1` 英文 schema 一行未动（§7/§22 红线）。
+      **渲染层与 assessment 层按红线要求分成两个 commit**：`bf57bc7` 只动判断层
+      （抽出 `Get-StatusAnchorToday`，面板与 verdict 共用「今日锚定次数」规则，避免
+      上限告警说 6/6 而面板显示 0/6），`9e105f7` 才是渲染层 + 测试 + golden。
+    - §11/§12 七分区（总体状态 / 计划任务 / Codex / AutoAnchor / 多机协调 / Codex 额度 /
+      异常与建议），术语映射集中一处；未识别值降级为 `未知（RAW）` 而非留空，
+      角色/模式/严重度都保留原始英文码便于对照日志。
+    - **§11.1 列对齐不变式**：`$CqkStatusLabelCol = 18`、`$CqkStatusValueCol = 20`，
+      冒号恒在第 18 个**显示单元格**。`Get-CqkDisplayWidth` 按 CJK 双格计算——
+      `'本机 ID'` 5 字符 7 格、`'当前状态'` 4 字符 8 格，**字符数与格数对两个标签的排序方向
+      相反**，用 `[string]::Length` 补齐会让两处冒号差出两格。续行同样落到第 20 格。
+    - §13 颜色契约：不把 ANSI 拼进字符串，逻辑行是 `@{text;color}`，只在 `Write-Host`
+      时上色；`[正常]/[注意]/[异常]/[信息]/[关闭]` 前缀自带语义，所以 `-NoColor`、重定向、
+      golden 文件零信息损失。`Write-StatusRow` 的 `-Severity` 与 `-Color` 互斥（同时给出即抛，
+      且在写行**之前**抛，不留半行）。测试用 `6>&1` 捕获 `InformationRecord`，文本在
+      `MessageData.Message`（`$rec.Text` 是空的），未上色行的 ForeColor 报 `Gray` 而非 `$null`
+      ——因此「没上色」必须断言为 `-notcontains $SevColors`，不能断言 `≠ $null`。
+      两个方向都测（关色时 0 行着色、开色时 >0 行着色、每条红行文本必含 `[异常]`），
+      否则「渲染器干脆不上色」也能骗过测试。
+    - §14 `-Language en-US` = v2.0 之前的英文事实清单，实现搬进 `Write-StatusTextEn`；
+      `status.ps1` 里的 `Write-StatusText` 保留 `[hashtable]` 签名改成 shim，两条路径不会各自漂移。
+      英文面板断言「无 CJK 字符」且「绝不上色」。
+    - §15.2 派生字段：配额**剩余**百分比（`100 - used` 并 clamp 到 0~100）、窗口中文名按
+      分钟数推导（不硬编码 5h/7d）、数据新鲜度、AutoAnchor `judgment`/`schedule` 双模式与
+      `下一个槽位`（槽位等于当前时间算明日）、执行模型/思考等级留空即 `沿用 CLI 默认`、
+      `今日已执行` 来自共享 helper、`当前锚定` 行由 finding 流驱动（INFO 不带建议行）。
+      缺 `config.json` 与配置存在但值为 0 是两回事，两个 case 都测。
+    - §17.2 golden：`tests/golden-fixtures.ps1` 是四份快照的**唯一**数据来源，
+      `golden-update.ps1` 重写、`status-display.test.ps1` 逐行比对，另跑跨快照对齐扫描
+      （padding 从行文本反推，不调用渲染器自己的公式），改 padding/术语必须显式重生成快照。
+      快照 UTF-8 **无 BOM** + LF + 结尾换行；重生成后 md5 逐字节一致，证明渲染确定。
+      4 个场景各钉一个不同行为（关态基线 / INFO 静默期 / schedule 槽位+模型 / 多机 ERROR+脱敏），
+      并断言 ERROR 排在 WARNING 前、已使用→剩余→重置时间顺序。
+    - 新增 `tests/status-display.test.ps1`：15 组 **528 项检查**，pwsh 7.6.5 与
+      Windows PowerShell 5.1.19041 双运行时全绿；全量 `tests/run-all.ps1` 15 文件双运行时通过。
+    - **两条 PS 语言级坑（都写成回归测试）**：
+      ①函数 `return @(...)` 在**只有一个元素**时会被摊平成 `String`，`(F)[0]` 就变成 `Char`，
+      `.EndsWith()` 直接抛——保型写法是 `return ,$array`（空/单/多三种长度在两个运行时行为一致）；
+      ②`@($List[object])` 在两个运行时都报 `Argument types do not match`，必须用 `[object[]]` 强转
+      （`[object[]]$null`→0 个，`[object[]]$hashtable`→1 个）。
+    - BOM 规则复述：`.ps1` 里非 ASCII 只要出现在**字符串字面量**中就必须带 UTF-8 BOM，否则 5.1
+      按 cp936 解码把中文字节对当成双字吃掉右引号、tokenizer 错位；只在注释里出现（如 `§`）可免。
+      `Write` 类工具产出的是无 BOM 文件，落盘后要补 `ef bb bf`。
+    - CI 一致性：`PSScriptAnalyzerSettings.psd1` 只把 Error 作为门禁，全仓 Error=0；
+      新增的唯一 warning 是 `Get-StatusDisplayLines` 的复数名词提示（非门禁项）。
+
 ### 下一步
-- CQK-026~030：Status 中文分区渲染（术语映射 §12、配额百分比与窗口中文名、AutoAnchor 友好展示、
-  颜色/NoColor/PS5.1 中文兼容、golden output 快照）。`status-json.ps1` 英文 schema 仍不动；
-  渲染层改动与 assessment 层分开 commit。
-- 之后：P2 组（031~035）→ 收尾（双机 soak + 故障注入 + v0.9.0-beta）。
+- P2 组 CQK-031~035：queryTimeout 上限 vs Task ExecutionTimeLimit、mode 动态 Task Description、
+  收窄 `security.yml` 对 `tests/` 的整体排除（只留 fake-token fixture）、GitHub Ruleset/required
+  checks（**仅文档建议 + 只读检查**；本会话 github MCP 连接失败 400，需用户修复后才能真正核对
+  secret scanning / push protection 配置）、v0.9.0-beta 打包（ZIP + SHA256 + 升级说明）。
+- 收尾：README / `config.example.jsonc` 默认值同步、CHANGELOG、双机 soak + 故障注入。
+- `git push` 等待用户明确要求，并按全局规则先对待推送内容做只读敏感信息检查。
 

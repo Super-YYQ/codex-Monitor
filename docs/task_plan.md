@@ -96,12 +96,12 @@ codex-quota-keeper/
 
 ## 阶段 B：Status 中文诊断面板（CQK-025~030）
 - [x] CQK-025 Get-StatusAssessment 健康诊断层（overall/findings，§10 规则表、§16 新增规则）
-- [ ] CQK-026 默认中文分区输出 + 中文术语映射（§11/§12；采集/判断/渲染三层分离；
+- [x] CQK-026 默认中文分区输出 + 中文术语映射（§11/§12；采集/判断/渲染三层分离；
       不改 Get-KeeperStatus 字段；LOCAL_ONLY 单机=INFO 不警告）
-- [ ] CQK-027 Quota 剩余百分比、窗口中文名、数据新鲜度
-- [ ] CQK-028 AutoAnchor judgment/schedule 模式友好展示（§11.2/11.3）
-- [ ] CQK-029 颜色/NoColor/PS5.1 中文兼容测试（文本前缀 [正常]/[注意]/[异常]/[信息]/[关闭]）
-- [ ] CQK-030 golden output 快照测试（MonitorOnly healthy / AA judgment / AA schedule / Multi-PC error）
+- [x] CQK-027 Quota 剩余百分比、窗口中文名、数据新鲜度
+- [x] CQK-028 AutoAnchor judgment/schedule 模式友好展示（§11.2/11.3）
+- [x] CQK-029 颜色/NoColor/PS5.1 中文兼容测试（文本前缀 [正常]/[注意]/[异常]/[信息]/[关闭]）
+- [x] CQK-030 golden output 快照测试（MonitorOnly healthy / AA judgment / AA schedule / Multi-PC error）
 
 ## 阶段 C：P2 发布工程（CQK-031~035）
 - [ ] CQK-031 queryTimeout 上限约束（120~180 秒）与 Task ExecutionTimeLimit 关系
