@@ -1,12 +1,16 @@
-# Codex Quota Keeper - status (doc 02 §4 / doc 03 §13).
+# Codex Quota Keeper - status (doc 02 §4 / doc 03 §13, design v2.0 §11/§14).
 # READ-ONLY: never claims the lease, never starts the keeper, never pushes.
-# Get-KeeperStatus collects the data; Write-StatusText renders the human view;
-# status-json.ps1 renders the machine view. -Live adds a read-only auth probe.
+# Get-KeeperStatus collects the data; the display layer renders it. -Live adds a
+# read-only auth probe. Default output is the Chinese panel (§11); -Language en-US
+# gives the pre-v2.0 fact dump that status-json.ps1 adjacent tooling may expect.
 
 param(
     [string]$KeeperRoot = '',
     [string]$ConfigFile = '',
-    [switch]$Live
+    [switch]$Live,
+    [ValidateSet('zh-CN', 'en-US')] [string]$Language = 'zh-CN',
+    [switch]$NoColor,
+    [switch]$Detailed
 )
 
 $script:CqkStatusDir = Split-Path -Parent $PSCommandPath
@@ -24,6 +28,9 @@ if (-not (Get-Command Invoke-CodexRateLimitsRead -ErrorAction SilentlyContinue))
 }
 if (-not (Get-Command Load-KeeperState -ErrorAction SilentlyContinue)) {
     . (Join-Path $script:CqkStatusDir 'state-machine.ps1')
+}
+if (-not (Get-Command Get-StatusDisplayLines -ErrorAction SilentlyContinue)) {
+    . (Join-Path $script:CqkStatusDir 'status-display.ps1')
 }
 
 function Get-TaskIntervalMinutes {
@@ -174,91 +181,22 @@ function Get-KeeperStatus {
     return $status
 }
 function Write-StatusText {
+    # Compatibility shim: the pre-v2.0 English fact dump, whose implementation now
+    # lives in the display layer (Write-StatusTextEn) so the -Language en-US panel
+    # and this function cannot drift. Tests and external callers still use this
+    # name, and the [hashtable] signature stays as the documented contract.
     param([hashtable]$Status)
-    $y = 'YES'; $n = 'NO'
-    $lines = @()
-    $lines += 'Codex Quota Keeper Status'
-    $lines += '============================================================'
-    $lines += ('Local machine       : {0} [{1}]' -f $Status.machineLabel, $Status.machineId)
-    $lines += ('Task installed      : {0}' -f $(if ($Status.task.installed) { $y } else { $n }))
-    if ($Status.task.installed) {
-        $lines += ('Task enabled        : {0}' -f $(if ($Status.task.enabled) { $y } else { $n }))
-        if ($Status.task.lastRunTime) {
-            $ok = ($Status.task.lastResult -eq 0)
-            $lines += ('Last task run       : {0}  ({1})' -f ([DateTime]$Status.task.lastRunTime).ToString('yyyy-MM-dd HH:mm:ss'), $(if ($ok) { 'Success' } else { "Code $($Status.task.lastResult)" }))
-        }
-        if ($Status.task.nextRunTime) {
-            $lines += ('Next task run       : {0}' -f ([DateTime]$Status.task.nextRunTime).ToString('yyyy-MM-dd HH:mm:ss'))
-        }
-        $matchText = 'n/a'
-        if ($null -ne $Status.task.intervalMatchesConfig) {
-            $matchText = $(if ($Status.task.intervalMatchesConfig) { 'matches config' } else { 'MISMATCH - run apply-config' })
-        }
-        $lines += ('Polling interval    : {0} min ({1})' -f $Status.pollIntervalMinutes, $matchText)
-    }
-    $lines += ('Codex CLI/app-server: {0}' -f $(if ($Status.codex.found) { 'READY' } else { 'NOT FOUND - set codex.command' }))
-    if ($null -ne $Status.codex.liveOk) {
-        $lines += ('Auth (live probe)   : {0}' -f $(if ($Status.codex.liveOk) { 'OK (read-only)' } else { "FAILED - $($Status.codex.liveError)" }))
-    }
-    $lines += ('Mode                : {0}' -f $Status.mode)
-    if ($Status.autoAnchor) {
-        $lines += 'AutoAnchor          : *** ON - EXPERIMENTAL, consumes quota ***'
-        $ka = [int]$Status.anchorKeepalive.intervalMinutes
-        $kaText = if ($ka -le 0) { 'off (reset/idle triggers only)' } else { "every $ka min" }
-        $lastAnchor = [string]$Status.anchorKeepalive.lastAnchorAt
-        $lastText = if ($lastAnchor) { $lastAnchor } else { 'never' }
-        $lines += ('Anchor backstop     : {0} (last anchor: {1})' -f $kaText, $lastText)
-        if ($Status.anchorSchedule) {
-            $slots = @($Status.anchorSchedule.slots)
-            $slotText = if ($slots.Count -gt 0) { $slots -join ', ' } else { 'none' }
-            $lines += ('Scheduled anchor    : {0}' -f $slotText)
-        }
-        if ($Status.anchorExec) {
-            $m = [string]$Status.anchorExec.model
-            $e = [string]$Status.anchorExec.reasoningEffort
-            if ($m -or $e) {
-                $mText = if ($m) { $m } else { 'CLI default' }
-                $eText = if ($e) { $e } else { 'CLI default' }
-                $lines += ('Anchor exec         : model {0}, effort {1}' -f $mText, $eText)
-            }
-        }
-    } else {
-        $lines += 'AutoAnchor          : OFF (experimental feature)'
-    }
-    $lines += ''
-    if ($Status.role.localOnly) {
-        $lines += 'Distributed leader  : none - LOCAL-ONLY MODE (MULTI-PC UNSAFE)'
-    } else {
-        $leader = $(if ($Status.role.leaderOwner) { '{0} [{1}]' -f $Status.role.leaderLabel, $Status.role.leaderOwner } else { 'unknown' })
-        $lines += ('Distributed leader  : {0}' -f $leader)
-        if ($Status.role.leaseExpiresAt) { $lines += ('Lease expires       : {0}' -f $Status.role.leaseExpiresAt) }
-    }
-    $lines += ('This machine role   : {0}' -f $Status.role.role)
-    if ($Status.process.runnerRunningNow) {
-        $lines += ('Runner process      : RUNNING NOW (pid {0})' -f $Status.process.pid)
-    }
-    $lines += ''
-    if ($Status.quota.lastReadAt) {
-        $staleMark = $(if ($Status.quota.stale) { ' (STALE)' } else { '' })
-        $lines += ('Last quota read     : {0}{1}' -f $Status.quota.lastReadAt, $staleMark)
-        foreach ($w in $Status.quota.windows) {
-            $reset = ConvertFrom-EpochSeconds ([long]$w.resetsAt)
-            $bucketTag = if ($w.bucketId -and $w.bucketId -ne 'default') { " [$($w.bucketId)]" } else { '' }
-            $lines += ('{0,2}h window{1}     : {2}% used, reset {3}' -f ([int]($w.minutes / 60)), $bucketTag, [int]$w.usedPercent, $reset.ToString('yyyy-MM-dd HH:mm'))
-        }
-    } else {
-        $lines += 'Last quota read     : never (runner has not completed a poll yet)'
-    }
-    $lines += ('Last error          : {0}' -f $(if ($Status.lastError) { $Status.lastError } else { 'none' }))
-    if ($Status.git.enabled) {
-        $lines += ('Log repo reachable  : {0}' -f $(if ($Status.git.reachable) { 'YES' } elseif ($null -eq $Status.git.reachable) { 'UNKNOWN' } else { 'NO' }))
-    }
-    $lines += '============================================================'
-    return ($lines -join [Environment]::NewLine)
+    return (Write-StatusTextEn -Status $Status)
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
+    # §14: status.cmd's default view is the Chinese panel. The collector and the
+    # assessment are both built from $Status alone, so -Live stays the only thing
+    # that touches the network beyond the read-only local queries.
     $s = Get-KeeperStatus -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile -Live:$Live
-    Write-Host (Write-StatusText $s)
+    $av = Get-StatusAssessment -Status $s -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile
+    $panel = Get-StatusDisplayLines -Status $s -Assessment $av -Language $Language -Detailed:$Detailed `
+        -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile
+    Write-StatusConsole $panel -NoColor:$NoColor
     exit 0
 }
