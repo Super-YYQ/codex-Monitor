@@ -32,29 +32,12 @@ jobs:
           fetch-depth: 0
       - name: Scan repository for credential patterns
         shell: pwsh
-        run: |
-          $patterns = @(
-            'sk-[A-Za-z0-9_\-]{20,}',
-            'ghp_[A-Za-z0-9]{20,}',
-            'gh[ousr]_[A-Za-z0-9]{20,}',
-            'github_pat_[A-Za-z0-9_]{20,}',
-            '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----',
-            '(?i)(api[_-]?key|secret|password)\s*[=:]\s*[''\"][^''\"\s]{12,}'
-          )
-          $files = Get-ChildItem -Recurse -File |
-            Where-Object { $_.FullName -notmatch '\.git\\' -and $_.Extension -notin '.docx', '.png', '.jpg' } |
-            Where-Object { $_.FullName -notmatch '\\tests\\' }
-          # Note: codex-quota-keeper/tests/** is excluded because it carries
-          # intentionally-fake credential strings (ghp_/gho_/github_pat_ …) used by
-          # the sanitization fixtures to verify redaction. Production code is still
-          # fully scanned.
-          $hits = @()
-          foreach ($f in $files) {
-            $text = [System.IO.File]::ReadAllText($f.FullName)
-            foreach ($p in $patterns) {
-              if ($text -match $p) { $hits += "$($f.FullName) matches $p" }
-            }
-          }
-          $hits | ForEach-Object { Write-Host "SECRET HIT: $_" }
-          if ($hits.Count -gt 0) { exit 1 }
-          Write-Host 'No credential patterns found.'
+        # CQK-033: the scan logic lives in codex-quota-keeper/tests/secret-scan.ps1
+        # so it can be run locally and asserted by tests/secret-scan.test.ps1.
+        # Previously the rule was an inline `Where-Object { $_.FullName -notmatch
+        # '\\tests\\' }`, which silently removed ~20 test files and every golden
+        # snapshot from the scan with nothing in the repo able to notice. There are
+        # no path exclusions now; only four named synthetic literals used by the
+        # sanitization fixtures are matched out, and the files carrying them are
+        # still scanned for everything else.
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File codex-quota-keeper/tests/secret-scan.ps1
