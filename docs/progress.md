@@ -452,11 +452,49 @@ R17. `349e15c` + `98e7f17` **CQK-031/032 发布工程：任务时限推导 + mod
       描述文案三个方向 + 255 字符上限）；`status-assessment.test.ps1` 新增 1 组并把
       `TASK_TIME_LIMIT_TIGHT` 注册进 catalog 契约清单。全量 15 文件 PS7 + PS5.1 双运行时通过。
 
+R18. `a4a1004` **CQK-033 Secret Scan：删掉整目录排除，改成按字面量豁免**
+    - 原 `security.yml` 的扫描步骤是内联 `Where-Object { $_.FullName -notmatch '\\tests\\' }`，
+      一行改动就能让 ~20 个测试文件和全部 golden 快照悄悄脱离扫描，且仓库里没有任何东西会发现。
+      所以修法不是「把排除范围缩小」，而是**根本没有路径排除** + 把逻辑挪进
+      `tests/secret-scan.ps1`（CI 与本地同一份）并新增 `tests/secret-scan.test.ps1` 断言它：
+      **可断言的覆盖率才是覆盖率**，写在 YAML 里的正则不是。
+    - 豁免粒度是**字面量**而不是文件：4 个合成假 token 先 `Replace()` 掉，再对**每个文件**跑全部
+      6 个模式，所以往 fixture 里粘一个真 token 照样失败（已测）。清单外文件出现这些假 token 是
+      **finding**，不是 pass——粘假 token 和粘真 token 在扫描器看来没有区别。
+    - 三个反向腐化检查（缺一个就会重新变成盲区）：字面量没被任何文件使用 → `stale fixture allowlist
+      entry`；allowlist 文件不在了 → `allowlisted fixture file is not present in the scan`；
+      `$MustScan` 文件没被 walk 到 → `scan is blind`（附实际文件数）。读不了的文件报
+      `unreadable file` 而不是当干净处理。
+    - **自证陷阱（第一次实现踩的坑）**：声明假 token 的文件本身就是它的一次「使用」，所以
+      stale 检查永远不会触发——第一版故意加一个不存在的字面量仍然输出「No credential patterns
+      found」。修法是把 `$self`（声明处）从**计数**和**匹配**里都排除掉，而不只是排除匹配。
+    - **PS 路径坑（真因，两个运行时都复现）**：`(Resolve-Path -LiteralPath $Root).Path` 会返回
+      **8.3 短路径**（`C:\Users\ADMINI~1\...`），而 `Get-ChildItem` 的 `FullName` 返回**长路径**
+      （`C:\Users\Administrator\...`）；用短前缀长度去 `Substring` 长路径，得到的相对路径是
+      `b8b6/codex-quota-keeper/tests/...`（temp 目录名的尾巴），于是所有 allowlist 比较静默失效、
+      测试以 3 个「找不到」失败。改用 `(Get-Item -LiteralPath $Root).FullName`，并把 Substring
+      前面加 `StartsWith($base + '\')` 守卫——形态不匹配时**退回绝对路径**，让 `$MustScan` 大声失败，
+      而不是悄悄产出垃圾路径。（`Resolve-Path -Relative` 两个运行时都给 `.\a\b\c.txt`，也可用。）
+    - 测试写法教训：断言用**精确整串** `@($issues) -contains "$file matches $pattern"`，模式句柄
+      按**前缀查找**（`$P_GHP` 等）而不是下标；原来的 `Where-Object { $_ -match 'api_key' }` 只匹配
+      问题文本里的字，模式本身写错也能通过。CI wiring 断言必须先**剥掉注释行**再判
+      `-notmatch '\\tests\\'`，否则 YAML 里那段「解释旧过滤器」的注释会让负向断言假绿。
+      已用合成回归（把旧过滤器塞回 `run:`）验证三条断言确实会红。
+    - 全量 `tests/run-all.ps1` **16 文件** PS7 + PS5.1 双运行时通过；`pwsh -NoProfile -File
+      codex-quota-keeper/tests/secret-scan.ps1` 在仓库根实跑 = 74 文件、exit 0。
+    - 遗留：PSScriptAnalyzer 只扫 `codex-quota-keeper/scripts`，新脚本在 `tests/` 下**不被 lint**（与
+      其余测试脚本一致，非本次引入）。
+
 ### 下一步
-- P2 组剩余 CQK-033~035：收窄 `security.yml` 对 `tests/` 的整体排除（只留 fake-token fixture）、
-  GitHub Ruleset/required checks（**仅文档建议 + 只读检查**；本会话 github MCP 连接失败 400，需用户
-  修复后才能真正核对 secret scanning / push protection 配置）、v0.9.0-beta 打包（ZIP + SHA256 + 升级说明）。
+- P2 组剩余 CQK-034/035：GitHub Ruleset/required checks（**仅文档建议 + 只读检查**；本会话 github MCP
+  连接失败 400 "Authorization header is badly formatted"，需用户修复后才能真正核对 secret scanning /
+  push protection，读不到的一律记 `Unknown`，不得自行开关）、v0.9.0-beta 打包（ZIP + SHA256 + 升级说明）。
 - 收尾：README / `config.example.jsonc` 默认值同步（需补 `-Language` / `-NoColor` / `-Detailed`、
-  `queryTimeoutSeconds` 上限与推导出的 `ExecutionTimeLimit`）、CHANGELOG、双机 soak + 故障注入。
+  `queryTimeoutSeconds` 上限与推导出的 `ExecutionTimeLimit`）、`config.example.jsonc:90` 的 120/200
+  字符提示词上限措辞与 `Test-AnchorPromptAllowed` 对齐、CHANGELOG、双机 soak + 故障注入。
+- **需用户决定的遗留风险（未擅自修）**：本地 `core.autocrlf=true` 且仓库**没有 `.gitattributes`**，
+  而 `status-display.test.ps1:674` 断言 golden 快照字节里不含 `` `r ``。若某次 checkout 做了 CRLF
+  转换，该断言会在代码正确的前提下失败；git 每次提示「LF will be replaced by CRLF」即其症状。
+  加 `.gitattributes` 属仓库级行为变更，留给用户定夺。
 - `git push` 等待用户明确要求，并按全局规则先对待推送内容做只读敏感信息检查。
 
