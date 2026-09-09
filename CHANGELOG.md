@@ -16,9 +16,12 @@
   `tests/build-release.test.ps1`（10 组）：在一次性 git 仓库里驱动完整构建，覆盖禁入/
   必需条目门禁、SHA256SUMS 各种真实格式解析、篡改/缺失检测、版本从 commit 读取、
   可复现构建、脏树门禁、本机状态拒载与 secret 门禁联动。
-- `docs/release-engineering.md`：GitHub 仓库安全配置现状（secret scanning / push
-  protection 已开启；main 尚无 Ruleset 保护，开启属平台变更需用户决定）、发布 runbook、
-  §21 发布前 DoD 对照表。
+- `docs/release-engineering.md`：GitHub 仓库安全配置现状、main 分支保护 Ruleset
+  （`main-protection`，2026-09-09 经用户授权启用并读回核对：禁 force push / 禁删除 +
+  5 个真实 required check context、bypass 为空；含 required checks 只拦合并不拦直接
+  push 的行为差异说明与 ruleset API 的 payload 坑位记录）、发布 runbook、
+  §21 发布前 DoD 对照表。secret scanning 相关设置在 push 前复核时端点返回 404，
+  按「读不到即 Unknown、不自行开关」如实标注，未对任何平台配置做额外改动。
 
 ### Changed
 - AutoAnchor 新增**执行模型与思考等级配置**（`codex.autoAnchor.model` /
