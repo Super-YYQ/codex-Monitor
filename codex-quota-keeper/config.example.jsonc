@@ -78,7 +78,9 @@
   "codex": {
     // codex 可执行文件；auto = 自动探测（已兼容 exe/ps1/cmd/bat / npm codex.cmd）
     // "command": "auto",
-    // 额度查询超时（秒）
+    // 额度查询超时（秒；这是**每次 JSON-RPC 等待**的超时，不是整轮耗时：一次额度尝试
+    // 含 2 次等待，配代理再翻倍）。上限 180，低于 5 拒绝；计划任务 ExecutionTimeLimit
+    // 由本值等配置推导（CQK-031）
     // "queryTimeoutSeconds": 20,
     // 出入站代理 URL（http(s):// 或 socks5://）；socks 是否被 codex 识别取决于其自身 HTTP 栈；
     // 代理失败自动回退直连再试一次；空 = 直连

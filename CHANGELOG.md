@@ -3,6 +3,24 @@
 ## Unreleased
 
 ### Added
+- **发布打包流程（CQK-035）**：新增 `codex-quota-keeper/tools/build-release.ps1`——从
+  `git archive <commit>` 直接构建发布 ZIP（只包含已提交文件，「不打包本机状态」是结构性
+  保证；blob 字节与入口时间戳取自 commit，同一 commit 重复构建 SHA256 一致），写入
+  GNU `sha256sum` 格式的 SHA256SUMS.txt 并回读自检。内置门禁：工作树脏检查（仅限打包前缀）、
+  仓库级 secret scan、禁止条目（runtime/ / history/ / config.json / .env / .pem / .key /
+  .pfx / .git/）与必需条目（runner.ps1 / install.cmd / config.example.jsonc / README.md）
+  双向检查；`-VerifyOnly` 只校验既有产物。脚本不发布任何东西，`gh release create` 命令仅
+  打印供人工执行。runbook 见 `docs/release-engineering.md`（含 CQK-034 只读检查结论与
+  Ruleset 建议）。
+- 新增 `codex-quota-keeper/tools/build-release.ps1` 的回归测试
+  `tests/build-release.test.ps1`（10 组）：在一次性 git 仓库里驱动完整构建，覆盖禁入/
+  必需条目门禁、SHA256SUMS 各种真实格式解析、篡改/缺失检测、版本从 commit 读取、
+  可复现构建、脏树门禁、本机状态拒载与 secret 门禁联动。
+- `docs/release-engineering.md`：GitHub 仓库安全配置现状（secret scanning / push
+  protection 已开启；main 尚无 Ruleset 保护，开启属平台变更需用户决定）、发布 runbook、
+  §21 发布前 DoD 对照表。
+
+### Changed
 - AutoAnchor 新增**执行模型与思考等级配置**（`codex.autoAnchor.model` /
   `codex.autoAnchor.reasoningEffort`，默认均为空）：配置后锚定执行的
   `codex exec` 分别透传 `-m <model>` 与 `-c model_reasoning_effort=<effort>`；
@@ -63,6 +81,10 @@
   配置加载器支持 JSONC。
 
 ### Docs
+- `docs/release-engineering.md`（见 Added）。
+- `codex-quota-keeper/README.md`「快速开始」补充从 Release 下载与校验 ZIP 的说明；
+  `queryTimeoutSeconds` 上限（180 秒）与派生计划任务时限（`Get-KeeperTaskExecutionTimeLimit`，
+  CQK-031）文档同步。
 - 新增 `docs/scenarios.md` 场景详解页：每个仓库处理场景（首次轮询、空闲判定、窗口重置、
   keepalive、每日定时、立即触发、Leader 租约、集群退避、history 推送、fail-closed 一览）
   配真实格式的模拟数据（state.json / lease.json / backoff.json / history 事件文件 /

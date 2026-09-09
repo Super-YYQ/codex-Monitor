@@ -24,3 +24,5 @@ Desktop.ini
 # 测试产物
 tests/*.out
 TestResults/
+# 发布产物（build-release.ps1 输出，可随时从 commit 重建，禁止入库）
+tools/dist/
