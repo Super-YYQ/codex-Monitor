@@ -82,9 +82,10 @@
 
 ### Docs
 - `docs/release-engineering.md`（见 Added）。
-- `codex-quota-keeper/README.md`「快速开始」补充从 Release 下载与校验 ZIP 的说明；
-  `queryTimeoutSeconds` 上限（180 秒）与派生计划任务时限（`Get-KeeperTaskExecutionTimeLimit`，
-  CQK-031）文档同步。
+- `codex-quota-keeper/README.md`「快速开始」补充从 Release 下载与校验 ZIP 的说明；补 `status.ps1`
+  参数表（`-Live` / `-Detailed` / `-Language en-US` / `-NoColor` / `-KeeperRoot` / `-ConfigFile`，
+  日常入口 `status.cmd` 不转发参数）；`queryTimeoutSeconds` 上限（180 秒）与派生计划任务时限
+  （`Get-KeeperTaskExecutionTimeLimit`，CQK-031）文档同步。
 - 新增 `docs/scenarios.md` 场景详解页：每个仓库处理场景（首次轮询、空闲判定、窗口重置、
   keepalive、每日定时、立即触发、Leader 租约、集群退避、history 推送、fail-closed 一览）
   配真实格式的模拟数据（state.json / lease.json / backoff.json / history 事件文件 /

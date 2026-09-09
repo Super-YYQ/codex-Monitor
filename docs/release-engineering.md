@@ -122,9 +122,9 @@ sha256sum -c SHA256SUMS.txt
 
 ## 5. v0.9.0-beta 现状（截至本文档提交）
 
-产物已构建并自校验：`codex-quota-keeper-v0.9.0-beta.zip`（67 个文件），
-来自 commit `3fb921d`，SHA256
-`2c4a214528c51c4a06ec3d2a026a83cc082004fa884eeee29cd03a4298e4a4f0`，
+最近一次构建演练（值仅对应该 commit，正式发布前须按 §4 从待发布 commit 重建）：
+`codex-quota-keeper-v0.9.0-beta.zip`（70 个文件），来自 commit `267073e`，SHA256
+`3f647bf2ff79ba656843123f4427c3f5a9d30ec57c13cfffa2348429bc2c0271`，
 `-VerifyOnly` 通过。**但 tag 故意未打、Release 未创建**：§21 发布前 DoD 中
 「多机连续运行 + 故障注入（实机双机 soak）」一项尚未执行，自动测试覆盖了
 同样的场景逻辑（租约续期/接管、429 退避、Git 断网、outbox 重试、claim 并发），
@@ -139,5 +139,7 @@ sha256sum -c SHA256SUMS.txt
 | 多机连续运行（实机 soak + 故障注入） | ❌ 未执行 |
 | AutoAnchor 并发 / crash claim / revalidate 故障测试 | ⚠️ 自动测试已覆盖，实机未跑 |
 | test-windows / security 全绿 | ✅ |
-| README 与 config.example.jsonc 默认值同步 | ⚠️ 收尾项 |
+| README 与 config.example.jsonc 默认值同步 | ✅ R19 |
 | Release 附 ZIP + SHA256 + 升级说明 | 构建就绪，等 soak 后发布 |
+| 全量测试双运行时 | ✅ 17 文件 PS7 + PS5.1（R19） |
+

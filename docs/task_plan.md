@@ -107,13 +107,13 @@ codex-quota-keeper/
 - [x] CQK-031 queryTimeout 上限约束（120~180 秒）与 Task ExecutionTimeLimit 关系
 - [x] CQK-032 Task Description 根据 mode 动态生成
 - [x] CQK-033 Secret Scan 缩小 tests 排除范围（只 allowlist fake-token fixture）
-- [ ] CQK-034 GitHub Ruleset / required checks（文档仅建议；仓库 API 侧只读检查）
-- [ ] CQK-035 v0.9.0-beta Release 打包流程（ZIP+SHA256+升级说明；推送前遵守用户 push 规则）
+- [x] CQK-034 GitHub Ruleset / required checks（文档仅建议；仓库 API 侧只读检查）
+- [x] CQK-035 v0.9.0-beta Release 打包流程（ZIP+SHA256+升级说明；推送前遵守用户 push 规则）
 
 ## 收尾
-- [x] 全量测试 PS7 + PS5.1 回归通过（16 文件，R18）
-- [ ] README / config.example.jsonc 默认值同步
-- [ ] CHANGELOG 更新
+- [x] 全量测试 PS7 + PS5.1 回归通过（17 文件，R19）
+- [x] README / config.example.jsonc 默认值同步
+- [x] CHANGELOG 更新
 
 ## 决策记录
 - 阶段顺序采用文档 §19：021 → 022 → 024 → 023 → Status 组 → P2 组。

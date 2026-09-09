@@ -60,6 +60,17 @@ codex-quota-keeper/
 6. 双击 `status.cmd` 验证 `Task installed=YES`、`Enabled=YES`、`Auth=READY`。
 7. 第二台电脑重复安装，确认只有一台 `LEADER`、另一台 `PASSIVE`。
 
+**查看状态**：日常双击 `status.cmd`（只读：不争租约、不启动 keeper、不 push）。
+需要参数时直接调脚本 `pwsh scripts/status.ps1 <参数>`：
+
+| 参数 | 作用 |
+|------|------|
+| `-Live` | 追加一次真实的只读额度查询（默认只读本地记录与计划任务，不查 Codex） |
+| `-Detailed` | 末尾追加「调试详情」区：原始判定值、额度时间、仓库路径与全部 finding 明细 |
+| `-Language en-US` | 输出 v2.0 之前的英文事实转储（默认中文面板；`status-json.ps1` 的英文 schema 不受影响） |
+| `-NoColor` | 去掉颜色、内容不变（重定向到文件时用） |
+| `-KeeperRoot` / `-ConfigFile` | 指向非默认安装目录 / 非默认配置文件 |
+
 **更新升级**：仓库更新后，把新版本文件**合并覆盖**到部署目录（务必保留 `config.json`、
 `runtime/`——含机器身份 `machine.json`，多机租约依赖它——与 `history/`），再运行一次
 `install.cmd`；它用 `-Force` 同名替换任务定义，**不会产生多个计划任务**

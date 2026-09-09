@@ -485,16 +485,55 @@ R18. `a4a1004` **CQK-033 Secret Scan：删掉整目录排除，改成按字面�
     - 遗留：PSScriptAnalyzer 只扫 `codex-quota-keeper/scripts`，新脚本在 `tests/` 下**不被 lint**（与
       其余测试脚本一致，非本次引入）。
 
+R19. `267073e` + 本次 docs commit **CQK-034/035 发布工程 + 收尾（README/config/CHANGELOG 同步）**
+    - **CQK-034 只读检查**（`gh api` 全 GET，未做任何平台变更）：`Super-YYQ/codex-Monitor` 为
+      Public + MIT；secret scanning **enabled**、push protection **enabled**（validity checks /
+      non-provider patterns / Dependabot security updates 均 disabled）；Rulesets **空**、
+      main **无分支保护**（`branches/main/protection` 404）、Releases/Tags **均为 0**；
+      `security` + `test-windows` 两个 workflow active 且最近运行全绿；`security-products`
+      端点 404 → 记 `Unknown`。结论 + Ruleset 建议（target main、要求两个 check、block force
+      push/deletion、不留 bypass）写入 `docs/release-engineering.md` §1/§2。**创建 Ruleset 属
+      GitHub 平台变更，由用户决定，开发侧不动。** github MCP 本会话全程连接失败（400
+      "Authorization header is badly formatted"），检查改走 `gh api`，结论不受影响。
+      教训：`gh api` 在 PS 脚本里用 splatting 传参（`gh api @argv`）会被拆成
+      「accepts 1 arg(s), received 45」；探测类查询直接在 bash 里逐条跑最稳。
+    - **CQK-035 打包器** `codex-quota-keeper/tools/build-release.ps1`：从 `git archive <commit>`
+      构建（只看到已提交文件 → 「不打包本机状态」是**结构性**保证；blob 字节与入口时间戳取自
+      commit → 同一 commit 重复构建 SHA256 逐字节一致，`Compress-Archive` 嵌入 mtime 做不到）。
+      五道门禁：仓库+scanner 存在性 → 前缀内脏树拒绝 → 仓库级 secret 扫描 → 归档后**从 ZIP
+      实际读回条目**做禁止/必需双向检查 → GNU `sha256sum` 格式 SHA256SUMS.txt 写完立即回读；
+      任一步失败删除半成品 ZIP。版本默认读自**被构建的 commit**（不读工作区）。脚本不发布
+      任何东西，`gh release create` 仅打印。`.gitignore` 加 `tools/dist/`。
+    - 新增 `tests/build-release.test.ps1`（10 组，一次性 git 仓库里驱动完整构建）：门禁双向、
+      SHA256SUMS 各种真实格式、篡改/缺失、脏树只按前缀判定、可复现哈希、本机状态拒载、
+      secret 门禁联动。**两个只出现在 PS 5.1 的坑**（pwsh 全绿、5.1 独红）：
+      ① `Join-Path $a 'dist' 'x.zip'` 三参数形式是 **PS 6.0+**（`-AdditionalChildPath`），
+        5.1 抛 `PositionalParameterNotFound` —— 必须嵌套 `Join-Path (Join-Path $a 'dist') 'x.zip'`；
+      ② 脏树门禁里 `$d = @((Invoke-Git ...) | Where-Object ...)`：`Invoke-Git` 用 `,$text`
+        返回一级数组，再管道进 `@(...|Where)` 会**嵌套一层**，`$d.Count` 看似正确但元素是数组，
+        `-join` 后消息显示 `1 path(s) ... System.Object[]`，掩盖了到底是哪个文件脏。
+        修法：先普通赋值、再单独一条语句过滤。
+    - **收尾**：README「快速开始」加 Release 下载+`sha256sum -c` 校验路径；新增 `status.ps1`
+      参数表（`-Live`/`-Detailed`/`-Language`/`-NoColor`/`-KeeperRoot`/`-ConfigFile` —— 核对过
+      `Get-KeeperStatus` 实现：默认不查 Codex，`-Live` 才发真实额度读取；`-Detailed` 只加
+      「调试详情」区）；`queryTimeoutSeconds` 上限 180 与派生 `ExecutionTimeLimit`（CQK-031）
+      补进 README 配置表与 `config.example.jsonc`；锚定 Prompt 上限核对为 **200 字符**
+      （`Test-AnchorPromptAllowed`，文档措辞一致，R18「下一步」里怀疑的 120/200 冲突并不存在）；
+      CHANGELOG Unreleased 补 Added/Docs。
+    - **构建演练已完成但 tag 故意未打**：ZIP 70 文件、来自 `267073e`、SHA256
+      `3f647bf2ff79ba656843123f4427c3f5a9d30ec57c13cfffa2348429bc2c0271`、`-VerifyOnly` 通过；
+      §21 DoD 的**实机双机 soak + 故障注入未执行**，发布前须按 runbook 从待发布 commit 重建。
+    - 全量 `tests/run-all.ps1` **17 文件** PS7 + PS5.1 双运行时通过。
+
 ### 下一步
-- P2 组剩余 CQK-034/035：GitHub Ruleset/required checks（**仅文档建议 + 只读检查**；本会话 github MCP
-  连接失败 400 "Authorization header is badly formatted"，需用户修复后才能真正核对 secret scanning /
-  push protection，读不到的一律记 `Unknown`，不得自行开关）、v0.9.0-beta 打包（ZIP + SHA256 + 升级说明）。
-- 收尾：README / `config.example.jsonc` 默认值同步（需补 `-Language` / `-NoColor` / `-Detailed`、
-  `queryTimeoutSeconds` 上限与推导出的 `ExecutionTimeLimit`）、`config.example.jsonc:90` 的 120/200
-  字符提示词上限措辞与 `Test-AnchorPromptAllowed` 对齐、CHANGELOG、双机 soak + 故障注入。
-- **需用户决定的遗留风险（未擅自修）**：本地 `core.autocrlf=true` 且仓库**没有 `.gitattributes`**，
+- **等用户决定**（开发侧不擅动）：① 是否创建 main 的 Ruleset（建议配置见
+  `docs/release-engineering.md` §2）；② 实机双机 soak + 故障注入（§21 DoD 唯一硬缺口）；
+  ③ 是否打 tag / `gh release create`（`git push` 同样需要明确要求，并按全局规则先做
+  待推送内容的只读敏感信息检查 —— 本地 main 已领先远端多个 commit）。
+- 需用户决定的遗留风险（未擅自修）：本地 `core.autocrlf=true` 且仓库**没有 `.gitattributes`**，
   而 `status-display.test.ps1:674` 断言 golden 快照字节里不含 `` `r ``。若某次 checkout 做了 CRLF
   转换，该断言会在代码正确的前提下失败；git 每次提示「LF will be replaced by CRLF」即其症状。
   加 `.gitattributes` 属仓库级行为变更，留给用户定夺。
-- `git push` 等待用户明确要求，并按全局规则先对待推送内容做只读敏感信息检查。
+- github MCP 本会话全程 400 连接失败，需用户检查其凭证配置（本轮所有平台查询改走 `gh api`）。
+
 
