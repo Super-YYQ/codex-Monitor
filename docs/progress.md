@@ -423,11 +423,40 @@ R16. `bf57bc7` + `9e105f7` **CQK-026~030 Status 中文诊断面板（渲染层�
     - CI 一致性：`PSScriptAnalyzerSettings.psd1` 只把 Error 作为门禁，全仓 Error=0；
       新增的唯一 warning 是 `Get-StatusDisplayLines` 的复数名词提示（非门禁项）。
 
+R17. `349e15c` + `98e7f17` **CQK-031/032 发布工程：任务时限推导 + mode 动态描述**
+    - CQK-031 首先纠正一个语义误解：`codex.queryTimeoutSeconds` 约束的是**每一次 JSON-RPC 等待**，
+      不是一整轮。一次尝试含 2 次等待（`initialize` id=1、`account/rateLimits/read` id=7）；配了
+      代理则尝试数翻倍为 2（CQK-020：从不第三次），故只读预算 = `q * 2 * attempts`。AutoAnchor 再加
+      `Max(60, q*3)` 执行窗口 + 第二次完整校验读取；远程同步再加有界的
+      `CQK_GIT_SYNC_BUDGET_SECONDS = 240`。于是 `q=180` + 代理 + AutoAnchor ≈ 2220 s ≈ 37 min——
+      旧的固定 15 分钟 `ExecutionTimeLimit` 会在半途杀掉它。
+    - 四个消费方（安装器的 limit、校验器的硬失败、anchor 模块的 `q*3` 执行窗口、状态面板的告警）共用
+      `Get-CodexTickBudgetSeconds` 这一个算术源；测试用断言
+      `task limit equals the derived limit (single source of truth)` 钉死，防止四处各自猜测。
+    - **设计决策**：预算 vs poll 的规则**只**写在 `Test-ConfigShape`（硬失败），
+      `Get-KeeperTaskExecutionTimeLimit` 只 clamp 到 `poll - 2 min` 并报 `cappedByPoll`。所以
+      `cappedByPoll` 是**合法配置上的告警**，不是非法配置的症状——只读状态面板正是配置出问题时用户
+      伸手要拿的工具，绝不能被校验规则挡住而抛异常。安装层测试把这条分界钉成两个 case：poll=13
+      （合法但被 clamp，11 min）与 poll=11（硬失败）。
+    - 行为变化（值得注意）：默认 MonitorOnly **带**远程同步的安装，现在推导 260~280 s → 落到 10 分钟
+      下限，而不是旧的固定 15 分钟（仍 ≥ 有界 git 最坏情况），已显式断言防回归。
+    - PS 坑（新）：`ScheduledTaskSettingsSet.ExecutionTimeLimit` 回读是 ISO 8601 时长**字符串**
+      （`PT10M`）而非 TimeSpan，`.TotalMinutes` 恒为 0；测试必须用
+      `[System.Xml.XmlConvert]::ToTimeSpan($raw).TotalMinutes` 解析。
+    - CQK-032：`Get-KeeperTaskDescription` 按 mode + 锚定是否**真的**上膛生成描述（`mode=AutoAnchor`
+      本身不够，runner 只在 `codex.autoAnchor.enabled=true` 时锚定）。中途修掉一版会说谎的描述：
+      `mode=AutoAnchor` + 锚定关闭时曾字面输出 `(MonitorOnly)`，改为恒回显 `(mode=$mode)`。
+      `apply-config.ps1` 经 `Register-KeeperTask` 重注册，所以老安装下次 apply-config 自动更新描述。
+    - 测试：`common.test.ps1` 新增 1 组（上限边界 180 通过 / 181 拒绝、四段预算算术、硬失败边界
+      poll=12 通过 / poll=11 拒绝）；`install-status.test.ps1` 新增 2 组（安装后的 settings 携带推导值、
+      描述文案三个方向 + 255 字符上限）；`status-assessment.test.ps1` 新增 1 组并把
+      `TASK_TIME_LIMIT_TIGHT` 注册进 catalog 契约清单。全量 15 文件 PS7 + PS5.1 双运行时通过。
+
 ### 下一步
-- P2 组 CQK-031~035：queryTimeout 上限 vs Task ExecutionTimeLimit、mode 动态 Task Description、
-  收窄 `security.yml` 对 `tests/` 的整体排除（只留 fake-token fixture）、GitHub Ruleset/required
-  checks（**仅文档建议 + 只读检查**；本会话 github MCP 连接失败 400，需用户修复后才能真正核对
-  secret scanning / push protection 配置）、v0.9.0-beta 打包（ZIP + SHA256 + 升级说明）。
-- 收尾：README / `config.example.jsonc` 默认值同步、CHANGELOG、双机 soak + 故障注入。
+- P2 组剩余 CQK-033~035：收窄 `security.yml` 对 `tests/` 的整体排除（只留 fake-token fixture）、
+  GitHub Ruleset/required checks（**仅文档建议 + 只读检查**；本会话 github MCP 连接失败 400，需用户
+  修复后才能真正核对 secret scanning / push protection 配置）、v0.9.0-beta 打包（ZIP + SHA256 + 升级说明）。
+- 收尾：README / `config.example.jsonc` 默认值同步（需补 `-Language` / `-NoColor` / `-Detailed`、
+  `queryTimeoutSeconds` 上限与推导出的 `ExecutionTimeLimit`）、CHANGELOG、双机 soak + 故障注入。
 - `git push` 等待用户明确要求，并按全局规则先对待推送内容做只读敏感信息检查。
 

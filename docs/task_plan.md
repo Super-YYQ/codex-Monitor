@@ -104,8 +104,8 @@ codex-quota-keeper/
 - [x] CQK-030 golden output 快照测试（MonitorOnly healthy / AA judgment / AA schedule / Multi-PC error）
 
 ## 阶段 C：P2 发布工程（CQK-031~035）
-- [ ] CQK-031 queryTimeout 上限约束（120~180 秒）与 Task ExecutionTimeLimit 关系
-- [ ] CQK-032 Task Description 根据 mode 动态生成
+- [x] CQK-031 queryTimeout 上限约束（120~180 秒）与 Task ExecutionTimeLimit 关系
+- [x] CQK-032 Task Description 根据 mode 动态生成
 - [ ] CQK-033 Secret Scan 缩小 tests 排除范围（只 allowlist fake-token fixture）
 - [ ] CQK-034 GitHub Ruleset / required checks（文档仅建议；仓库 API 侧只读检查）
 - [ ] CQK-035 v0.9.0-beta Release 打包流程（ZIP+SHA256+升级说明；推送前遵守用户 push 规则）
@@ -119,3 +119,5 @@ codex-quota-keeper/
 - 阶段顺序采用文档 §19：021 → 022 → 024 → 023 → Status 组 → P2 组。
 - Status 重构不改 status-json.ps1 英文 schema（§7/§22 红线）。
 - CQK-034 Ruleset 创建属 GitHub 平台配置变更，需用户决定；开发侧仅准备/检查。
+- CQK-031：预算/上限校验只写在 Test-ConfigShape（硬失败），推导函数只 clamp + 报 cappedByPoll；
+  这样只读 Status 面板永远不会被校验规则挡住（面板正是配置出问题时要用的手段）。
