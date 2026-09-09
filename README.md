@@ -249,6 +249,7 @@ CI（GitHub Actions）在每次 push / PR 上运行：PS 7 与 PS 5.1 全量测�
 
 - [docs/design/](docs/design/) — 中文设计交付文档（合规调研、总体架构、详细设计、部署运维、仓库审查）
 - [docs/scenarios.md](docs/scenarios.md) — 场景详解：每个处理场景的真实模拟数据与图
+- [docs/soak-runbook.md](docs/soak-runbook.md) — 双机 soak + 故障注入操作单（发布前 DoD）
 - [docs/architecture.md](docs/architecture.md) — 模块与数据流
 - [docs/operations.md](docs/operations.md) — 部署、多机与日常运维
 - [docs/security-model.md](docs/security-model.md) — 安全边界与隐私设计

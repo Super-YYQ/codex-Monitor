@@ -82,6 +82,13 @@
 
 ### Docs
 - `docs/release-engineering.md`（见 Added）。
+- 新增 `docs/soak-runbook.md` 双机 soak + 故障注入操作单（§21 发布前 DoD 的实机一项）：
+  零额度、零真实仓库的整套夹具——`codex.command` 指向包装 `tests/fixtures/mock-appserver.ps1`
+  的 `D:\soak\bin\codex.cmd`、本地裸仓库充当协调/日志仓库、`anchor-args.txt` 作为模型调用
+  次数的唯一地面真值；含 4 小时挂机正常路径、F1~F7 七个故障注入（429、传输层故障不误判、
+  Git 断网、history push 失败、锚定执行失败、crash claim、租约接管）与判定表/记录区，
+  每条判据都标注了它在实机上的落盘位置（`state.json` / `keeper-*.jsonl` /
+  `history\events-*.jsonl` / 远端 blob）与 grep 形态。
 - `codex-quota-keeper/README.md`「快速开始」补充从 Release 下载与校验 ZIP 的说明；补 `status.ps1`
   参数表（`-Live` / `-Detailed` / `-Language en-US` / `-NoColor` / `-KeeperRoot` / `-ConfigFile`，
   日常入口 `status.cmd` 不转发参数）；`queryTimeoutSeconds` 上限（180 秒）与派生计划任务时限
