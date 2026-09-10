@@ -103,8 +103,10 @@ function Write-VerdictLog {
     # day-file discovery and newest-first scan are both exercised for real.
     # ConvertTo-IsoString carries the *machine's* offset (not a baked-in +08:00),
     # so the relative ages below hold on any timezone.
-    param([string]$Root, [datetime]$Ts, [string]$Level, [string]$Event, [string]$MachineId = 'machine-a')
-    $line = '{"ts":"' + (ConvertTo-IsoString $Ts) + '","level":"' + $Level + '","event":"' + $Event + '","machineId":"' + $MachineId + '"}'
+    param([string]$Root, [datetime]$Ts, [string]$Level, [string]$Event, [string]$MachineId = 'machine-a', [string]$ErrorText = $null)
+    $line = '{"ts":"' + (ConvertTo-IsoString $Ts) + '","level":"' + $Level + '","event":"' + $Event + '","machineId":"' + $MachineId + '"'
+    if ($null -ne $ErrorText) { $line += ',"error":"' + $ErrorText + '"' }
+    $line += '}'
     $path = Join-Path (Get-LogsDir $Root) ('keeper-' + $Ts.ToString('yyyy-MM-dd') + '.jsonl')
     Add-Content -LiteralPath $path -Value $line -Encoding UTF8
 }
@@ -714,8 +716,10 @@ try {
         Assert-True ($flat.Contains('[REDACTED]')) 'masked marker present'
 
         $lePath = Get-LogsDir $sRoot
-        $leLine = '{"ts":"' + $Now.ToString('yyyy-MM-ddTHH:mm:ss') + '+08:00","level":"ERROR","event":"RUNNER_ERROR","machineId":"m","error":"password=hunter2 failed"}'
-        Add-Content -LiteralPath (Join-Path $lePath ('keeper-' + $Today + '.jsonl')) -Value $leLine -Encoding UTF8
+        # Written through Write-VerdictLog so the stamp carries the *host's* offset:
+        # baking +08:00 here made the verdict 8h old on a UTC runner, which flips
+        # §10's escalation to 'stale-verdict' (fresh) and drops the finding.
+        Write-VerdictLog -Root $sRoot -Ts $Now -Level 'ERROR' -Event 'RUNNER_ERROR' -MachineId 'm' -ErrorText 'password=hunter2 failed'
         $sv2 = Get-StatusAssessment -Status (New-StubStatus @{ lastError = 'older' } -LocalOnly) `
             -Config (New-StubConfig -Coordination $false) -KeeperRoot $sRoot -Now $Now
         $flat2 = (ConvertTo-Json -InputObject $sv2 -Depth 8)
