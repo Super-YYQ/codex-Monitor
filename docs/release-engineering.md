@@ -68,19 +68,40 @@ Required checks 用的是 **check-run context（即 job 的 `name`）而非 work
 | `PSScriptAnalyzer` | `security.yml` → job `lint` |
 | `Secret scan` | `security.yml` → job `secret-scan` |
 
-两点必须知道的行为差异：
+**实际行为（2026-09-10 实测，纠正本文档早先的错误说法）**：Ruleset 的
+`required_status_checks` **同时拦合并和直接 `git push`**。首次按 §4 直接推 `main` 即被拒：
 
-1. **required status checks 拦的是合并（merge），不拦直接 `git push`**。要拦直接 push
-   需要另一条规则 `pull_request`（Require a pull request before merging）。
-2. 本仓库**未**加 `pull_request` 规则：§21 的工作流是单人直接 push `main`，加 PR 规则
-   会把每次提交变成「开 PR → 等 CI → 合并」，超出「禁止 force push / 删除 + 要求 CI」
-   的授权范围。改由约定承担：两个 workflow 都同时监听 `push: [main]` 与 `pull_request`，
-   所以直接 push 也会触发全量 CI；push 前本地跑 `tests/run-all.ps1`（与 CI 同一套）即可。
-   `strict_required_status_checks_policy` 因此留 false（true 要求分支在合并前恰好落后于
-   main 的最新 commit，与单人直接 push 节奏不兼容）。
+```
+remote: error: GH013: Repository rule violations found for refs/heads/main.
+remote: - 5 of 5 required status checks are expected.
+ ! [remote rejected] main -> main (push declined due to repository rule violations)
+```
 
-如果以后要收紧（例如改多人协作），只需把 `strict` 置 true 或追加 `pull_request` 规则；
-用 API 改时记着这几个坑（本文档作者踩过 4 轮 422）：`rules` 必须是
+原因是一个死结：check 只可能在 GitHub 拿到 commit 之后才上报，而任何新 commit 在拿到
+绿色 check 之前都不许落到 `main`。所以**新提交无法再直接 push 进 `main`**，只能走
+「推功能分支 → 开 PR（CI 在 PR head 上跑绿）→ 合并」。合并本身没问题：`main` 是 PR
+base 的祖先，产生的 merge commit 不是 force update，`non_fast_forward` 不会拦。
+
+> 早先本文档写过「required status checks 只拦合并不拦直接 push」，那是**旧版分支保护**
+> （`branches/main/protection`）的语义，不适用于 Ruleset；当时依据的是搜索到的文档
+> 措辞而非实测，现已按实测纠正。
+
+由此产生的工作流变化（单人仓库也一样适用）：
+
+1. 本仓库**未**加 `pull_request` 规则（Require a pull request before merging）——加不加
+   效果几乎相同，因为 required checks 已经把直接 push 挡住了；少一条规则也少一层
+   「本地跑绿了但忘了开 PR」的困惑。要彻底强制评审式流程可再补这条。
+2. `strict_required_status_checks_policy` 保持 **false**：true 还额外要求分支在合并前
+   必须等于 base 最新（behind 就拒），单人频繁合并时只会平添冲突，且对上面的死结无帮助。
+3. 日常节奏从「commit → push」变成「commit → `git switch -c` → push 分支 → PR →
+   等 CI 绿 → merge」。两个 workflow 同时监听 `push: [main]` 与 `pull_request`，
+   所以 PR 阶段跑的就是合并后那 5 个 context。
+4. 如果确实需要一次「直接 push 到 main」的逃生门（例如 CI runner 全挂、或首次给
+   一个空仓库灌入历史），只有两条路：给 Ruleset 加一个 **bypass actor**，或临时把
+   `enforcement` 调成 `evaluate`（只记日志不拦）推完再改回 `active`。两者都是平台配置
+   变更，**必须用户明确要求**；本文档不预设任何一种。
+
+追加或收紧规则时记着这几个坑（本文档作者踩过 4 轮 422）：`rules` 必须是
 `[{"type": ..., "parameters": {...}}]` **数组**；两条封锁规则的真名是
 `non_fast_forward` / `deletion`（不是 `block_force_pushes` / `block_deletions`）；
 `required_status_checks` 的参数名是 `strict_required_status_checks_policy` +
@@ -192,9 +213,10 @@ sha256sum -c SHA256SUMS.txt
    ```
 
    Release notes 附 ZIP、SHA256SUMS.txt、升级说明（根 `CHANGELOG.md`「升级说明」节）。
-6. Ruleset 已启用（§2，2026-09-09），无需再操作。注意 push 语义：required checks
-   拦合并不拦直接 push，所以本步骤的顺序仍是「本地跑绿 → push → 等 CI 绿」，
-   别把 push 当成 CI 已通过。
+6. Ruleset 已启用（§2，2026-09-09），日常无需再操作。但注意它的 push 语义：
+   **required checks 也拦直接 `git push main`**（§2 有实测记录），所以往 `main` 落东西
+   必须走「功能分支 → PR → CI 绿 → 合并」。`git tag` 与 push tag 不受影响
+   （Ruleset 只作用于 `refs/heads/main`），因此第 5 步仍可直接做。
 
 ## 5. v0.9.0-beta 现状（截至本文档提交）
 
