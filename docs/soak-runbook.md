@@ -585,6 +585,7 @@ claim 文件必须是 8 个键的完整记录（`anchor-claim.ps1` 里 `New-Anch
 ```powershell
 # A 机，同一个终端窗口里连着跑
 . D:\soak\keeper-A\scripts\common.ps1                       # Get-Sha256Hex / ConvertTo-EpochSeconds 都在这里
+. D:\soak\keeper-A\scripts\anchor-claim.ps1                 # Read-LocalAnchorClaim = 产品自己的判定函数（它会自动带上 common/github-sync）
 $env:CQK_MOCK_MODE='idle'; $env:CQK_MOCK_EXEC='ok'          # 强制锚定继承本终端 $env:（见 F5 说明）
 $claimDir = 'D:\soak\keeper-A\runtime\anchor-claims'
 # eventId 必须与 keeper 自己算的**逐字节相同**：它是 `SHA256("force|<minuteSeconds>")`，
@@ -603,10 +604,16 @@ $machineId = (Read-JsonFile 'D:\soak\keeper-A\runtime\machine.json').machineId
 @{ schema=1; eventId=$id; state='CLAIMED'; ownerId=$machineId
    claimedAt=$now; claimExpiresAt=$now; completedAt=$null; result=$null } |
   ConvertTo-Json -Depth 3 -Compress | Set-Content $claim -Encoding UTF8
-# 回读自检：必须走 keeper 的读路径（Read-JsonFile → ConvertFrom-JsonSafe），它不认 UTF-16、
-# 解析失败静默返回 $null。读不回 CLAIMED 就说明预埋形态不对，先别往下跑。
+# 回读自检：必须走 keeper **自己的判定函数**，不要只信泛用的 Read-JsonFile。
+# Read-JsonFile → ConvertFrom-JsonSafe 对解析失败/全空白一律静默返回 $null；
+# 读不回 CLAIMED 就说明预埋形态不对，先别往下跑。
 $back = Read-JsonFile $claim
-if ($back -isnot [hashtable] -or $back.state -ne 'CLAIMED') { throw "预埋文件读不回来（state=$($back.state)），锚定不会走 CLAIMED 拦截分支" }
+if ($back -isnot [hashtable] -or $back.state -ne 'CLAIMED') { throw "Read-JsonFile 读不回来（state=$($back.state)）" }
+$j = Read-LocalAnchorClaim -KeeperRoot 'D:\soak\keeper-A' -EventId $id
+if (-not $j.reachable) { throw "产品判定为 store unreadable —— 预埋文件 keeper 解析不了，F6 会是假通过" }
+if (-not $j.exists -or [string]$j.record.state -ne 'CLAIMED') {
+    throw "预埋文件没被认成 CLAIMED（reachable=$($j.reachable) exists=$($j.exists) state=$($j.record.state)），锚定不会走 CLAIMED 拦截分支"
+}
 "预埋槽位：$id"     # 记下这一行，下面判据要用
 (Get-Content 'D:\soak\keeper-A\config.json' -Raw) -replace '"anchorOnApply":\s*false','"anchorOnApply": true' | Set-Content 'D:\soak\keeper-A\config.json' -NoNewline
 cd D:\soak\keeper-A; .\apply-config.cmd          # 期望 `Forced anchor : STARTED`
@@ -615,33 +622,41 @@ cd D:\soak\keeper-A; .\apply-config.cmd          # 期望 `Forced anchor : START
 cd D:\soak\keeper-A; .\apply-config.cmd
 ```
 
-> **为什么这两条细节决定 F6 的真假**：
+> **为什么这三条细节决定 F6 的真假**：
 >
 > - **`schema` 与时间戳格式**：keeper 自己写的是整数 `schema = 1`（`anchor-claim.ps1:56`）和
 >   `zzz` 偏移时间戳。预埋成 `'cqk-anchor-claim/1'` 或 `...Z` 不影响本判据（拦截只看
 >   `state` 与 `ownerId`），但会让 F6 结束时的截图/记录与真实残留对不上，事后复盘会误判。
-> - **编码**：PS 5.1 的 `Set-Content` 默认是 **ANSI**，不是「UTF-8 with BOM」；PS 7 默认
->   UTF-8 无 BOM。`Read-JsonFile` 用 `[IO.File]::ReadAllText`（默认 UTF-8 解码）+
->   `ConvertFrom-JsonSafe`——**解析失败或全空白一律返回 `$null`**，于是
->   `Read-LocalAnchorClaim` 落到 `$rec -isnot [hashtable]` → `reachable=$false`
->   （`anchor-claim.ps1:110`）→ `Claim-LocalAnchorEvent` 返回
->   **`'claim store unreadable; fail closed'`**（`:133`）。这是一个**完全不同的拒绝分支**，
->   它同样表现为「锚定没执行」，肉眼极像判据通过，但根本没测到 CLAIMED 拦重跑。
->   显式 `-Encoding UTF8` + 上面的回读自检把这条路堵死（5.1 会写带 BOM 的 UTF-8，
->   `ConvertFrom-Json` 吃得下 BOM；真正读不进来的是 UTF-16，所以别在这条命令前加
->   `| Out-File -Encoding unicode` 之类的改动）。
-> - **尾换行**：加不加都能读回来（空白被 `ConvertFrom-JsonSafe` 容忍），保留只是为了与
->   `Write-AnchorClaimRecordJson`（`:88-93`，UTF8 无 BOM + `[Environment]::NewLine`）字节形态一致。
->   注意别写成 `-NoNewline` 之外还把内容清空——**0 字节文件同上，也走 `claim store unreadable`**。
+> - **编码**：keeper 的本地读路径（`Read-AnchorClaimRecord`，`anchor-claim.ps1:95`：
+>   `File.Open(..., Read, FileShare.ReadWrite)` + `StreamReader(..., detectEncodingFromByteOrderMarks: $true)`
+>   → `ConvertFrom-JsonSafe`）**按 BOM 自动识别编码**：UTF-8 无 BOM、UTF-8 带 BOM（5.1 的
+>   `-Encoding UTF8` 就是这种）、以及 `Out-File -Encoding unicode`（UTF-16 LE **带** BOM）
+>   都读得回来，PS 5.1 与 PS 7 实测一致——所以照抄上面的 `-Encoding UTF8` 不会翻车。
+>   真正会翻车的是**内容不是 keeper 认的那个对象**：文件有字节、但 `state` 读不成
+>   `CLAIMED` 时，两个运行时的表现还**不一样**（手写无 BOM 的 UTF-16 是这类里最阴的：
+>   5.1 报 `claim store unreadable; fail closed`（`:202`，`reachable=$false`，`:135`），
+>   PS 7 却会把 NUL 串解析成键名全是空字符的垃圾 hashtable，文案变成
+>   `event already  (by ); no retry`——两条都不是 CLAIMED 拦重跑，但都表现为
+>   「锚定没执行」，肉眼极像判据通过）。这就是上面回读自检要**直接调产品函数**、
+>   并且判到 `record.state -eq 'CLAIMED'` 与 `record.ownerId` 非空的原因：只测
+>   「读没读回来」抓不到 PS 7 那条。
+> - **尾换行与「别把内容写空」**：加不加尾换行都能读回来（`ConvertFrom-JsonSafe` 会容忍空白），
+>   保留只是为了与 `Write-AnchorClaimRecordJson`（`:88-93`，UTF8 无 BOM + `[Environment]::NewLine`）
+>   字节形态一致。但**别把内容本身写空**：0 字节 / 全空白文件是 keeper 认可的**有效 claim**
+>   ——`CreateNew` 才是互斥步骤，文件存在即已占坑，所以它报
+>   `event already CLAIMED (by ); no retry`（`:203-205`，owner 为**空**）。
+>   这**不会**触发 `claim store unreadable`，因而下面「含 `claim store unreadable` 即不通过」
+>   那条反例判据抓不到它：兜住它的是「`by` 后面必须是 A 机真实 machineId」。空 owner =
+>   你预埋了个空文件，等于没测到 CLAIMED 拦重跑，判据照样**不通过**。
 
 - [ ] **被拦下**：那一轮的锚定没有执行——`anchor-args.txt` **不多一行**（与预埋前的行数相同）。
-      这是主判据，但单独看它**不够**（上面那条编码坑里 `'claim store unreadable; fail closed'`
-      同样表现为不多一行），必须和下面两条一起成立。
+      这是主判据，但单独看它**不够**（上面两条坑里 `'claim store unreadable; fail closed'` 与
+      空 owner 的 `already CLAIMED (by )` 同样表现为不多一行），必须和下面三条一起成立。
 - [ ] `Get-ChildItem 'D:\soak\keeper-A\runtime\anchor-claims' | Measure-Object | % Count`
       **文件数不变**（预埋的那个还在，既没被覆盖也没被删）。
 - [ ] 该 id 的 claim 文件仍是 `state=CLAIMED`、`result` 仍为 `null`
       （`Finalize-LocalAnchorEvent` 只接受 `CLAIMED → 终态`，而拒绝路径根本不会走到它：
-      `Claim-LocalAnchorEvent` 在 `exists` 就直接 return，不创建也不改写：`anchor-claim.ps1:134-136`）。
+      `Claim-LocalAnchorEvent` 在 `exists` 就直接 return，不创建也不改写：`anchor-claim.ps1:203-205`）。
 - [ ] 本地运行日志 `runtime\logs\keeper-*.jsonl` 里那一轮有 **`ANCHOR_ABORTED` 事件名行**
       （`error: null` 是正常的，见 §5：锚定事件只带 `reason` 不带 `message`）。
       **完整原因文本一律去 A 机自己的 `history\events-<日期>.jsonl` 查**——与 historySync 无关，
@@ -649,6 +664,8 @@ cd D:\soak\keeper-A; .\apply-config.cmd
       `event=ANCHOR_ABORTED`、`anchor.phase=CLAIM`、**单数** `anchor.eventId` = 上面记下的 `$id`
       （这一支只有 `phase/eventId/reason` 三个键，没有复数 `eventIds`，`auto-anchor.ps1:153-154`）、
       `error` = `event <id> not claimed: event already CLAIMED (by <A 机 machineId>); no retry`。
+      **`by` 后面必须是 A 机真实 machineId**：空串（`(by );`）说明你预埋的文件是 0 字节/全空白，
+      keeper 走的是「文件存在即占坑、owner 未知」的合成记录分支（见上），同样不算通过。
       按 `anchor.eventId -eq $id` 过滤而不是全文搜 `CLAIMED`，否则会命中上一步你自己写的
       `Read-JsonFile` 打印/别的记录。查询写法：
       ```powershell

@@ -432,6 +432,7 @@ history/
 | 该事件已被占用（多机 CAS 被抢） | `claim push rejected (push-rejected); another machine claimed first` |
 | 该事件已被占用（单机本地文件） | `event already CLAIMED (by a1b2…); no retry` |
 | 崩溃遗留的 CLAIMED | 同上（`event already CLAIMED`）——结果不确定，永不重试、永不老化 |
+| 对端刚抢到坑、字节还没落盘（0 字节/全空白的 claim 文件） | 同上，但 owner 为空：`event already CLAIMED (by ); no retry`（文件存在即已占坑，不再误报为 store unreadable） |
 | 本地 claim 目录读不出来（ACL/卷错误） | `claim store unreadable; fail closed` |
 | 终态写回失败（单机） | `finalize write failed: …`（记录保持 CLAIMED，继续拦住重试） |
 | 认证错误 | `open error present: AUTH_ERROR` |

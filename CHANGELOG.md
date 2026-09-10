@@ -85,6 +85,39 @@
   自定义字段注释掉、取消注释即生效；`.json` 后缀下注释会被编辑器标红，故模板用 `.jsonc`）；
   配置加载器支持 JSONC。
 
+### Fixed
+- **CI 上的行尾与时间戳宿主依赖**（10 处断言，PS 7 与 WinPS 5.1 表现一致，本地全绿而
+  `windows-latest` 全红）：
+  - 新增根目录 `.gitattributes`，只把 `codex-quota-keeper/tests/golden/*.txt` 与
+    `codex-quota-keeper/.gitignore` 钉成 `text eol=lf`。CI 检出按 `core.autocrlf=true`
+    交付 CRLF 副本，而 golden 面板是逐行字节比对（并断言不含 CR）、`.gitignore` 是被
+    `(?m)^tools/dist/?$` 锚定匹配——行尾多一个 CR 就双双失败。**刻意不写 `* text=auto`
+    也不碰 `.cmd` / `.ps1`**：不顺手归一化既有内容，也不给 `.cmd` 换成 LF。
+  - `tests/status-assessment.test.ps1` 里那条 `RUNNER_ERROR` 日志原先手写死 `+08:00`；
+    UTC runner 上按本地时间解析就成了 8 小时前的旧判定，越过 130 分钟的时效阈值翻成
+    `stale-verdict`（视为已恢复），§10 的升级 finding 随之消失。改为经
+    `Write-VerdictLog` + `ConvertTo-IsoString` 带出本机偏移（同文件其余调用一直是这么
+    写的），并给该 helper 补上 `-ErrorText` 参数。
+- **单机 claim 的对端在建瞬间被误判为「存储不可读」**（`tests/anchor-claim.test.ps1`
+  的并发组在 CI 上偶红、本地全绿，PS 7 与 WinPS 5.1 一致——是真竞态不是运行时差异）：
+  赢家走 `FileMode.CreateNew` 独占创建后还要写盘，而读侧此前用 `[IO.File]::ReadAllText`
+  （按 `FileShare.Read` 打开），恰好在对端持有写句柄时抛 sharing violation；写侧
+  `File.Open(path, CreateNew, Write)` 的实际共享模式是 `FileShare.None`（不传参≠`Read`，
+  已用跨进程矩阵实测），所以在 create 与 flush 之间**任何**读者都进不来。于是
+  `Read-LocalAnchorClaim` 把一个健康的对端 claim 报成 `claim store unreadable; fail closed`。
+  修法是让读侧与写侧都能穿过这个窗口，而不是放宽断言：
+  - 读侧改 `File.Open(..., Read, FileShare.ReadWrite)`，并把返回值从「`$null` 或抛异常」
+    扩成三态 `@{read; empty; record}`（访问失败不再抛出跳出重试循环）；
+  - 写侧显式 `FileShare.Read`——`CreateNew` 本身才是互斥步骤（文件已存在必抛，与共享
+    模式无关），放开读句柄不削弱互斥，对端只能观察 claim 成形、仍不能写；
+  - **空文件是有效 claim 而非坏存储**：重试预算耗尽后，0 字节/全空白记录按
+    `event already CLAIMED (by ); no retry` 拒绝（文件存在即已占坑，owner 未知，
+    赢家若死在此处也维持拒绝——at-most-once 守卫的正确 fail-closed 形态）；只有
+    目录/ACL/卷错误、或有字节但永远解析不出的内容才继续报 `claim store unreadable`。
+  新增回归组用跨进程 holder（持有独占创建超过读者全部重试预算）钉死这条路径：回退
+  本次修复即复现 `FAIL: locked-but-valid claim is not called a broken store`。
+  `docs/scenarios.md` §fail-closed 一览与 `docs/soak-runbook.md` F6 的判据/行号引用同步更新。
+
 ### Docs
 - `docs/release-engineering.md`（见 Added）。
 - 新增 `docs/soak-runbook.md` 双机 soak + 故障注入操作单（§21 发布前 DoD 的实机一项）：

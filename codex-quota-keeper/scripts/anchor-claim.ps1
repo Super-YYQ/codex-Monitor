@@ -92,11 +92,53 @@ function Write-AnchorClaimRecordJson {
         (New-Object System.Text.UTF8Encoding($false)))
 }
 
+function Read-AnchorClaimRecord {
+    # Read one claim file into @{ read; empty; record } - the three states the
+    # caller has to tell apart:
+    #   read=false  access denied (dir / ACL / volume)  -> caller fails closed
+    #   empty=true  present but no bytes (0 or whitespace) -> an in-flight
+    #                                                             peer create
+    #   record      a parsed hashtable, else $null
+    #
+    # Deliberately NOT Read-JsonFile. It swallows every exception into $null, so
+    # a transient sharing violation is indistinguishable from a corrupt record
+    # and the caller reports a healthy peer claim as 'claim store unreadable'.
+    # And [IO.File]::ReadAllText is not usable here either: it opens with
+    # FileShare.Read, which denies the Write access of a winner that still holds
+    # the file open, so it throws exactly when a claim is being created. Opening
+    # with FileShare.ReadWrite lets the read through so the caller can judge the
+    # CONTENT instead of mistaking an in-flight peer claim for a broken store.
+    #
+    # Access errors are reported as read=false, not thrown: the retry loop in
+    # Read-LocalAnchorClaim must be able to try again without an exception
+    # jumping past it to the outer catch.
+    param([string]$Path)
+    $res = @{ read = $false; empty = $true; record = $null }
+    $fs = $null
+    $reader = $null
+    try {
+        $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $reader = New-Object System.IO.StreamReader($fs, (New-Object System.Text.UTF8Encoding($false)), $true)
+        $text = $reader.ReadToEnd()
+        $res.read = $true
+        $res.empty = [string]::IsNullOrWhiteSpace($text)
+        if (-not $res.empty) { $res.record = ConvertFrom-JsonSafe $text }
+    } catch {
+        $res.read = $false
+    } finally {
+        # Disposing the reader disposes the stream; only cover the early throw.
+        if ($reader) { $reader.Dispose() } elseif ($fs) { $fs.Dispose() }
+    }
+    return $res
+}
+
 function Read-LocalAnchorClaim {
     # Returns the store-standard shape: @{ reachable; exists; record }.
-    # `reachable` is false only if the claims directory exists but cannot be
-    # enumerated (ACL / volume error) - the local mirror of "remote unavailable",
-    # which callers fail closed on rather than assuming "no claim".
+    # `reachable` is false only when the store cannot be trusted at all - the
+    # claims path is a directory, or the record is non-empty but never parses
+    # (corrupt on purpose, truncated by hand, or a winner that died mid-write).
+    # That is the local mirror of "remote unavailable", which callers fail closed
+    # on rather than assuming "no claim". An EMPTY file is NOT that: see below.
     param([string]$KeeperRoot, [string]$EventId)
     $out = @{ reachable = $true; exists = $false; record = $null }
     $path = Get-AnchorClaimPath -Root $KeeperRoot -EventId $EventId
@@ -106,10 +148,37 @@ function Read-LocalAnchorClaim {
             if (Test-Path -LiteralPath $path -PathType Container) { $out.reachable = $false }
             return $out
         }
-        $rec = Read-JsonFile $path
-        if ($rec -isnot [hashtable]) { $out.reachable = $false; return $out }
-        $out.exists = $true
-        $out.record = $rec
+        # A peer can win the exclusive create a moment before this read, and its
+        # create-then-write is not one atomic disk event: the file may be
+        # observed empty, half-written, or briefly locked. Retry so the normal
+        # case resolves to the real record, and report it as soon as it parses.
+        for ($try = 0; $try -lt 10; $try++) {
+            $read = Read-AnchorClaimRecord $path
+            if ($read.record -is [hashtable]) {
+                $out.exists = $true
+                $out.record = $read.record
+                return $out
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        # The budget ran out without a parsed record. Two very different states
+        # remain, separated by whether ANY bytes landed:
+        #   Empty file (0 bytes / whitespace only): some process won CreateNew and
+        #     has written nothing yet. CreateNew is the exclusive step, so the
+        #     file's existence already IS the claim regardless of content - it is
+        #     not a broken store. Report it as a live CLAIMED with an unknown
+        #     owner. Even a winner that died here stays denied, which is the
+        #     correct fail-closed outcome for an at-most-once guard (the eventId
+        #     is per-day, so it costs at most today's one anchor, and the empty
+        #     artifact is left for the operator).
+        #   Non-empty but unparseable: torn or hand-edited content that will never
+        #     resolve. Fail closed as 'claim store unreadable'.
+        if ($read.read -and $read.empty) {
+            $out.exists = $true
+            $out.record = @{ state = 'CLAIMED'; ownerId = '' }
+            return $out
+        }
+        $out.reachable = $false
     } catch {
         $out.reachable = $false
     }
@@ -139,7 +208,14 @@ function Claim-LocalAnchorEvent {
         -OwnerId ([string]$Machine.machineId) -ClaimMinutes $ClaimMinutes
     try {
         Ensure-Directory (Split-Path -Parent $path) | Out-Null
-        $fs = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write)
+        # FileShare.Read, not the default: File.Open(mode, access) keeps
+        # FileShare.None, so while the winner is between create and flush NO peer
+        # can open the file at all - every loser reads 'unreadable' instead of
+        # 'already CLAIMED'. Sharing a read handle does not weaken the lock:
+        # FileMode.CreateNew is the exclusive step (it throws on an existing
+        # file whatever the share mode says), and peers still cannot open for
+        # write. They can only observe the claim forming.
+        $fs = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
         try {
             $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes(
                 (ConvertTo-AnchorClaimRecordJson $record) + [Environment]::NewLine)

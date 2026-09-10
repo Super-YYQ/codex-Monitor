@@ -426,6 +426,57 @@ exit 0
     Assert-Equal $okRacers[0].MachineId $recH.ownerId 'no torn record: the file owner is the winning process'
 
     # =====================================================================
+    Start-TestGroup 'claim: a peer mid-create is "already CLAIMED", never "store unreadable"'
+    # Group 8 only crosses the create-then-write window by luck. Here a peer
+    # holds the exclusive create open PAST this process' whole retry budget, so
+    # the file exists, is locked, and holds no content for the entire read
+    # window. That is precisely the state that used to be reported as a broken
+    # store - the misleading denial both frightens the operator and hides the
+    # real 'event already CLAIMED'. Mutual exclusion is unchanged either way, so
+    # nothing else in the suite can see this regression.
+    $rootH2 = Join-Path $ws 'race-held'
+    New-Item -ItemType Directory -Path $rootH2 -Force | Out-Null
+    $evH2 = Get-Sha256Hex 'held|1'
+    $heldDir = Join-Path $ws 'holder'
+    $null = Ensure-Directory $heldDir
+    $holderScript = @'
+param([string]$Path, [string]$Signal, [int]$HoldMs)
+$ErrorActionPreference = 'Stop'
+# Same exclusive create the product performs, held open before any byte lands.
+$fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
+try {
+    [System.IO.File]::WriteAllText($Signal, 'go')
+    Start-Sleep -Milliseconds $HoldMs
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes('{"schema":1,"state":"CLAIMED","ownerId":"HOLDER"}' + [Environment]::NewLine)
+    $fs.Write($bytes, 0, $bytes.Length)
+} finally { $fs.Dispose() }
+'@
+    $holderFile = Join-Path $heldDir 'holder.ps1'
+    [System.IO.File]::WriteAllText($holderFile, $holderScript, (New-Object System.Text.UTF8Encoding($false)))
+    $pathH2 = Get-AnchorClaimPath -Root $rootH2 -EventId $evH2
+    # The holder is a bare probe, not the product: it has no Ensure-Directory in
+    # it, so the claims dir must already exist or its CreateNew dies on a missing
+    # directory and the signal file never appears.
+    $null = Ensure-Directory (Split-Path -Parent $pathH2)
+    $signalH2 = Join-Path $heldDir 'signal'
+    $psiH2 = New-Object System.Diagnostics.ProcessStartInfo
+    $psiH2.FileName = $pwsh
+    # 2000ms outruns the reader's ~1s retry budget on purpose: a fix that merely
+    # waits out a short window would not survive this.
+    $psiH2.Arguments = ('-NoProfile -ExecutionPolicy Bypass -File "{0}" -Path "{1}" -Signal "{2}" -HoldMs 2000' -f $holderFile, $pathH2, $signalH2)
+    $psiH2.UseShellExecute = $false
+    $psiH2.CreateNoWindow = $true
+    $holder = [System.Diagnostics.Process]::Start($psiH2)
+    $deadline = (Get-Date).AddSeconds(30)
+    while ((Get-Date) -lt $deadline -and -not (Test-Path -LiteralPath $signalH2)) { Start-Sleep -Milliseconds 20 }
+    $held = Claim-AnchorClaim -KeeperRoot $rootH2 -EventId $evH2 -Machine $machine -ClaimMinutes 20 -LocalOnly $true
+    $whyH2 = Get-ReasonText $held
+    $holder.WaitForExit(); $holder.Dispose()
+    Assert-False $held.ok 'a live peer claim still denies (never a second winner)'
+    Assert-True ($whyH2 -notmatch 'unreadable') "locked-but-valid claim is not called a broken store (got: $whyH2)"
+    Assert-True ($whyH2 -match 'already CLAIMED') "denial names the peer claim (got: $whyH2)"
+
+    # =====================================================================
     Start-TestGroup 'claim: unified face routes by backing, both say it in the same words'
 
     $coordRoot = $null

@@ -150,6 +150,14 @@ base 的祖先，产生的 merge commit 不是 force update，`non_fast_forward`
   在任何机器上打出的 ZIP SHA256 相同**（可复现构建，已由测试验证：重复构建
   哈希逐字节一致）。`Compress-Archive` 会嵌入打包时刻的 mtime，哈希不可复现。
 
+> 注意 `git archive` 取的是 **blob**，不受检出时的 `core.autocrlf` 影响；受影响的是
+> **测试读工作树**那一路。根目录 `.gitattributes` 只把两类文件钉成 `text eol=lf`——
+> `tests/golden/*.txt`（§17.2 面板逐行字节比对）与 `codex-quota-keeper/.gitignore`
+> （被 `(?m)^tools/dist/?$` 锚定匹配）——因为 `windows-latest` 的检出等同
+> `core.autocrlf=true`，多出的 CR 会让这两处断言在 CI 上必红（已踩过，见
+> CHANGELOG「CI 上的行尾与时间戳宿主依赖」）。没有写 `* text=auto`，也不碰
+> `.cmd` / `.ps1`：既有内容不做归一化，`.cmd` 换成 LF 是真实回归风险。
+
 ### 3.2 用法
 
 ```powershell
