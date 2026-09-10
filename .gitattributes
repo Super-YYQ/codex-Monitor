@@ -1,0 +1,19 @@
+# Line-ending contract for files whose BYTES are the assertion.
+#
+# Windows CI runners (actions/checkout) and most Windows dev boxes behave like
+# core.autocrlf=true, which hands out CRLF copies of LF blobs at checkout time.
+# That silently breaks exact comparisons, so anything compared byte-for-byte or
+# line-anchored is pinned to LF here instead of being left to whatever each
+# machine happens to have configured.
+#
+# Deliberately narrow: no `* text=auto` and no blanket rules, so adding this
+# file cannot renormalize existing content. .cmd/.ps1 keep following the user's
+# core.autocrlf (a .cmd with LF endings is a real regression risk on Windows).
+
+# §17.2 golden Status panels - tests/status-display.test.ps1 diffs them line by
+# line and asserts they contain no CR.
+codex-quota-keeper/tests/golden/*.txt text eol=lf
+
+# The packager's gate reads this file with an anchored ^...$ regex
+# (tests/build-release.test.ps1), so a CR at line end breaks the match.
+codex-quota-keeper/.gitignore text eol=lf

@@ -63,11 +63,16 @@ function Get-KeeperHiddenLauncherSpec {
     if (-not $pwsh) { throw 'no PowerShell executable found for the task action' }
     $wscript = Get-KeeperWscriptPath
     if (-not $wscript) { throw 'wscript.exe not found for hidden task launch' }
-    $runner = Join-Path (Get-KeeperRoot $KeeperRoot) 'scripts\runner.ps1'
-    $inner = ('"{0}" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{1}"' -f $pwsh, $runner)
-    if ($ForceAnchorSwitch) {
-        $inner = ('{0} -KeeperRoot "{1}" -ConfigFile "{2}" -ForceAnchor' -f $inner, (Get-KeeperRoot $KeeperRoot), $ConfigFile)
-    }
+    $root = Get-KeeperRoot $KeeperRoot
+    $runner = Join-Path $root 'scripts\runner.ps1'
+    # CQK-022: pin the exact config file the installer validated against into the
+    # task command line. Without -ConfigFile the scheduled runner silently falls
+    # back to <KeeperRoot>\config.json, so a custom -ConfigFile would be honored
+    # once at install time and ignored on every poll afterwards.
+    if (-not $ConfigFile) { $ConfigFile = Get-ConfigPath $root }
+    $inner = ('"{0}" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{1}" -KeeperRoot "{2}" -ConfigFile "{3}"' -f `
+        $pwsh, $runner, $root, [System.IO.Path]::GetFullPath($ConfigFile))
+    if ($ForceAnchorSwitch) { $inner = "$inner -ForceAnchor" }
     $name = if ($ForceAnchorSwitch) { 'hidden-launch-forced-anchor.vbs' } else { 'hidden-launch.vbs' }
     $vbsPath = Write-KeeperHiddenLauncherVbs -KeeperRoot $KeeperRoot -InnerCommand $inner -Name $name
     return @{ exe = $wscript; arguments = '"{0}"' -f $vbsPath; vbsPath = $vbsPath; innerCommand = $inner }
@@ -77,12 +82,12 @@ function New-KeeperTaskParameters {
     # Builds the Register-/Set-ScheduledTask parameter objects. Pure construction
     # (no registration) so tests can inspect trigger/settings without touching
     # the real Task Scheduler.
-    param([hashtable]$Config, [string]$KeeperRoot)
+    param([hashtable]$Config, [string]$KeeperRoot, [string]$ConfigFile = '')
     $runner = Join-Path (Get-KeeperRoot $KeeperRoot) 'scripts\runner.ps1'
 
     # wscript + generated .vbs: keeps the console hidden from creation (no flash
     # on every scheduled run, unlike launching powershell.exe directly).
-    $launcher = Get-KeeperHiddenLauncherSpec -KeeperRoot $KeeperRoot
+    $launcher = Get-KeeperHiddenLauncherSpec -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile
     $action = New-ScheduledTaskAction -Execute $launcher.exe `
         -Argument $launcher.arguments `
         -WorkingDirectory (Get-KeeperRoot $KeeperRoot)
@@ -100,7 +105,10 @@ function New-KeeperTaskParameters {
 
     $settingsParams = @{
         MultipleInstances           = 'IgnoreNew'
-        ExecutionTimeLimit          = (New-TimeSpan -Minutes 15)
+        # CQK-031: derived from the config, not a fixed 15 min. A large
+        # queryTimeoutSeconds (or an AutoAnchor exec) needs more than 15 min; a
+        # short poll must not be swamped by a limit that outlives the next trigger.
+        ExecutionTimeLimit          = (Get-KeeperTaskExecutionTimeLimit $Config).timeSpan
         StartWhenAvailable          = $true
         AllowStartIfOnBatteries     = $true
         DontStopIfGoingOnBatteries  = $true
@@ -117,8 +125,29 @@ function New-KeeperTaskParameters {
         Trigger   = $triggers
         Settings  = $settings
         Principal = $principal
-        Description = 'Codex Quota Keeper: scheduled read-only Codex quota polling (MonitorOnly). One-shot runner, never resident.'
+        # CQK-032: the description shown in Task Scheduler has to state what the
+        # task actually does. Hardcoding "MonitorOnly" told AutoAnchor users their
+        # task was read-only polling, which is the one thing the experimental
+        # anchoring mode is not.
+        Description = Get-KeeperTaskDescription -Config $Config
     }
+}
+
+function Get-KeeperTaskDescription {
+    # One line for the Task Scheduler UI, derived from the effective behaviour:
+    # mode + whether anchoring is really armed (mode=AutoAnchor alone is not
+    # enough - the runner only anchors when codex.autoAnchor.enabled=true). The
+    # configured mode is echoed either way, so a mode=AutoAnchor config with
+    # anchoring disarmed reads as "polling only, AutoAnchor mode" instead of
+    # claiming a mode the config does not have.
+    param([hashtable]$Config)
+    $mode = if ($Config) { [string]$Config.mode } else { 'MonitorOnly' }
+    if ([string]::IsNullOrWhiteSpace($mode)) { $mode = 'MonitorOnly' }
+    $anchoring = ($mode -eq 'AutoAnchor') -and (Test-AutoAnchorEnabled $Config)
+    if ($anchoring) {
+        return 'Codex Quota Keeper: scheduled Codex quota polling + EXPERIMENTAL auto-anchoring (AutoAnchor). One-shot runner, never resident.'
+    }
+    return "Codex Quota Keeper: scheduled read-only Codex quota polling (mode=$mode). One-shot runner, never resident."
 }
 
 function Get-ForcedAnchorLaunchSpec {
@@ -157,8 +186,8 @@ function Invoke-ForcedAnchorIfRequested {
 }
 
 function Register-KeeperTask {
-    param([hashtable]$Config, [string]$KeeperRoot)
-    $tp = New-KeeperTaskParameters -Config $Config -KeeperRoot $KeeperRoot
+    param([hashtable]$Config, [string]$KeeperRoot, [string]$ConfigFile = '')
+    $tp = New-KeeperTaskParameters -Config $Config -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile
     Register-ScheduledTask -TaskName $tp.TaskName `
         -Action $tp.Action -Trigger $tp.Trigger -Settings $tp.Settings `
         -Principal $tp.Principal -Description $tp.Description -Force | Out-Null
@@ -204,7 +233,7 @@ function Invoke-KeeperInstall {
 
     # 4/5. Register the per-user scheduled task.
     $loaded = Load-Config $ConfigFile
-    $taskName = Register-KeeperTask -Config $loaded.config -KeeperRoot $KeeperRoot
+    $taskName = Register-KeeperTask -Config $loaded.config -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile
     $forcedAnchor = Invoke-ForcedAnchorIfRequested -Config $loaded.config -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile
 
     return @{ ok = $true; issues = @(); taskName = $taskName; machine = $pf.machine; probe = $probe; codexPath = $pf.codexPath; forcedAnchor = $forcedAnchor }

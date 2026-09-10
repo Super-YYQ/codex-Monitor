@@ -3,6 +3,29 @@
 ## Unreleased
 
 ### Added
+- **发布打包流程（CQK-035）**：新增 `codex-quota-keeper/tools/build-release.ps1`——从
+  `git archive <commit>` 直接构建发布 ZIP（只包含已提交文件，「不打包本机状态」是结构性
+  保证；blob 字节与入口时间戳取自 commit，同一 commit 重复构建 SHA256 一致），写入
+  GNU `sha256sum` 格式的 SHA256SUMS.txt 并回读自检。内置门禁：工作树脏检查（仅限打包前缀）、
+  仓库级 secret scan、禁止条目（runtime/ / history/ / config.json / .env / .pem / .key /
+  .pfx / .git/）与必需条目（runner.ps1 / install.cmd / config.example.jsonc / README.md）
+  双向检查；`-VerifyOnly` 只校验既有产物。脚本不发布任何东西，`gh release create` 命令仅
+  打印供人工执行。runbook 见 `docs/release-engineering.md`（含 CQK-034 只读检查结论与
+  Ruleset 建议）。
+- 新增 `codex-quota-keeper/tools/build-release.ps1` 的回归测试
+  `tests/build-release.test.ps1`（10 组）：在一次性 git 仓库里驱动完整构建，覆盖禁入/
+  必需条目门禁、SHA256SUMS 各种真实格式解析、篡改/缺失检测、版本从 commit 读取、
+  可复现构建、脏树门禁、本机状态拒载与 secret 门禁联动。
+- `docs/release-engineering.md`：GitHub 仓库安全配置现状、main 分支保护 Ruleset
+  （`main-protection`，2026-09-09 经用户授权启用并读回核对：禁 force push / 禁删除 +
+  5 个真实 required check context、bypass 为空；**实测**该规则同样拦直接
+  `git push main`——GH013「5 of 5 required status checks are expected」，本文档早先
+  「只拦合并」的说法按实测纠正，日常落 `main` 须走分支 + PR + CI 绿 + 合并；含
+  ruleset API 的 payload 坑位与可原样重建的 JSON）、发布 runbook、
+  §21 发布前 DoD 对照表。secret scanning 相关设置在 push 前复核时端点返回 404，
+  按「读不到即 Unknown、不自行开关」如实标注，未对任何平台配置做额外改动。
+
+### Changed
 - AutoAnchor 新增**执行模型与思考等级配置**（`codex.autoAnchor.model` /
   `codex.autoAnchor.reasoningEffort`，默认均为空）：配置后锚定执行的
   `codex exec` 分别透传 `-m <model>` 与 `-c model_reasoning_effort=<effort>`；
@@ -62,7 +85,52 @@
   自定义字段注释掉、取消注释即生效；`.json` 后缀下注释会被编辑器标红，故模板用 `.jsonc`）；
   配置加载器支持 JSONC。
 
+### Fixed
+- **CI 上的行尾与时间戳宿主依赖**（10 处断言，PS 7 与 WinPS 5.1 表现一致，本地全绿而
+  `windows-latest` 全红）：
+  - 新增根目录 `.gitattributes`，只把 `codex-quota-keeper/tests/golden/*.txt` 与
+    `codex-quota-keeper/.gitignore` 钉成 `text eol=lf`。CI 检出按 `core.autocrlf=true`
+    交付 CRLF 副本，而 golden 面板是逐行字节比对（并断言不含 CR）、`.gitignore` 是被
+    `(?m)^tools/dist/?$` 锚定匹配——行尾多一个 CR 就双双失败。**刻意不写 `* text=auto`
+    也不碰 `.cmd` / `.ps1`**：不顺手归一化既有内容，也不给 `.cmd` 换成 LF。
+  - `tests/status-assessment.test.ps1` 里那条 `RUNNER_ERROR` 日志原先手写死 `+08:00`；
+    UTC runner 上按本地时间解析就成了 8 小时前的旧判定，越过 130 分钟的时效阈值翻成
+    `stale-verdict`（视为已恢复），§10 的升级 finding 随之消失。改为经
+    `Write-VerdictLog` + `ConvertTo-IsoString` 带出本机偏移（同文件其余调用一直是这么
+    写的），并给该 helper 补上 `-ErrorText` 参数。
+- **单机 claim 的对端在建瞬间被误判为「存储不可读」**（`tests/anchor-claim.test.ps1`
+  的并发组在 CI 上偶红、本地全绿，PS 7 与 WinPS 5.1 一致——是真竞态不是运行时差异）：
+  赢家走 `FileMode.CreateNew` 独占创建后还要写盘，而读侧此前用 `[IO.File]::ReadAllText`
+  （按 `FileShare.Read` 打开），恰好在对端持有写句柄时抛 sharing violation；写侧
+  `File.Open(path, CreateNew, Write)` 的实际共享模式是 `FileShare.None`（不传参≠`Read`，
+  已用跨进程矩阵实测），所以在 create 与 flush 之间**任何**读者都进不来。于是
+  `Read-LocalAnchorClaim` 把一个健康的对端 claim 报成 `claim store unreadable; fail closed`。
+  修法是让读侧与写侧都能穿过这个窗口，而不是放宽断言：
+  - 读侧改 `File.Open(..., Read, FileShare.ReadWrite)`，并把返回值从「`$null` 或抛异常」
+    扩成三态 `@{read; empty; record}`（访问失败不再抛出跳出重试循环）；
+  - 写侧显式 `FileShare.Read`——`CreateNew` 本身才是互斥步骤（文件已存在必抛，与共享
+    模式无关），放开读句柄不削弱互斥，对端只能观察 claim 成形、仍不能写；
+  - **空文件是有效 claim 而非坏存储**：重试预算耗尽后，0 字节/全空白记录按
+    `event already CLAIMED (by ); no retry` 拒绝（文件存在即已占坑，owner 未知，
+    赢家若死在此处也维持拒绝——at-most-once 守卫的正确 fail-closed 形态）；只有
+    目录/ACL/卷错误、或有字节但永远解析不出的内容才继续报 `claim store unreadable`。
+  新增回归组用跨进程 holder（持有独占创建超过读者全部重试预算）钉死这条路径：回退
+  本次修复即复现 `FAIL: locked-but-valid claim is not called a broken store`。
+  `docs/scenarios.md` §fail-closed 一览与 `docs/soak-runbook.md` F6 的判据/行号引用同步更新。
+
 ### Docs
+- `docs/release-engineering.md`（见 Added）。
+- 新增 `docs/soak-runbook.md` 双机 soak + 故障注入操作单（§21 发布前 DoD 的实机一项）：
+  零额度、零真实仓库的整套夹具——`codex.command` 指向包装 `tests/fixtures/mock-appserver.ps1`
+  的 `D:\soak\bin\codex.cmd`、本地裸仓库充当协调/日志仓库、`anchor-args.txt` 作为模型调用
+  次数的唯一地面真值；含 4 小时挂机正常路径、F1~F7 七个故障注入（429、传输层故障不误判、
+  Git 断网、history push 失败、锚定执行失败、crash claim、租约接管）与判定表/记录区，
+  每条判据都标注了它在实机上的落盘位置（`state.json` / `keeper-*.jsonl` /
+  `history\events-*.jsonl` / 远端 blob）与 grep 形态。
+- `codex-quota-keeper/README.md`「快速开始」补充从 Release 下载与校验 ZIP 的说明；补 `status.ps1`
+  参数表（`-Live` / `-Detailed` / `-Language en-US` / `-NoColor` / `-KeeperRoot` / `-ConfigFile`，
+  日常入口 `status.cmd` 不转发参数）；`queryTimeoutSeconds` 上限（180 秒）与派生计划任务时限
+  （`Get-KeeperTaskExecutionTimeLimit`，CQK-031）文档同步。
 - 新增 `docs/scenarios.md` 场景详解页：每个仓库处理场景（首次轮询、空闲判定、窗口重置、
   keepalive、每日定时、立即触发、Leader 租约、集群退避、history 推送、fail-closed 一览）
   配真实格式的模拟数据（state.json / lease.json / backoff.json / history 事件文件 /

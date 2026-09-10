@@ -22,7 +22,10 @@ $ws = New-TestWorkspace
 try {
     $keeperRoot = Join-Path $ws 'keeper'
     New-Item -ItemType Directory -Path $keeperRoot -Force | Out-Null
-    $cfgFile = Join-Path $keeperRoot 'config.json'
+    # CQK-022: deliberately a custom (non-default) config name - the default
+    # fallback path <KeeperRoot>\config.json does not exist in this workspace,
+    # so any code path that drops -ConfigFile is caught by these tests.
+    $cfgFile = Join-Path $keeperRoot 'custom-config.json'
 
     function New-Cfg {
         param([int]$Poll = 15)
@@ -30,7 +33,10 @@ try {
             task   = @{ name = $taskName; startWithWindows = $true; runIfNetworkAvailable = $true; wakeToRun = $false }
             github = @{ coordination = @{ enabled = $false }; historySync = @{ enabled = $false } }
             codex  = @{ command = $mockPath; queryTimeoutSeconds = 10; autoAnchor = $false }
-            poll = @{ intervalMinutes = $Poll; minimumIntervalMinutes = 5 }
+            poll   = @{ intervalMinutes = $Poll; minimumIntervalMinutes = 5 }
+            # CQK-021: lease TTL must satisfy >= max(2*poll, poll+grace+jitter).
+            # Keep a 3x margin so every poll value here stays valid.
+            leader = @{ leaseTtlMinutes = [Math]::Max(45, 3 * $Poll) }
         }
     }
     $null = Write-TestConfigFile $cfgFile (New-Cfg 15)
@@ -38,7 +44,7 @@ try {
     Start-TestGroup 'install: task definition objects'
 
     $cfg15 = New-Cfg 15
-    $tp = New-KeeperTaskParameters -Config $cfg15 -KeeperRoot $keeperRoot
+    $tp = New-KeeperTaskParameters -Config $cfg15 -KeeperRoot $keeperRoot -ConfigFile $cfgFile
     Assert-Equal $taskName $tp.TaskName 'task name from config'
     Assert-True ("$($tp.Action.Execute)" -match 'wscript') 'action launches via wscript (windowless host, no console flash)'
     Assert-True ("$($tp.Action.Arguments)" -match 'hidden-launch\.vbs') 'action points at the generated hidden-launch.vbs'
@@ -47,11 +53,97 @@ try {
     Assert-True ("$vbsContent" -match '-NoProfile') 'vbs uses -NoProfile'
     Assert-True ("$vbsContent" -match 'WindowStyle Hidden') 'vbs hides console window (no popup on scheduled run)'
     Assert-True ("$vbsContent" -match '", 0, False') 'vbs Run uses window style 0 (hidden from creation)'
+    # CQK-022: the custom config path must be baked into the scheduled command,
+    # otherwise every poll silently falls back to <KeeperRoot>\config.json.
+    Assert-True ("$vbsContent" -match '-ConfigFile') 'vbs passes -ConfigFile (custom config survives polling)'
+    Assert-True ("$vbsContent" -match [regex]::Escape([System.IO.Path]::GetFullPath($cfgFile))) 'vbs carries the exact custom config path'
+    Assert-True ("$vbsContent" -match '-KeeperRoot') 'vbs pins -KeeperRoot'
+    Assert-True ("$vbsContent" -notmatch '-ForceAnchor') 'scheduled poll vbs does not force an anchor'
     Assert-Equal (Join-Path $keeperRoot '') "$($tp.Action.WorkingDirectory)\" 'working directory pinned to project'
     $onceTrigger = @($tp.Trigger)[0]
     Assert-Equal 15 (Get-TaskIntervalMinutes $onceTrigger) 'repetition interval from config'
     Assert-Equal 'IgnoreNew' "$($tp.Settings.MultipleInstances)" 'no overlapping instances'
     Assert-Equal 'Interactive' "$($tp.Principal.LogonType)" 'per-user interactive, no admin'
+
+    Start-TestGroup 'install: ExecutionTimeLimit derived from the config (CQK-031)'
+
+    # The ScheduledTask CimInstance exposes ExecutionTimeLimit as an ISO 8601
+    # duration string (PT10M), not a TimeSpan - so TotalMinutes is never set and
+    # the assertions have to parse it back.
+    function Get-TestTaskLimitMinutes {
+        param($Settings)
+        $raw = "$($Settings.ExecutionTimeLimit)"
+        if ([string]::IsNullOrWhiteSpace($raw)) { return 0 }
+        return [int][System.Xml.XmlConvert]::ToTimeSpan($raw).TotalMinutes
+    }
+
+    # New-Cfg 15 -> 10 s timeout, no proxy, no remote: a 20 s budget, so the
+    # 10-minute floor decides. The old hardcoded 15 min must not come back.
+    Assert-Equal 10 (Get-TestTaskLimitMinutes $tp.Settings) 'defaults get the 10-minute floor, not the old fixed 15'
+    Assert-Equal (Get-KeeperTaskExecutionTimeLimit $cfg15).minutes (Get-TestTaskLimitMinutes $tp.Settings) 'task limit equals the derived limit (single source of truth)'
+
+    # A big timeout needs more room than the floor: 180 s x 2 waits x 2 proxy
+    # attempts = 720 s -> 12 min, and a 60-minute poll leaves it uncapped.
+    $cfgBig = New-Cfg 60
+    $cfgBig.codex.queryTimeoutSeconds = 180
+    $cfgBig.codex.proxy = 'http://proxy.invalid:7890'
+    $tpBig = New-KeeperTaskParameters -Config $cfgBig -KeeperRoot $keeperRoot -ConfigFile $cfgFile
+    Assert-Equal 12 (Get-TestTaskLimitMinutes $tpBig.Settings) 'max timeout + proxy raises the limit to the budget'
+    Assert-False (Get-KeeperTaskExecutionTimeLimit $cfgBig).cappedByPoll 'a 60-minute poll has room for that budget'
+
+    # Tight poll: the clamp (poll - 2) wins over the budget so a hung runner cannot
+    # swallow the next trigger. Legal config (budget 12 min <= poll 13), just no
+    # margin left - which is why the status panel reports cappedByPoll as a warning.
+    $cfgTight = New-Cfg 13
+    $cfgTight.codex.queryTimeoutSeconds = 180
+    $cfgTight.codex.proxy = 'http://proxy.invalid:7890'
+    Assert-Equal 0 @(Test-ConfigShape $cfgTight).Count 'a 12-minute budget inside a 13-minute poll is valid'
+    $limTight = Get-KeeperTaskExecutionTimeLimit $cfgTight
+    Assert-Equal 11 $limTight.minutes 'limit clamped to poll - 2 min'
+    Assert-True $limTight.cappedByPoll 'clamp reported for the status panel'
+    Assert-Equal 11 (Get-TestTaskLimitMinutes (New-KeeperTaskParameters -Config $cfgTight -KeeperRoot $keeperRoot -ConfigFile $cfgFile).Settings) 'installed settings carry the clamped limit'
+
+    # One poll shorter and the same config becomes hard invalid: the install layer
+    # must not be able to register it quietly.
+    $cfgOver = New-Cfg 11
+    $cfgOver.codex.queryTimeoutSeconds = 180
+    $cfgOver.codex.proxy = 'http://proxy.invalid:7890'
+    Assert-True (@(Test-ConfigShape $cfgOver).Count -ge 1) 'budget overrunning the poll is a config error, not a silent clamp'
+
+    # A remote-syncing MonitorOnly config: 20 s read + 240 s git = 260 s, still
+    # under the floor, so coordination alone never inflates the limit.
+    $cfgSync = New-Cfg 15
+    $cfgSync.github = @{ coordination = @{ enabled = $true; repoPath = 'R:\repo' }; historySync = @{ enabled = $false } }
+    Assert-Equal 260 (Get-CodexTickBudgetSeconds $cfgSync) 'sync budget = read + git'
+    Assert-Equal 10 (Get-TestTaskLimitMinutes (New-KeeperTaskParameters -Config $cfgSync -KeeperRoot $keeperRoot -ConfigFile $cfgFile).Settings) 'sync still fits the floor'
+
+    Start-TestGroup 'install: task description follows the effective mode (CQK-032)'
+
+    Assert-True ($tp.Description -match 'mode=MonitorOnly') 'default description names the read-only mode'
+    Assert-True ($tp.Description -match 'read-only') 'default description promises read-only polling'
+    Assert-True ($tp.Description -notmatch 'EXPERIMENTAL') 'MonitorOnly description does not mention anchoring'
+    Assert-Equal (Get-KeeperTaskDescription -Config $cfg15) $tp.Description 'description comes from the shared helper'
+
+    # mode=AutoAnchor alone is not enough - the runner only anchors when
+    # codex.autoAnchor.enabled=true, so the description must not claim anchoring.
+    # The configured mode is still echoed, so it does not claim MonitorOnly either.
+    $cfgModeOnly = New-Cfg 15
+    $cfgModeOnly.mode = 'AutoAnchor'
+    $descModeOnly = Get-KeeperTaskDescription -Config $cfgModeOnly
+    Assert-True ($descModeOnly -match 'read-only') 'mode=AutoAnchor with autoAnchor off described as polling only'
+    Assert-True ($descModeOnly -match 'mode=AutoAnchor') 'disarmed AutoAnchor mode still echoed, not mislabelled'
+    Assert-True ($descModeOnly -notmatch 'EXPERIMENTAL') 'no EXPERIMENTAL wording while anchoring is disarmed'
+
+    $cfgArmed = New-Cfg 15
+    $cfgArmed.mode = 'AutoAnchor'
+    $cfgArmed.codex.autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; keepaliveIntervalMinutes = 240 }
+    $descArmed = Get-KeeperTaskDescription -Config $cfgArmed
+    Assert-True ($descArmed -match 'EXPERIMENTAL') 'armed AutoAnchor is flagged EXPERIMENTAL'
+    Assert-True ($descArmed -match 'auto-anchoring') 'armed description says what the task now also does'
+    Assert-True ($descArmed -notmatch 'read-only') 'armed description drops the read-only claim'
+    $tpArmed = New-KeeperTaskParameters -Config $cfgArmed -KeeperRoot $keeperRoot -ConfigFile $cfgFile
+    Assert-Equal $descArmed $tpArmed.Description 'registered parameters carry the mode-derived description'
+    Assert-True ($tpArmed.Description.Length -le 255) 'description fits the Task Scheduler length limit'
 
     Start-TestGroup 'install: full registration with read-only probe'
 
@@ -67,6 +159,10 @@ try {
     Assert-True ($task.State -ne 'Disabled') 'task enabled'
     $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
     Assert-NotNull $info 'task info readable'
+    # CQK-022 end-to-end: after a real install with a custom -ConfigFile, the
+    # generated launcher VBS must point the scheduled runner at that same file.
+    $installedVbs = [System.IO.File]::ReadAllText((Join-Path $keeperRoot 'runtime\hidden-launch.vbs'))
+    Assert-True ("$installedVbs" -match [regex]::Escape([System.IO.Path]::GetFullPath($cfgFile))) 'installed task vbs pins the custom config path'
 
     Start-TestGroup 'install: anchorOnApply decides the forced anchor launch'
 
@@ -78,6 +174,7 @@ try {
     $forcedVbs = [System.IO.File]::ReadAllText("$($spec.vbsPath)")
     Assert-True ("$forcedVbs" -match 'runner\.ps1') 'spec vbs runs runner.ps1'
     Assert-True ("$forcedVbs" -match '\-ForceAnchor') 'spec vbs passes -ForceAnchor'
+    Assert-True ("$forcedVbs" -match [regex]::Escape([System.IO.Path]::GetFullPath($cfgFile))) 'spec vbs passes the custom config path'
     Assert-True ("$forcedVbs" -match 'WindowStyle Hidden') 'spec vbs hides the console window'
 
     $specOff = Get-ForcedAnchorLaunchSpec -Config (New-Cfg 15) -KeeperRoot $keeperRoot -ConfigFile $cfgFile
@@ -97,6 +194,9 @@ try {
     $task30 = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     $minutes = Get-TaskIntervalMinutes $task30
     Assert-Equal 30 $minutes 'task trigger now 30 minutes'
+    # CQK-022: apply-config re-registers the task - the vbs must keep the config path.
+    $vbs30 = [System.IO.File]::ReadAllText((Join-Path $keeperRoot 'runtime\hidden-launch.vbs'))
+    Assert-True ("$vbs30" -match [regex]::Escape([System.IO.Path]::GetFullPath($cfgFile))) 'vbs still pins the custom config after apply-config'
 
     Start-TestGroup 'apply-config: below-floor interval rejected'
 

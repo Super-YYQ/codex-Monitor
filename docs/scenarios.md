@@ -235,6 +235,65 @@ sequenceDiagram
 
 （`ownerLabel` 默认不写：`logging.includeMachineLabel=false`，隐私默认关闭。）
 
+### 5.1 锚定的至多一次保证（统一 Claim，CQK-023）
+
+§2.1 / §2.3 的每个 `CLI 一次` 前面都有一步**先落盘的 CLAIMED**：无论单机还是有
+Private 仓库，都在 `codex exec` **之前**原子写入同一种记录，无论后面是崩在 exec
+里还是 COMPLETED 没推出去，这个 eventId 都不会被重试。
+
+| | 存储位置 | 原子手段 | 被拒原因文本 |
+|---|---|---|---|
+| 多机（`github.coordination.enabled`） | `coordination/events/<eventId>.json` | Git CAS push（`ParentCommit`） | `claim push rejected (…); another machine claimed first` |
+| 单机（LOCAL_ONLY） | `runtime/anchor-claims/<eventId>.json` | `FileMode.CreateNew` | `event already CLAIMED (by …); no retry` |
+
+两个 backing 的记录形状、字段顺序、状态机完全一致
+（`schema/eventId/state/ownerId/claimedAt/claimExpiresAt/completedAt/result`），只是命名空间
+不同；同一台机器由选举结果只会落在其中一个上。
+
+```mermaid
+sequenceDiagram
+    participant A as Home PC（无 coordination）
+    participant C as runtime/anchor-claims
+    participant X as codex exec
+    A->>C: 11:00 CreateNew CLAIMED（TTL=4min，claim 时长=执行窗口×2）
+    A->>X: "Reply exactly OK."
+    Note over A,X: 11:02 进程被 kill / 蓝屏 / 断电
+    A->>A: 12:00 计划任务下一个滴答，idle 槽位仍是同一 eventId
+    A->>C: CreateNew 失败：文件已存在且状态 CLAIMED
+    A-->>A: ANCHOR_ABORTED（denial 指向 owner DEAD-PID），零模型调用
+    Note over A,C: 同一次尝试不改写陈旧 claim，retention 也不清它——<br/>它是拦重试的闸门，不是垃圾
+```
+
+**模拟数据 —— 崩溃前写下的 `runtime/anchor-claims/d75480fc…7039.json`**
+（`eventId = SHA-256("idle|2026-09-02")`，与 §2.1 同一条触发）：
+
+```json
+{
+  "schema": 1,
+  "eventId": "d75480fc55c8c255ad2e0f7e0ab75f3bf43581e888094376df21415eb8537039",
+  "state": "CLAIMED",
+  "ownerId": "a1b2c3d4e5f64789a0b1c2d3e4f5a6b7",
+  "claimedAt": "2026-09-02T11:00:04+08:00",
+  "claimExpiresAt": "2026-09-02T11:04:04+08:00",
+  "completedAt": null,
+  "result": null
+}
+```
+
+成功路径把它改写成 `COMPLETED`，`completedAt` 落时刻、`result` 保持 JSON `null`
+（一次干净的锚定没有失败原因——空字符串会被当成假原因）。exec 失败但确实调用了模型
+的写成 `FAILED` 并带 `result`。
+
+`claimExpiresAt` 是 TTL 提示（`max(2, ceil(queryTimeoutSeconds×3/60)+1) × 2` 分钟），
+**不是**释放键：过期不会让 eventId 重新可锚。只有 CQK-014 的租约复核失败会主动把
+自己的 CLAIMED 盖成 `EXPIRED`（结果不确定，永不再试）。
+
+清理只发生在**终态**：`Invoke-AnchorClaimRetention` 每次运行结束时按
+`logging.retentionDays` 扫 `runtime/anchor-claims/`（用文件 mtime，不用 `completedAt`，
+因为旧记录里的 `completedAt` 恰恰是最可能解析不出来的那个字段），`CLAIMED` 永不老化——
+把它清掉就等于把重复模型调用的口子重新打开。多机侧 `coordination/events/` 沿用 CQK-013
+的行为，本地不做清理（那是共享仓库的历史，不是本机 runtime 垃圾）。
+
 ## 6. 集群级退避（Global Backoff）
 
 一台机器遇到 429 / 认证错误后写入 `coordination/backoff.json`，
@@ -271,6 +330,33 @@ sequenceDiagram
 ```json
 { "ts": "2026-09-02T10:31:02+08:00", "level": "INFO", "event": "GLOBAL_BACKOFF_SKIP", "machineId": "9f8e…", "role": "BACKOFF", "error": "until 2026-09-02T11:00:00+08:00 (429, set by a1b2…)" }
 ```
+
+### 6.1 marker 没push出去怎么办（CQK-024）
+
+上面 `A->>G: push` 那一步可能失败——断网、代理离线、GitHub 不可达。如果失败就丢弃，
+**整台集群会在本机正被 429 的时候继续轮询**，正好是最坏情况。所以失败的 marker 会落盘
+`runtime/pending-global-backoff.json`，之后**每一次定时滴答**都重试它。
+
+退避期间的滴答不再直接退出，而是做完协调维护再退：重试 pending marker →
+续持本机租约（不续租的话租约会在退避中途过期，对端接管后就开始轮询）→ 写 heartbeat。
+零 Codex 访问。
+
+```mermaid
+sequenceDiagram
+    participant A as Home PC（本地退避中）
+    participant P as runtime/pending-global-backoff.json
+    participant G as 仓库 coordination/backoff.json
+    A->>G: 10:00 push backoff 失败（unreachable）
+    A->>P: 落盘 {until=11:00, reason=429, minutes=60}
+    Note over A: 10:10 Home PC 恢复联网，但仍在本地退避
+    A->>P: 每次滴答先读队列
+    A->>G: 重试 push（沿用原 until，不重新计时）
+    A-->>A: GLOBAL_BACKOFF_PUBLISHED + BACKOFF_SKIP
+```
+
+三个边界：**重试不延长惩罚**（队列存的是绝对 `until`，不是时长）；**窗口已过期的队列直接丢弃**
+（迟到推送会把集群关进一个不再成立的退避）；**coordination 关闭时丢弃队列**（没有对端可通知，
+不该无限重试）。队列只保留更长的那个 deadline。
 
 ## 7. 可审计历史（history 分支）
 
@@ -343,12 +429,50 @@ history/
 | 集群退避生效 | 角色直接 `BACKOFF`，日志 `GLOBAL_BACKOFF_SKIP` |
 | 远程仓库不可达（多机） | `remote coordination unreachable (unreachable); fail closed` |
 | 租约丢失 | `lease lost during claim (role=PASSIVE)` |
+| 该事件已被占用（多机 CAS 被抢） | `claim push rejected (push-rejected); another machine claimed first` |
+| 该事件已被占用（单机本地文件） | `event already CLAIMED (by a1b2…); no retry` |
+| 崩溃遗留的 CLAIMED | 同上（`event already CLAIMED`）——结果不确定，永不重试、永不老化 |
+| 对端刚抢到坑、字节还没落盘（0 字节/全空白的 claim 文件） | 同上，但 owner 为空：`event already CLAIMED (by ); no retry`（文件存在即已占坑，不再误报为 store unreadable） |
+| 本地 claim 目录读不出来（ACL/卷错误） | `claim store unreadable; fail closed` |
+| 终态写回失败（单机） | `finalize write failed: …`（记录保持 CLAIMED，继续拦住重试） |
 | 认证错误 | `open error present: AUTH_ERROR` |
 | 首次观测就想锚定 | `first observation; idle detection needs two poll records` |
+
+### 8.1 诊断面板的 fail-closed 顺序（Get-StatusAnchorBlock，CQK-025）
+
+`status.cmd` 的「当前自动锚定被安全阻止」不是把上面那张表逐行抄一遍，而是复刻
+**runner 真实的判定链**。链上有两道门在 `Test-ShouldAnchor` **之外**：
+
+- 退避（`runtime/backoff.json`）——角色直接是 `BACKOFF`，runner 根本不会去问守卫
+  「这一轮快照可信吗」；
+- Leader 租约——非 Leader 没有自己的快照，守卫无从判定。
+
+所以面板里它们的优先级最高。守卫内部（`scripts/state-machine.ps1`）的顺序原样保留，
+关键是**每日上限排在额度新鲜度之前**：既封顶又读到过期数据的一轮，两句都成立，但只有
+「你今天的次数用完了」是用户能操作的，过期读取本身另有 `QUOTA_STALE` 一条。
+
+| 顺序 | 条件 | 结论（code / severity） | 真实 detail 文本 |
+|------|------|------|------|
+| 1 | 本机退避中 | `BACKOFF_ACTIVE` / WARNING | `in backoff until 2026-09-02 11:00:00 (429)` |
+| 2 | 多机且非 Leader | `AUTOANCHOR_BLOCKED` / ERROR | `machine does not hold the leader lease (role=PASSIVE)` |
+| 3 | 存在未闭合的 usage limit | `AUTOANCHOR_BLOCKED` / ERROR | `usage limit reached (primary) is still open` |
+| 4 | 最近一次读取出现未知 schema | `AUTOANCHOR_BLOCKED` / ERROR | `unknown rate-limit schema in the last read` |
+| 5 | 当日已锚定 ≥ maxPerDay | `ANCHOR_CAP_REACHED` / WARNING | `daily anchor cap reached (6/6)` |
+| 6 | 额度快照过期 | `AUTOANCHOR_BLOCKED` / ERROR | `quota read failed last cycle; the guard fails closed on a snapshot it cannot trust` |
+| 7 | 最小间隔未到（仅周期判断模式） | `ANCHOR_GAP_COOLDOWN` / INFO | `minimum anchor gap not elapsed (42 < 300 min)` |
+| — | 以上都不成立 | `$null` | 面板不显示阻止横幅 |
+
+两点与 §16.5 一致：定时模式下第 7 条不适用（守卫只在周期判断时检查最小间隔，面板照抄）；
+AutoAnchor **自身的开关横幅**永不把系统整体判成 ERROR——第 1 条退避与第 5 条封顶只是
+WARNING、第 7 条冷却是 INFO，`AUTOANCHOR_ENABLED`/`AUTOANCHOR_OFF` 横幅固定 INFO。
+第 2~4、6 条的 `AUTOANCHOR_BLOCKED` 是 fail-closed 的如实陈述：走到这几条时面板里本就
+另有对应的 ERROR（租约丢失、`QUOTA_READ_FAILED`、`COORDINATION_UNREACHABLE`），
+横幅只是把它们说成人话，而不是自己制造异常。
 
 ---
 
 **与代码的对应关系**：本页所有 eventId 格式、字段名、路径、reason 文本均摘自
 `scripts/state-machine.ps1` / `scripts/leader-lease.ps1` / `scripts/global-backoff.ps1` /
-`scripts/github-sync.ps1` / `scripts/logger.ps1` / `scripts/status.ps1`。
+`scripts/github-sync.ps1` / `scripts/logger.ps1` / `scripts/status.ps1` /
+`scripts/anchor-claim.ps1` / `scripts/auto-anchor.ps1` / `scripts/status-assessment.ps1`。
 数据为演示用模拟值（时间戳、machineId、百分比），不是真实账号数据。

@@ -45,6 +45,136 @@ try {
     $loaded2 = Load-Config $cfgFile
     Assert-True (@($loaded2.issues).Count -ge 1) 'poll below 5-min floor rejected'
 
+    Start-TestGroup 'config: lease TTL / poll relational validation (CQK-021)'
+
+    $defIssues = @(Test-ConfigShape (Get-DefaultConfig))
+    Assert-Equal 0 $defIssues.Count 'shipped defaults satisfy the lease/poll relation'
+    Assert-Equal 180 (Get-DefaultConfig).leader.leaseTtlMinutes 'default lease TTL 180 (≈3x default poll 60)'
+
+    # Doc §4.1 flapping example: poll=60 with TTL=45 expires between two polls.
+    $noCoord = @{ coordination = @{ enabled = $false; repoPath = '' }; historySync = @{ enabled = $false } }
+    $flap = New-TestConfig @{ poll = @{ intervalMinutes = 60; minimumIntervalMinutes = 5 }; leader = @{ leaseTtlMinutes = 45 }; github = $noCoord }
+    $flapIssues = @(Test-ConfigShape $flap)
+    Assert-True ($flapIssues.Count -ge 1) 'poll=60 with TTL=45 rejected'
+    Assert-True (($flapIssues -join '; ') -match 'leaseTtlMinutes') 'rejection names leader.leaseTtlMinutes'
+    Assert-True (($flapIssues -join '; ') -match '120') 'rejection states the required minimum'
+
+    # Boundary: TTL exactly 2*poll passes.
+    $edge = New-TestConfig @{ poll = @{ intervalMinutes = 60; minimumIntervalMinutes = 5 }; leader = @{ leaseTtlMinutes = 120 }; github = $noCoord }
+    Assert-Equal 0 @(Test-ConfigShape $edge).Count 'TTL = 2*poll accepted (boundary)'
+
+    # Grace branch dominates when grace is large: poll=60 TTL=120 grace=70 needs >= 135.
+    $wide = New-TestConfig @{ poll = @{ intervalMinutes = 60; minimumIntervalMinutes = 5 }; leader = @{ leaseTtlMinutes = 120; graceMinutes = 70 }; github = $noCoord }
+    Assert-True (@(Test-ConfigShape $wide).Count -ge 1) 'large grace raises the required TTL (poll+grace+jitter branch)'
+    $wideOk = New-TestConfig @{ poll = @{ intervalMinutes = 60; minimumIntervalMinutes = 5 }; leader = @{ leaseTtlMinutes = 135; graceMinutes = 70 }; github = $noCoord }
+    Assert-Equal 0 @(Test-ConfigShape $wideOk).Count 'TTL = poll+grace+jitter accepted (boundary)'
+
+    # Helper default TTL=45 must stay valid for the default test poll=15.
+    Assert-Equal 0 @(Test-ConfigShape (New-TestConfig @{ github = $noCoord })).Count 'test-helper default config satisfies the relation'
+
+    Start-TestGroup 'config: queryTimeoutSeconds upper bound and task time limit relation (CQK-031)'
+
+    # The timeout is per JSON-RPC wait, so it multiplies: 2 waits per attempt, 2
+    # attempts once a proxy is configured, and AutoAnchor pays the read twice (poll
+    # + verify) on top of the exec. A hard ceiling keeps that product bounded.
+    # Test poll stays at the helper default 15 min so the CQK-021 lease rule (TTL 45)
+    # remains satisfied while only the timeout/poll relation is under test.
+    Assert-Equal 180 $script:CQK_MAX_QUERY_TIMEOUT_SECONDS 'queryTimeoutSeconds ceiling is 180 s'
+    $noCoordCqk = @{ coordination = @{ enabled = $false; repoPath = '' }; historySync = @{ enabled = $false } }
+    $tMax = New-TestConfig @{ github = $noCoordCqk; codex = @{ queryTimeoutSeconds = 180 } }
+    Assert-Equal 0 @(Test-ConfigShape $tMax).Count 'ceiling value itself accepted (boundary)'
+    $tOver = New-TestConfig @{ github = $noCoordCqk; codex = @{ queryTimeoutSeconds = 181 } }
+    $tOverIssues = @(Test-ConfigShape $tOver)
+    Assert-True ($tOverIssues.Count -ge 1) 'queryTimeoutSeconds above the ceiling rejected'
+    Assert-True (($tOverIssues -join '; ') -match 'queryTimeoutSeconds') 'rejection names the key'
+    Assert-True (($tOverIssues -join '; ') -match '180') 'rejection states the ceiling'
+
+    # Attempt budget: 2 waits x timeout, doubled by the proxy fallback path.
+    $bPlain = Get-CodexAttemptBudgetSeconds (New-TestConfig @{ codex = @{ queryTimeoutSeconds = 20; proxy = '' } })
+    Assert-Equal 40 $bPlain.seconds 'no proxy: 2 waits x 20 s'
+    Assert-Equal 1 $bPlain.attempts 'no proxy: single attempt'
+    Assert-Equal 2 $bPlain.waitsPerAttempt 'two JSON-RPC waits per attempt'
+    $bProxy = Get-CodexAttemptBudgetSeconds (New-TestConfig @{ codex = @{ queryTimeoutSeconds = 20; proxy = 'http://proxy.invalid:7890' } })
+    Assert-Equal 80 $bProxy.seconds 'proxy: the direct fallback doubles the budget'
+    Assert-Equal 2 $bProxy.attempts 'proxy: two attempts (CQK-020 never a third)'
+
+    # Anchor exec budget mirrors auto-anchor.ps1 Max(60, timeout*3).
+    Assert-Equal 60 (Get-AnchorExecBudgetSeconds (New-TestConfig @{ codex = @{ queryTimeoutSeconds = 20 } })) 'anchor exec floor 60 s'
+    Assert-Equal 300 (Get-AnchorExecBudgetSeconds (New-TestConfig @{ codex = @{ queryTimeoutSeconds = 100 } })) 'anchor exec scales with the timeout'
+
+    # Tick budget composition: read, plus exec + verify when anchoring is armed,
+    # plus the git budget only when a remote is configured.
+    $tickMonitor = Get-CodexTickBudgetSeconds (New-TestConfig @{ mode = 'MonitorOnly'; github = $noCoordCqk; codex = @{ queryTimeoutSeconds = 20 } })
+    Assert-Equal 40 $tickMonitor 'MonitorOnly local-only: the poll read alone'
+    $tickAa = Get-CodexTickBudgetSeconds (New-TestConfig @{
+        mode   = 'AutoAnchor'
+        github = $noCoordCqk
+        codex  = @{ queryTimeoutSeconds = 20; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; keepaliveIntervalMinutes = 0 } }
+    })
+    Assert-Equal 140 $tickAa 'armed AutoAnchor: read + exec + verify read'
+    $tickAaOff = Get-CodexTickBudgetSeconds (New-TestConfig @{
+        mode   = 'AutoAnchor'
+        github = $noCoordCqk
+        codex  = @{ queryTimeoutSeconds = 20; autoAnchor = @{ enabled = $false } }
+    })
+    Assert-Equal 40 $tickAaOff 'mode=AutoAnchor but autoAnchor disabled: no exec budget'
+    $tickSync = Get-CodexTickBudgetSeconds (New-TestConfig @{
+        mode   = 'MonitorOnly'
+        github = @{ coordination = @{ enabled = $true; repoPath = 'R:\repo' }; historySync = @{ enabled = $false } }
+        codex  = @{ queryTimeoutSeconds = 20 }
+    })
+    Assert-Equal (40 + $script:CQK_GIT_SYNC_BUDGET_SECONDS) $tickSync 'coordination adds the git budget'
+
+    # Derived ExecutionTimeLimit: 10-minute floor, budget, then the poll clamp.
+    $limDefault = Get-KeeperTaskExecutionTimeLimit (Get-DefaultConfig)
+    Assert-Equal 10 $limDefault.minutes 'shipped defaults get the 10-minute floor'
+    Assert-False $limDefault.cappedByPoll 'defaults are not poll-clamped'
+    Assert-Equal 10 ([int]$limDefault.timeSpan.TotalMinutes) 'timeSpan matches minutes'
+    Assert-Equal 40 $limDefault.budgetSeconds 'default tick budget is one unprefixed read'
+    $limProxy = Get-KeeperTaskExecutionTimeLimit (New-TestConfig @{ poll = @{ intervalMinutes = 60 }; github = $noCoordCqk; codex = @{ queryTimeoutSeconds = 180; proxy = 'http://proxy.invalid:7890' } })
+    Assert-Equal 720 $limProxy.budgetSeconds 'max timeout x 2 waits x 2 attempts'
+    Assert-Equal 12 $limProxy.minutes 'a 12-minute budget raises the limit above the floor'
+    Assert-False $limProxy.cappedByPoll 'a 60-minute poll has room'
+    # poll=13 with a 720 s budget is legal (12 <= 13) but leaves less than the
+    # 2-minute margin, so the clamp wins: limit 11, cappedByPoll true.
+    $limCapped = Get-KeeperTaskExecutionTimeLimit (New-TestConfig @{ poll = @{ intervalMinutes = 13 }; github = $noCoordCqk; codex = @{ queryTimeoutSeconds = 180; proxy = 'http://proxy.invalid:7890' } })
+    Assert-Equal 0 @(Test-ConfigShape (New-TestConfig @{ poll = @{ intervalMinutes = 13 }; github = $noCoordCqk; codex = @{ queryTimeoutSeconds = 180; proxy = 'http://proxy.invalid:7890' } })).Count 'the clamped config is itself valid (clamp is a warning, not a hard fail)'
+    Assert-Equal 11 $limCapped.minutes 'limit clamped to poll - 2 min'
+    Assert-True $limCapped.cappedByPoll 'clamp is reported'
+    $limShortPoll = Get-KeeperTaskExecutionTimeLimit (New-TestConfig @{ poll = @{ intervalMinutes = 5 }; github = $noCoordCqk; codex = @{ queryTimeoutSeconds = 20 } })
+    Assert-Equal 10 $limShortPoll.minutes 'poll shorter than the floor keeps the floor (never a sub-floor limit)'
+    Assert-False $limShortPoll.cappedByPoll 'floor branch is not reported as a clamp'
+
+    # The relational half: a config whose worst case exceeds the poll is invalid,
+    # and the message names the knob to turn.
+    $tight = New-TestConfig @{ poll = @{ intervalMinutes = 10; minimumIntervalMinutes = 5 }; github = $noCoordCqk; codex = @{ queryTimeoutSeconds = 180; proxy = 'http://proxy.invalid:7890' } }
+    $tightIssues = @(Test-ConfigShape $tight)
+    Assert-True ($tightIssues.Count -ge 1) 'worst-case run longer than the poll rejected'
+    Assert-True (($tightIssues -join '; ') -match 'poll\.intervalMinutes') 'rejection names the poll interval'
+    Assert-True (($tightIssues -join '; ') -match 'queryTimeoutSeconds') 'rejection names the timeout knob'
+    # Boundary: budget exactly filling the poll passes (720 s = 12 min).
+    $edgePoll = New-TestConfig @{ poll = @{ intervalMinutes = 12; minimumIntervalMinutes = 5 }; github = $noCoordCqk; codex = @{ queryTimeoutSeconds = 180; proxy = 'http://proxy.invalid:7890' } }
+    Assert-Equal 0 @(Test-ConfigShape $edgePoll).Count 'budget exactly filling the poll accepted (boundary)'
+    $edgePollOver = New-TestConfig @{ poll = @{ intervalMinutes = 11; minimumIntervalMinutes = 5 }; github = $noCoordCqk; codex = @{ queryTimeoutSeconds = 180; proxy = 'http://proxy.invalid:7890' } }
+    Assert-True (@(Test-ConfigShape $edgePollOver).Count -ge 1) 'budget one minute over the poll rejected'
+    # AutoAnchor arming raises the requirement: read + exec + verify + git.
+    $aaTight = New-TestConfig @{
+        mode   = 'AutoAnchor'
+        poll   = @{ intervalMinutes = 15; minimumIntervalMinutes = 5 }
+        github = @{ coordination = @{ enabled = $true; repoPath = 'R:\repo' }; historySync = @{ enabled = $false } }
+        codex  = @{ queryTimeoutSeconds = 100; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; keepaliveIntervalMinutes = 0 } }
+    }
+    Assert-True (@(Test-ConfigShape $aaTight).Count -ge 1) 'anchoring + sync overruns the default 15-min test poll'
+    $aaOk = New-TestConfig @{
+        mode   = 'AutoAnchor'
+        poll   = @{ intervalMinutes = 60; minimumIntervalMinutes = 5 }
+        leader = @{ leaseTtlMinutes = 180 }
+        github = @{ coordination = @{ enabled = $true; repoPath = 'R:\repo' }; historySync = @{ enabled = $false } }
+        codex  = @{ queryTimeoutSeconds = 100; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; keepaliveIntervalMinutes = 0 } }
+    }
+    Assert-Equal 0 @(Test-ConfigShape $aaOk).Count 'the same config with a 60-minute poll is valid'
+    Assert-Equal 940 (Get-CodexTickBudgetSeconds $aaOk) 'anchored + synced worst case: 200 read + 300 exec + 200 verify + 240 git'
+
     Start-TestGroup 'config: autoAnchor.enabled=true requires mode=AutoAnchor'
 
     $bad2 = New-TestConfig @{ codex = @{ autoAnchor = @{ enabled = $true } } }
@@ -308,7 +438,7 @@ try {
   "mode": "MonitorOnly",
   "pollIntervalMinutes": 30,
   "minimumPollIntervalMinutes": 10,
-  "leader": { "enabled": true, "leaseTtlMinutes": 45, "graceMinutes": 5, "label": "Legacy PC" },
+  "leader": { "enabled": true, "leaseTtlMinutes": 90, "graceMinutes": 5, "label": "Legacy PC" },
   "codex": { "command": "auto", "queryTimeoutSeconds": 20, "autoAnchor": false, "anchorPrompt": "p", "maxAnchorsPerDay": 4, "minimumAnchorGapMinutes": 30 },
   "github": { "enabled": true, "repoPath": "D:/logrepo", "coordinationBranch": "coordination", "historyBranch": "history", "syncEventsOnly": true, "push": true },
   "logging": { "retentionDays": 30, "includeMachineLabel": true },

@@ -2,6 +2,8 @@
 # Windows Task Scheduler starts this; it runs once and exits. Never resident.
 #
 #   LoadConfig -> local mutex -> preflight -> backoff check -> leader election
+#     BACKOFF  : coordination maintenance only - retry the pending cluster marker,
+#                renew a lease we already own, heartbeat; zero Codex access (CQK-024)
 #     PASSIVE  : heartbeat + exit (no Codex access)
 #     LEADER   : read quota -> events -> anchor hook -> persist -> log
 #                -> renew lease -> sync sanitized history -> exit
@@ -74,13 +76,44 @@ try {
     }
     $machine = $pf.machine
 
-    # ---- backoff window (429 -> 60m, auth -> 120m) --------------------------
+    # ---- cluster backoff marker maintenance (CQK-024) ------------------------
+    # Every scheduled tick, on every path: a coordination/backoff.json marker
+    # whose push failed lives in runtime/pending-global-backoff.json until it
+    # reaches the remote. Retrying before the backoff early-exit below - and
+    # before any Codex access - is what keeps the fleet informed while this
+    # machine refuses to poll. With nothing queued the call touches no remote.
     $backoff = Get-BackoffState $KeeperRoot
+    if ($backoff) { $script:CqkRole = 'BACKOFF' }
+    $pendingSync = Sync-PendingGlobalBackoff -Config $cfg -KeeperRoot $KeeperRoot -Machine $machine
+    if (-not $pendingSync.ok) {
+        Write-RunnerLog -Event 'GLOBAL_BACKOFF_RETRY_FAILED' -Level 'ERROR' -ErrorText "pending cluster backoff marker: $($pendingSync.reason)"
+    } elseif ($pendingSync.attempted -and $pendingSync.pendingCleared) {
+        Write-RunnerLog -Event 'GLOBAL_BACKOFF_PUBLISHED' -ErrorText "pending marker delivered ($($pendingSync.reason))"
+    }
+
+    # ---- backoff window (429 -> 60m, auth -> 120m) --------------------------
+    # CQK-024: backoff means "never touch Codex", NOT "exit the runner". The
+    # scheduled tick still does its coordination maintenance - the pending marker
+    # above, renewing a lease this machine owns (if we stopped renewing, the lease
+    # would expire mid-backoff and a peer would take over and start polling), and
+    # refreshing the local heartbeat - and only then returns. Everything below
+    # this point is the Codex-touching path.
     if ($backoff) {
-        $script:CqkRole = 'BACKOFF'
         $state = Load-KeeperState $KeeperRoot
+        # Keep the lease alive: if we stopped renewing, the lease would expire in
+        # the middle of the backoff window and a peer would take over and start
+        # polling. Invoke-LeaderElection itself never touches a live lease held
+        # by another machine (it yields PASSIVE), so this is renew-or-acquire,
+        # never steal.
+        $election = Invoke-LeaderElection -Config $cfg -KeeperRoot $KeeperRoot -Machine $machine
+        if ($election.role -eq 'LEADER' -and $election.remoteReachable -and $election.lease) {
+            Save-LocalLeaseView -Root $KeeperRoot -State $state -Election $election
+        }
+        $state.role = 'BACKOFF'
         $state.heartbeat = @{ ts = (Get-IsoTimestamp); role = 'BACKOFF' }
         Save-KeeperState -Root $KeeperRoot -State $state
+        # Coordination may be unreachable during backoff; that is a safe local
+        # only state - the runner simply stops writing remotely.
         Write-RunnerLog -Event 'BACKOFF_SKIP' -ErrorText "until $($backoff.until.ToString('yyyy-MM-ddTHH:mm:sszzz')) ($($backoff.reason))"
         exit 0
     }
@@ -282,6 +315,11 @@ try {
     # Retention cleanup at completion; failure must not affect the core run.
     try {
         $null = Invoke-LogRetention -Root $KeeperRoot -RetentionDays $script:CqkLogging.retentionDays
+        # Local durable anchor claims (CQK-023): terminal files only. The store
+        # module is optional, so guard the call the same way the anchor hook does.
+        if (Get-Command Invoke-AnchorClaimRetention -ErrorAction SilentlyContinue) {
+            $null = Invoke-AnchorClaimRetention -KeeperRoot $KeeperRoot -RetentionDays $script:CqkLogging.retentionDays
+        }
     } catch {
         Write-RunnerLog -Event 'RETENTION_FAILED' -Level 'ERROR' -ErrorText $_.Exception.Message
     }

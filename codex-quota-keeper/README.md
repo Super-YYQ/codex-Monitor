@@ -32,21 +32,44 @@ codex-quota-keeper/
   apply-config.cmd 修改配置后应用
   config.example.jsonc
   scripts/         实现脚本
-  runtime/         gitignored（machine.json / state.json / lock / logs）
+  runtime/         gitignored（machine.json / state.json / lock / logs / backoff.json /
+                   pending-global-backoff.json / anchor-claims/）
   history/         净化日志（可选 Git 同步）
   tests/           单元测试（mock app-server，无需真实凭证）
 ```
 
 ## 快速开始
 
-1. 解压到固定目录（**不要放在源码 Git 仓库里**，避免与源码更新互相干扰），例如 `D:\Tools\codex-quota-keeper`。
-2. 复制 `config.example.jsonc` 为 `config.json`——模板是 JSONC（支持 `//` 与 `/* */` 注释，
+1. 获取工具，两种方式任选：
+   - **GitHub Release（推荐）**：从 Releases 页下载 `codex-quota-keeper-v<版本>.zip` 与
+     `SHA256SUMS.txt`，先校验再解压：
+
+     ```powershell
+     # GNU sha256sum（WSL / Git Bash）或本仓库 tools/build-release.ps1 -VerifyOnly 均可
+     sha256sum -c SHA256SUMS.txt
+     ```
+
+   - **从源码仓库**：clone 后直接使用 `codex-quota-keeper/` 目录（打包流程见
+     `docs/release-engineering.md`）。
+2. 解压到固定目录（**不要放在源码 Git 仓库里**，避免与源码更新互相干扰），例如 `D:\Tools\codex-quota-keeper`。
+3. 复制 `config.example.jsonc` 为 `config.json`——模板是 JSONC（支持 `//` 与 `/* */` 注释，
    每项带中文说明），取消注释即自定义，未配置字段用内置默认值；按需改
    `poll.intervalMinutes`、`leader.label`、`github.coordination.repoPath`（完整字段见下方「配置」）。
-3. 确保 `mode=MonitorOnly`、`codex.autoAnchor=false`。
-4. 运行 `install.cmd`（会做一次只读 quota probe，成功后注册 Windows 计划任务）。
-5. 双击 `status.cmd` 验证 `Task installed=YES`、`Enabled=YES`、`Auth=READY`。
-6. 第二台电脑重复安装，确认只有一台 `LEADER`、另一台 `PASSIVE`。
+4. 确保 `mode=MonitorOnly`、`codex.autoAnchor=false`。
+5. 运行 `install.cmd`（会做一次只读 quota probe，成功后注册 Windows 计划任务）。
+6. 双击 `status.cmd` 验证 `Task installed=YES`、`Enabled=YES`、`Auth=READY`。
+7. 第二台电脑重复安装，确认只有一台 `LEADER`、另一台 `PASSIVE`。
+
+**查看状态**：日常双击 `status.cmd`（只读：不争租约、不启动 keeper、不 push）。
+需要参数时直接调脚本 `pwsh scripts/status.ps1 <参数>`：
+
+| 参数 | 作用 |
+|------|------|
+| `-Live` | 追加一次真实的只读额度查询（默认只读本地记录与计划任务，不查 Codex） |
+| `-Detailed` | 末尾追加「调试详情」区：原始判定值、额度时间、仓库路径与全部 finding 明细 |
+| `-Language en-US` | 输出 v2.0 之前的英文事实转储（默认中文面板；`status-json.ps1` 的英文 schema 不受影响） |
+| `-NoColor` | 去掉颜色、内容不变（重定向到文件时用） |
+| `-KeeperRoot` / `-ConfigFile` | 指向非默认安装目录 / 非默认配置文件 |
 
 **更新升级**：仓库更新后，把新版本文件**合并覆盖**到部署目录（务必保留 `config.json`、
 `runtime/`——含机器身份 `machine.json`，多机租约依赖它——与 `history/`），再运行一次
@@ -84,7 +107,8 @@ codex-quota-keeper/
 |------|------|------|
 | `mode` | MonitorOnly | 运行模式（MonitorOnly / AutoAnchor） |
 | `leader.label` | Home PC | 本机标签 |
-| `leader.leaseTtlMinutes` | 45 | 租约 TTL |
+| `codex.queryTimeoutSeconds` | 20 | 每次 JSON-RPC 等待的超时（秒），上限 **180**：一次额度尝试含 2 次等待（`initialize`、`account/rateLimits/read`），配代理再翻倍——超限值会成倍放大单轮耗时，配置校验直接拒绝。计划任务的 `ExecutionTimeLimit` 由配置推导（`Get-KeeperTaskExecutionTimeLimit`，见 `scripts/common.ps1` CQK-031 注释），不再固定 15 分钟 |
+| `leader.leaseTtlMinutes` | 180 | 租约 TTL（默认 ≈轮询周期 3 倍；有关系校验，见下表） |
 | `github.coordination.repoPath` | — | 专用日志仓库本地路径（多机必填） |
 | `github.historySync.push` | true | history 分支推送开关 |
 | `logging.includeMachineLabel` | false | 隐私开关：machineLabel 是否进 history |
@@ -117,7 +141,7 @@ codex-quota-keeper/
 
 | 参数 | 默认 | 说明 |
 |------|------|------|
-| `leader.leaseTtlMinutes` | 45 | 租约 TTL（≈轮询周期 3 倍） |
+| `leader.leaseTtlMinutes` | 180 | 租约 TTL。必须满足 `>= max(2×轮询周期, 轮询周期 + graceMinutes + 5)`，否则租约会在一轮轮询之间过期，Leader 会在两台机器间反复抖动（flapping）；配置校验会直接拒绝该组合 |
 | `leader.graceMinutes` | 5 | 时钟漂移/网络延迟容忍 |
 | `leader.takeoverOnExpiry` | true | 过期后允许他人接管 |
 | `github.coordination.enabled` | false | 租约协调（默认关闭 = 单机 LOCAL_ONLY；多机先 setup-log-repo 再开启，false 时多机不安全） |
