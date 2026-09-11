@@ -74,6 +74,35 @@
   目录不落盘全量；`execution-profile.json` 只存白名单字段（model/effort/provider/source/validation/validatedAt），
   绝不含 token / 账号详情 / 完整配置。
 
-## 待验证的外部事实
-- 本机 `codex app-server` 是否真的提供 `config/read` 与 `model/list`、响应字段名与分页 cursor 字段名。
-  实现按文档 §15 的假设写，并用 mock 覆盖；真机差异留给 CQK-048 soak 暴露（不因此阻塞开发）。
+## 真机协议核对（codex 0.153.4，本机 app-server 实测，非文档假设）
+用临时探针脚本（放在仓库外的 `%TEMP%`，避免被 secret-scan 扫到）直连本机
+`codex app-server`，`initialize` → `initialized` → 各方法。**文档 §15 的假设全部成立，
+且拿到精确 wire 形状**：
+
+- `initialize` → `{userAgent, codexHome, platformFamily, platformOs}`。
+- `config/read`（`params={}`）→ `{ config: { ...几十上百个键... } }`。其中与 Profile 有关的只有
+  `model:"gpt-6-astra"`、`model_reasoning_effort:"xhigh"`、`model_provider:null`。
+  **同一 blob 里还有 `notify:[绝对 exe 路径]`、`desktop.enabled-reasoning-efforts:[...]`、
+  `shell_environment_policy.set.*SHA256S`、`permissions`、`instructions`、本机路径** ——
+  §23 白名单不是可选项，绝不允许 `ConvertTo-Json` 整个 result 进日志/历史。
+- `model/list`（`params={}`）→ `{ data: [...], nextCursor: null }`；条目字段：
+  `id, model, upgrade, upgradeInfo, availabilityNux, displayName, description, modelSpecialty,
+  hidden, supportedReasoningEfforts, defaultReasoningEffort, inputModalities, isDefault, ...`。
+- **`supportedReasoningEfforts` 是对象数组 `[{reasoningEffort, description}]`，不是字符串数组**
+  —— L3 校验必须先投影 `.reasoningEffort`，按字符串比会永远判失败。（这一条纠正了开工前的设计假设。）
+- **分页真实存在**：`params={limit:2}` → `n=2, nextCursor=2`；cursor 是服务端返回的不透明值，
+  必须原样回传 `params.cursor`。`params={cursor:'bogus-cursor'}` → JSON-RPC
+  `{"code":-32600,"message":"invalid cursor: bogus-cursor"}` —— **坏 cursor 是硬错误，不是「没有下一页」**，
+  分页循环若把它当终止条件就会「只取第一页就判模型不存在」（正是 §5.2 L2 明令禁止的失败模式）。
+- `includeHidden:true` → 7 条；默认 → 5 条（隐藏条目默认被排除）。真实目录里
+  `gpt-6-astra`(isDefault=true, default=low, 支持 low/medium/high/xhigh/max/ultra)、
+  `gpt-5.6-sol`、`gpt-5.6-terra`(default=medium)、`gpt-5.6-luna`(无 ultra)、
+  `gpt-5.5`(只有 low/medium/high/xhigh)。**各模型支持的思考等级确实不同 ⇒ L3 是真校验，不是形式。**
+- `account/read` → `{account:{type,email,planType}}` 含 **PII 邮箱** ⇒ 不进入 Profile 路径，永不落盘。
+- **服务端会插发通知**（实测 `{"method":"remoteControl/status/changed",...}`）夹在响应之间：
+  任何新调用方必须按 `id` 匹配，不能「读下一行」。生产里 `Wait-AppServerResponse` 的
+  id 不等则 `continue` 已经处理了这点，抽层时要保留。
+- 本机 codex 包内 **不附带任何协议/JSON schema 文件**，实测是唯一可靠的发现路径。
+
+结论：CQK-037/038 不再依赖假设，mock 夹具按上面的真实形状（含对象数组思考等级、数字 cursor、
+hidden 条目）来写，仓库内仍然不出现任何静态模型白名单。

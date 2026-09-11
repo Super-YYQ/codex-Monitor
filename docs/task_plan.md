@@ -137,7 +137,7 @@ codex-quota-keeper/
   - Runner 侧持久化 anchor 事件时携带完整 anchorInfo（含全部 eventIds，修掉 `$claimed[0]` 丢触发）。
 
 ## 阶段 E：执行配置语义校验（CQK-037 + 038）
-- [ ] CQK-037 抽出共享 JSON-RPC 会话层（app-server-client.ps1）：Start/Initialize/Invoke/Stop
+- [x] CQK-037 抽出共享 JSON-RPC 会话层（app-server-client.ps1）：Start/Initialize/Invoke/Stop
       + Invoke-CodexRateLimitsRead / Invoke-CodexConfigRead / Invoke-CodexModelList；禁止复制三份客户端；
       `model/list` 必须处理 nextCursor 分页 + 严格页/条上限（§15.1）。
 - [ ] CQK-038 Execution Profile Resolver 三层语义校验：L1 形态 → L2 本机 CLI 模型目录 → L3 思考等级；

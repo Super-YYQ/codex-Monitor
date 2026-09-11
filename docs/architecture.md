@@ -12,7 +12,8 @@ Windows Task Scheduler (CodexQuotaKeeper.Check, 仅当前用户)
         |-- preflight.ps1        配置校验 + codex/git/仓库绑定/runtime 可写
         |-- leader-lease.ps1     cqk/coordination 分支租约 (Git push 冲突 = CAS)
         |-- global-backoff.ps1   coordination/backoff.json 集群级退避
-        |-- quota-client.ps1     codex app-server JSON-RPC: initialize -> account/rateLimits/read
+        |-- app-server-client.ps1 codex app-server JSON-RPC 共享会话层: 启动/管道/握手/按 id 匹配/超时/代理环境/错误分类/收尾
+        |-- quota-client.ps1      额度 schema: initialize -> account/rateLimits/read -> QuotaSnapshot (会话层复用上一条)
         |-- state-machine.ps1    bucket/window 快照差异 -> 事件; eventId = SHA-256(bucketId|windowType|duration|prevResetsAt|reset)
         |-- auto-anchor.ps1      实验: 分布式 CAS Claim -> codex exec -> 二次验证 (默认关)
         |-- logger.ps1           runtime JSONL(EventRecord) + history JSONL + 每日 summary + 保留期

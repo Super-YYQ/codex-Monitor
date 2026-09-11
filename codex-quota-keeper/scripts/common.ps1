@@ -350,6 +350,14 @@ function Get-CodexAttemptBudgetSeconds {
     #     path gets exactly one direct fallback (CQK-020: never a third try).
     # So: 2 waits x timeout, x2 attempts with a proxy. Process spawn/teardown and
     # the codex binary's own work sit on top of this; callers add slack.
+    #
+    # Scope note (CQK-037): this counts the QUOTA read path only, and that is still
+    # exactly two waits after the transport moved into app-server-client.ps1 - the
+    # extraction changed who owns the pipes, not how many round trips happen. The
+    # Execution Profile path is different in kind because `model/list` paginates
+    # (handshake + config/read + 1..N pages), so a wait-count would be a lie there;
+    # when the live profile resolution enters the tick (CQK-038/040) it joins this
+    # model as its own bounded ceiling, not as a bigger waits-per-attempt number.
     # Returns @{ seconds; waitsPerAttempt; attempts; proxyConfigured }.
     param([hashtable]$Config)
     $timeout = 20

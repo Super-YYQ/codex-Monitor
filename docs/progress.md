@@ -588,4 +588,58 @@ R19. `267073e` + 本次 docs commit **CQK-034/035 发布工程 + 收尾（README
   注意 `Get-CodexAttemptBudgetSeconds` 的 `$script:CQK_JSONRPC_WAITS_PER_ATTEMPT = 2` 含义会随
   同一会话追加 RPC 而改变，须与 CQK-031 的计划任务时限推导一起核算。
 
+## 会话：第四轮 阶段 E —— CQK-037 共享 JSON-RPC 会话层（完成）
+
+### 交付
+- **新增 `scripts/app-server-client.ps1`（~505 行）**：文档 §15「一份客户端，不是三份复制」的落点。
+  底层原语 `Start-CodexAppServerSession` / `Initialize-CodexAppServer` /
+  `Invoke-CodexAppServerRequest` / `Stop-CodexAppServerSession`，加上会话编排器
+  `Invoke-CodexAppServerSession -Body { param($Session,$Timeout,$Options) ... }`：启动、管道、
+  握手、**按 id 匹配响应**（服务端会插通知，绝不能「读下一行」）、超时、代理环境、脱敏、收尾
+  集中一处。高层能力 `Invoke-CodexRateLimitsRead`（仍在 quota-client）、`Invoke-CodexConfigRead`、
+  `Invoke-CodexModelList`。
+- **`Invoke-CodexModelList` 分页**：`CQK_MODEL_LIST_PAGE_SIZE=50` / `MAX_PAGES=6` / `MAX_ITEMS=300`
+  三重硬上限；`nextCursor` 逐页取，**取满或越界即 fail closed**（`ok=false` + `SCHEMA_UNKNOWN` +
+  「not fully read」），绝不把半份目录交给调用方去判「模型不存在」⇒ 直接封死 T05 的跨页误判。
+  空目录同样 fail closed。默认 `includeHidden=true`：宽目录只会让校验更宽松，窄目录会**误拒**
+  已武装的 AutoAnchor，代价不对称；hidden 条目只参与校验、永不执行。
+- **`Get-CodexAppServerConfigValue`（§23 白名单）**：`config/read` 返回体极大且含
+  `notify:[exe 绝对路径]`、`shell_environment_policy.set.*SHA256S`、`permissions`、
+  `instructions`、`cwd` 等；只投影 `model` / `model_reasoning_effort` / `model_provider` 三个键，
+  永不 `ConvertTo-Json` 整坨。`account/read` 带邮箱 PII ⇒ 不在 Profile 路径上。
+- **`scripts/quota-client.ps1`** 缩为「额度 schema」：`Invoke-CodexRateLimitsAttempt` 变成一层薄
+  `-Body` 回调；传输/握手/超时/收尾全部复用会话层。错误分类改走
+  `Get-CodexAppServerErrorKind -Code -Message`（CQK-043 的唯一扩展点）。
+- **`tests/fixtures/mock-appserver.ps1`** 同 commit 扩 `config/read` / `model/list` 处理器（否则
+  `default { }` 静默吞方法 ⇒ 测试挂到 TIMEOUT）。模式：`(default)` / `config-empty` /
+  `config-error` / `catalog-paged` / `catalog-cap` / `catalog-error` / `catalog-timeout` /
+  `catalog-badschema` / `catalog-hidden`；7 条合成条目，`mock-model-zeta` 专供「第 2 页命中」。
+- **新增 `tests/app-server-client.test.ps1`（118 checks / 11 组）**：纯投影测试（allowlist 三键 +
+  JSON 文本泄漏扫描；catalog 条目 6 键投影、`{reasoningEffort,description}` 对象数组必须投影成
+  字符串、噪声字段不落盘）+ e2e（单页 / T05 分页 4 页 7 条 / cap 停在第 6 页并 fail closed /
+  badschema / AUTH / 空目录 / includeHidden 双向 / 2 秒超时受约束 / SETUP_ERR / 消息无凭据形状）。
+- **`docs/architecture.md:15`** 模块树补上 `app-server-client.ps1`。
+
+### 预算耦合决策（本 ticket 只记录，不重构）
+`common.ps1:26` 的 `$script:CQK_JSONRPC_WAITS_PER_ATTEMPT = 2` 一路喂给
+`Get-CodexTickBudgetSeconds` → `Get-KeeperTaskExecutionTimeLimit`（CQK-031）。本次抽层**没有改变
+额度路径的往返次数**（变的只是谁持有管道），因此在 `Get-CodexAttemptBudgetSeconds` 里补一段
+「Scope note (CQK-037)」：该常量**只计额度读路径**；Profile 路径会分页（握手 + config/read + 1..N
+页），等 CQK-038/040 把它真正放进 tick 时，必须作为**自己的有界上限**加入，而不是把
+waits-per-attempt 调大。于是 6 处钉死的数字（40 / 80 / 140 / 720 / 940 / 260，以及 12 分钟合法 vs
+11 分钟被拒的边界）全部保持不动，留到那个 commit 里一起有意识地改。
+
+### 回归
+- `tests/run-all.ps1`：**PS7 18/18 通过**；**WinPS 5.1 18/18 通过**（含新文件，无 5.1 语法事故）。
+- PSScriptAnalyzer：**ERRORS=0**。本次只对新增/改动的 5 个文件跑（40 项，全为 Warning/Info）；
+  仓库级基线仍是上一轮的 ERRORS=0 / TOTAL=63，未因本次改动上升。
+  （CI 本身不跑 analyzer —— `.github/workflows/test-windows.yml` 只有 PS7、WinPS 5.1 两个
+  全量 run 加一个 quota-client 单跑，所以 analyzer 是本地门禁。）
+- `secret-scan` 作为测试文件本身在 CI 里跑；工作树内无临时日志文件。
+
+### 下一步
+- 阶段 E 续：**CQK-038** 新建 `scripts/codex-profile.ps1`（§6.1 结构 + §6.2 优先级 +
+  「必须与真正 codex exec 同一 Codex 环境」+ L1/L2/L3 三层语义校验，仓库内零静态模型白名单），
+  并在 `common.ps1` 加 `Get-ExecutionProfilePath`；一并决定 Profile 解析进 tick 的预算上限。
+
 
