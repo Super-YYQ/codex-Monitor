@@ -209,7 +209,7 @@ try {
     # -ForceAnchor = the explicit "anchor right now" request from install/apply
     # config (codex.autoAnchor.anchorOnApply).
     $isLeader = ($election.role -eq 'LEADER' -and ($null -ne $election.lease -or [bool]$election.localOnly))
-    if ($cfg.mode -eq 'AutoAnchor' -and (Test-AutoAnchorEnabled $cfg)) {
+    if (Test-AutoAnchorArmed $cfg) {
         if (Get-Command Invoke-AutoAnchorIfNeeded -ErrorAction SilentlyContinue) {
             $anchorOutcome = Invoke-AutoAnchorIfNeeded -Config $cfg -KeeperRoot $KeeperRoot `
                 -State $state -Events $events -IsLeader $isLeader -Machine $machine -Election $election `

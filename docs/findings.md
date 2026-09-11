@@ -131,3 +131,30 @@ hidden 条目）来写，仓库内仍然不出现任何静态模型白名单。
 - **扫描器会扫测试文件自己**：测试里想放一个「长得像 token」的假值，必须**拼接构造**
   （`'sk-' + 'should-never' + '-be-written'`），否则 `sk-[A-Za-z0-9_\-]{20,}` 直接把
   `secret-scan.test.ps1` 打挂。`secret-scan.test.ps1` 早就遵守这条，新测试撞上去才发现。
+
+## CQK-039 门禁接线期得出的结论（2026-09-11，本人实现结论，非外部内容）
+
+- **`Test-ConfigShape` 自带 `codex.queryTimeoutSeconds >= 5` 硬下限**（common.ps1 L1 规则）。
+  这直接决定了「armed 配置 + 故意写坏模型」这类测试**不可能跑得比 5s 更快**：把 timeout 调成 2s
+  不会让门禁更快失败，而是让配置在 L1 就被判「格式非法」，`Load-Config` 阶段就 return，
+  **Profile 门根本不会执行**。表现是 `$blocked.profile` 为 `$null`、后面几条断言连坏 —— 一个
+  典型的「假绿/假红互串」。因此测试夹具默认 `-Timeout 5`，并在构造函数里 **fail-fast**：
+  `Test-ConfigShape` 一有 issue 就 `throw "New-ArmedCfg produced an L1-invalid config"`，
+  避免将来 L1 规则变化时，格式问题又一次伪装成 Profile 判定。
+- **`issues` 与 `warnings` 必须是两个列表**：本仓库里任何非空 `issues` 都等价于 `ok=$false`。
+  若把 MonitorOnly 的模型笔误塞进 `issues`，就等于把「只读安装」变成不可安装 —— 正是 §7
+  门禁表明确禁止的那一格。门禁用 `$Stage`（Install/Apply）在文案里区分「任务未注册」与
+  「既有计划任务保持不变」，因为两者对操作者的含义不同。
+- **「Apply 失败不得改动既有计划任务」是免费的，前提是顺序对**：`Register-KeeperTask` 是对
+  live 任务的 read-modify-write，**没有回滚**。所以唯一安全次序是门禁在两次 Register 调用
+  **之前**返回；这样「部分更新」状态在设计上不可能出现，测试也只需断言 live 任务的
+  interval/Description 仍是旧值即可，不需要 uninstall/re-register 往返。
+- **UNAVAILABLE 不写 cache**（VALID 与 INVALID 都写）。读失败对 Profile 一无所知，把上一次
+  真实 verdict 覆盖掉会让离线面板**撒谎**。这条是 §14.1「缓存只存最后一次安全值」的必然推论。
+- **§14.1 缓存恰好 7 个白名单键 ⇒ §14 面板里的 支持思考等级 / 等级校验 / 校验原因
+  根本不可能来自缓存**，只能来自 `-Live`（`supportedReasoningEfforts` / L3 结论 /
+  `validationReason` 都不在投影里，§23 也不允许进）。CQK-046 实现时必须按「离线面板少三行」
+  设计措辞，而不是留空或猜值 —— 这是本 ticket 提前撞到的边界。
+- **`docs/` 也在 `tests/secret-scan.ps1` 扫描范围内**：progress.md 里一句「避免写 token 字面量」
+  的说明只要**原文引用**了 token 形状字符串，就会把全仓扫描打挂。结论：**规划笔记本身也要脱敏**，
+  描述凭据形状时用文字而不是字面量。

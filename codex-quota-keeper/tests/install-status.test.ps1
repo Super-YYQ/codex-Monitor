@@ -200,11 +200,202 @@ try {
 
     Start-TestGroup 'apply-config: below-floor interval rejected'
 
-    $badCfg = New-Cfg 1
-    $badCfg.poll.minimumIntervalMinutes = 1
-    $null = Write-TestConfigFile $cfgFile $badCfg
+    $null = Write-TestConfigFile $cfgFile (New-Cfg 1)
     $rejected = Invoke-ApplyConfig -KeeperRoot $keeperRoot -ConfigFile $cfgFile
     Assert-False $rejected.ok '1-minute polling rejected'
+    # The rejected config must not have been applied. 30 is the interval this file
+    # successfully applied above (the Execution Profile groups below lean on that
+    # number to prove a blocked install/apply leaves the task alone), so the task
+    # being checked here is the task, not a stale expectation.
+    Assert-Equal 30 (Get-TaskIntervalMinutes (Get-ScheduledTask -TaskName $taskName)) 'rejected apply leaves the live interval alone'
+
+    # ===========================================================================
+    # doc v3.0 §7 - the Execution Profile gate (CQK-039).
+    #
+    # Strong semantic validation is NOT a universal blocker: it only bites when a
+    # model call is actually configured (mode=AutoAnchor AND autoAnchor.enabled).
+    # These groups pin both halves of that sentence - the blocking half AND the
+    # "a MonitorOnly user is never locked out of installing" half - and the
+    # promise that a blocked install/apply leaves the Scheduled Task untouched.
+    #
+    # The bad model name is invented, not read from a list: this repository must
+    # not carry a model whitelist, fixtures included (§22). What makes it invalid is
+    # that the mock CLI's live catalog does not serve it.
+    # ===========================================================================
+
+    function New-ArmedCfg {
+        # An armed AutoAnchor config that passes every L1 rule, so whatever these
+        # groups reject is the execution profile and nothing else.
+        #
+        # -Timeout stays at 5, the smallest value L1 accepts: Test-ConfigShape has a
+        # codex.queryTimeoutSeconds >= 5 floor of its own (common.ps1), so a 2-second
+        # config would be rejected as a malformed file and never reach the profile
+        # gate at all - which is exactly the kind of false green this group must not
+        # have. 5 s also bounds any UNAVAILABLE path that does wait, and keeps the
+        # poll-fit rule happy (budget 20 s inside a 15-minute poll).
+        param([int]$Poll = 15, [string]$Model = '', [string]$Effort = '', [int]$Timeout = 5)
+        $c = New-Cfg $Poll
+        $c.mode = 'AutoAnchor'
+        $c.codex.queryTimeoutSeconds = $Timeout
+        $c.codex.autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6
+                                 minimumGapMinutes = 60; keepaliveIntervalMinutes = 240
+                                 model = $Model; reasoningEffort = $Effort }
+        # Belt and braces: if this config ever stops being L1-valid, say so here
+        # rather than letting a malformed-file rejection masquerade as a profile
+        # verdict several assertions down.
+        $l1 = @(Test-ConfigShape $c)
+        if ($l1.Count -gt 0) { throw "New-ArmedCfg produced an L1-invalid config: $($l1 -join '; ')" }
+        return $c
+    }
+
+    $badModel = 'mock-model-gpt4o-fake'
+
+    Start-TestGroup '§7 gate: armed AutoAnchor with an INVALID profile blocks install (T02)'
+
+    $gateBad = New-ArmedCfg -Poll 15 -Model $badModel
+    $null = Write-TestConfigFile $cfgFile $gateBad
+    $env:CQK_MOCK_EXEC_ARGS_FILE = (Join-Path $ws 'exec-args-install-blocked.log')
+    $blocked = Invoke-KeeperInstall -KeeperRoot $keeperRoot -ConfigFile $cfgFile
+    Assert-False $blocked.ok 'install blocked by an armed-but-invalid profile'
+    Assert-Equal 1 @($blocked.issues).Count "exactly the profile issue is reported ($($blocked.issues -join '; '))"
+    Assert-True ("$($blocked.issues -join ' ')" -match 'INVALID') 'the issue names the validation verdict'
+    Assert-True ("$($blocked.issues -join ' ')" -match 'AutoAnchor is armed') 'the issue says WHY it blocks (armed), not just what'
+    Assert-True ("$($blocked.issues -join ' ')" -match [regex]::Escape($badModel)) 'the issue quotes the configured model so the fix is obvious'
+    Assert-Equal 0 @($blocked.warnings).Count 'an armed bad profile is an issue, never a warning'
+    Assert-Equal 'INVALID' $blocked.profile.validation 'the returned gate carries the verdict'
+    Assert-True $blocked.profile.armed 'and whether the gate considered AutoAnchor armed'
+    Assert-Null $blocked.taskName 'no task name on a blocked install'
+    # "task not registered" has to be proven against the LIVE task, not against the
+    # return value: this task already exists (registered 30 minutes ago by the apply
+    # group), so the real promise is that the blocked install did not rewrite it.
+    Assert-NotNull (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) 'blocked install leaves the existing task in place'
+    Assert-Equal 30 (Get-TaskIntervalMinutes (Get-ScheduledTask -TaskName $taskName)) 'blocked install does not touch its interval'
+    # T02's other half: the rejected config never reached a model.
+    Assert-False (Test-Path -LiteralPath $env:CQK_MOCK_EXEC_ARGS_FILE) 'T02: blocked install makes zero codex exec calls'
+
+    Start-TestGroup '§7 gate: armed AutoAnchor cannot verify the profile -> UNAVAILABLE blocks (fail closed)'
+
+    # Three ways the environment refuses to answer, all the same gate decision.
+    # 'catalog-timeout' is deliberately not among them: that mode sleeps 120 s, and
+    # a 2-second wait already proves the point (docs/findings.md).
+    foreach ($unavailMode in @('config-error', 'catalog-error', 'catalog-badschema')) {
+        $env:CQK_MOCK_MODE = $unavailMode
+        $g = Get-ExecutionProfileGate -Config $gateBad -CodexPath $mockPath -KeeperRoot $keeperRoot -Stage 'Install'
+        $env:CQK_MOCK_MODE = 'normal'
+        Assert-True $g.attempted "[$unavailMode] the profile was actually resolved, not skipped"
+        Assert-Equal 'UNAVAILABLE' $g.validation "[$unavailMode] an unreadable catalog is UNAVAILABLE, not INVALID"
+        Assert-True $g.armed "[$unavailMode] gate sees AutoAnchor armed"
+        Assert-Equal 1 @($g.issues).Count "[$unavailMode] armed + UNAVAILABLE is a blocking issue"
+        Assert-True ("$($g.issues -join ' ')" -match 'could not be verified') "[$unavailMode] wording says unverified, not wrong"
+        Assert-Equal 0 @($g.warnings).Count "[$unavailMode] never demoted to a warning"
+    }
+    # The error kind comes from the low-level client, not from re-reading the message
+    # (§11): config/read failing for auth is a different kind from a malformed page.
+    $env:CQK_MOCK_MODE = 'config-error'
+    $gAuth = Get-ExecutionProfileGate -Config $gateBad -CodexPath $mockPath -KeeperRoot $keeperRoot -Stage 'Install'
+    $env:CQK_MOCK_MODE = 'normal'
+    Assert-True ([string]$gAuth.profile.errorKind -match 'AUTH|PROTOCOL|SCHEMA|NETWORK|RPC') "UNAVAILABLE carries a structured errorKind (got '$($gAuth.profile.errorKind)')"
+    Assert-False (Test-Path -LiteralPath $env:CQK_MOCK_EXEC_ARGS_FILE) 'an unverified profile never reaches codex exec either'
+
+    Start-TestGroup '§7 gate: not armed -> the same bad profile is a warning, never a blocker'
+
+    # mode=MonitorOnly with a bad model: read-only installs are not held hostage to
+    # a model they will never call.
+    $cfgMonitorBad = New-Cfg 15
+    $cfgMonitorBad.codex.autoAnchor = @{ enabled = $false; model = $badModel; reasoningEffort = 'low' }
+    $gMonitor = Get-ExecutionProfileGate -Config $cfgMonitorBad -CodexPath $mockPath -KeeperRoot $keeperRoot -Stage 'Install'
+    Assert-False $gMonitor.armed 'MonitorOnly is never armed'
+    Assert-Equal 0 @($gMonitor.issues).Count 'and its bad profile raises no blocking issue'
+    Assert-Equal 1 @($gMonitor.warnings).Count 'but the warning is still there'
+    Assert-True ("$($gMonitor.warnings -join ' ')" -match 'not armed') 'the warning says why nothing blocks'
+    Assert-True ("$($gMonitor.warnings -join ' ')" -match [regex]::Escape($badModel)) 'naming the model the operator still has to fix'
+
+    # mode=AutoAnchor + enabled=false: §7 row two - the mode claims anchoring, the
+    # switch does not, so no model runs today and nothing blocks.
+    $cfgModeNoEnable = New-ArmedCfg -Model $badModel
+    $cfgModeNoEnable.codex.autoAnchor.enabled = $false
+    $gDisarmed = Get-ExecutionProfileGate -Config $cfgModeNoEnable -CodexPath $mockPath -KeeperRoot $keeperRoot -Stage 'Install'
+    Assert-False $gDisarmed.armed 'mode=AutoAnchor alone is not armed (the runner needs enabled=true too)'
+    Assert-Equal 0 @($gDisarmed.issues).Count 'disarmed AutoAnchor never blocks'
+    Assert-Equal 1 @($gDisarmed.warnings).Count 'still warned'
+
+    # End to end, so the branch is not only unit-true: a MonitorOnly config with the
+    # same bad profile installs. 30-minute poll keeps the interval the status group
+    # below expects.
+    $cfgMApply = New-Cfg 30
+    $cfgMApply.codex.autoAnchor = @{ enabled = $false; model = $badModel }
+    $null = Write-TestConfigFile $cfgFile $cfgMApply
+    $monitorApplied = Invoke-ApplyConfig -KeeperRoot $keeperRoot -ConfigFile $cfgFile
+    Assert-True $monitorApplied.ok "MonitorOnly with a bad profile still applies ($($monitorApplied.issues -join '; '))"
+    Assert-True (@($monitorApplied.warnings).Count -ge 1) 'and reports the profile warning through the return value'
+    Assert-Equal 'INVALID' $monitorApplied.profile.validation 'carrying the verdict for the console line'
+    Assert-Equal 30 (Get-TaskIntervalMinutes (Get-ScheduledTask -TaskName $taskName)) 'the warning-only path did not change the interval either'
+
+    Start-TestGroup '§7 gate: blocked Apply leaves the existing scheduled task unchanged'
+
+    # §7 最后一条：Apply 失败时不能出现"新配置校验失败但计划任务已经部分更新".
+    # Registration is a read-modify-write, so the only safe ordering is gate first -
+    # which is what this pins: 20 minutes in the config, still 30 on the task.
+    $cfgArmedBad20 = New-ArmedCfg -Poll 20 -Model $badModel
+    $null = Write-TestConfigFile $cfgFile $cfgArmedBad20
+    $applyBlocked = Invoke-ApplyConfig -KeeperRoot $keeperRoot -ConfigFile $cfgFile
+    Assert-False $applyBlocked.ok 'apply with an armed invalid profile is rejected'
+    Assert-True ("$($applyBlocked.issues -join ' ')" -match 'INVALID') 'for the profile reason'
+    Assert-Equal 0 @($applyBlocked.warnings).Count 'blocking, not warning'
+    Assert-False $applyBlocked.taskCreated 'and nothing was created'
+    Assert-Equal 30 (Get-TaskIntervalMinutes (Get-ScheduledTask -TaskName $taskName)) 'the live task keeps the OLD interval (20 never reached it)'
+    Assert-Equal 'Codex Quota Keeper: scheduled read-only Codex quota polling (mode=MonitorOnly). One-shot runner, never resident.' `
+        (Get-ScheduledTask -TaskName $taskName).Description 'its description is the old MonitorOnly one, not the rejected config'
+    Assert-False (Test-Path -LiteralPath $env:CQK_MOCK_EXEC_ARGS_FILE) 'a rejected apply never calls the model either'
+
+    Start-TestGroup '§14.1 cache: written on a verdict, never on a read failure'
+
+    $cachePath = Get-ExecutionProfilePath $keeperRoot
+    $cfgGood = New-ArmedCfg -Poll 15
+    $gGood = Get-ExecutionProfileGate -Config $cfgGood -CodexPath $mockPath -KeeperRoot $keeperRoot -Stage 'Install'
+    Assert-Equal 'VALID' $gGood.validation 'an armed AutoAnchor inheriting the CLI config is VALID (no explicit model needed to pass)'
+    Assert-Equal 0 @($gGood.issues).Count 'a good profile blocks nothing'
+    Assert-True $gGood.cache.ok 'the valid profile was cached'
+    $cachedGood = Read-ExecutionProfileCache -KeeperRoot $keeperRoot
+    Assert-True $cachedGood.ok 'the cache reads back'
+    Assert-Equal 'mock-model-beta' $cachedGood.value.effectiveModel 'cached model is what the CLI config says (not a configured model)'
+    # 'high', not the model's own default: §6.2 puts the Codex CLI config ABOVE the
+    # catalog defaultReasoningEffort, and the mock's config/read reports high.
+    Assert-Equal 'high' $cachedGood.value.effectiveReasoningEffort 'cached effort comes from the CLI config'
+    Assert-Equal 'codex-config' $cachedGood.value.reasoningEffortSource 'and the cache keeps the source that explains it'
+    Assert-Equal 'VALID' $cachedGood.value.validation 'with the verdict'
+
+    # A read failure says nothing about the profile: the last real verdict survives,
+    # or the offline panel would report a good profile as broken.
+    $env:CQK_MOCK_MODE = 'config-error'
+    $gUnavail = Get-ExecutionProfileGate -Config $gateBad -CodexPath $mockPath -KeeperRoot $keeperRoot -Stage 'Install'
+    $env:CQK_MOCK_MODE = 'normal'
+    Assert-Equal 'UNAVAILABLE' $gUnavail.validation 'UNAVAILABLE still blocks an armed config'
+    $afterUnavail = Read-ExecutionProfileCache -KeeperRoot $keeperRoot
+    Assert-Equal 'mock-model-beta' $afterUnavail.value.effectiveModel 'UNAVAILABLE does not overwrite the cache'
+    Assert-Equal 'VALID' $afterUnavail.value.validation 'the last real verdict is still what the panel would show'
+
+    $gBad = Get-ExecutionProfileGate -Config $gateBad -CodexPath $mockPath -KeeperRoot $keeperRoot -Stage 'Install'
+    Assert-Equal 'INVALID' $gBad.validation 'INVALID is a real verdict, so it is worth showing offline'
+    $afterInvalid = Read-ExecutionProfileCache -KeeperRoot $keeperRoot
+    Assert-Equal 'INVALID' $afterInvalid.value.validation 'the cache now says INVALID'
+    Assert-Equal $badModel $afterInvalid.value.effectiveModel 'and names the model that was rejected'
+    # §23 on the write side too: the cache is a whitelist of profile facts.
+    $cacheText = [System.IO.File]::ReadAllText($cachePath)
+    foreach ($forbidden in @('notify', 'instructions', 'shell_environment_policy', 'enabled-reasoning-efforts', 'token', 'validationReason')) {
+        Assert-False ($cacheText -match ('"' + [regex]::Escape($forbidden) + '"\s*:')) "cached profile does not carry [$forbidden]"
+    }
+
+    Start-TestGroup '§14.1 gate summary: the console line distinguishes VALID / INVALID / never-checked'
+
+    Assert-True ((Get-ExecutionProfileGateSummary -Gate $gBad) -match 'INVALID \[armed\]') 'a blocking verdict is readable at a glance'
+    Assert-True ((Get-ExecutionProfileGateSummary -Gate $gGood) -match 'VALID \[armed\]') 'a good profile says so, with the model'
+    Assert-True ((Get-ExecutionProfileGateSummary -Gate $gMonitor) -match 'not armed') 'a warning-only verdict says it did not block'
+    Assert-Equal 'not checked (environment validation failed first)' (Get-ExecutionProfileGateSummary -Gate $null) 'a gate that never ran is not reported as a pass'
+
+    # Leave the workspace in the state the status groups below expect: a valid
+    # MonitorOnly config at a 30-minute interval.
+    $null = Write-TestConfigFile $cfgFile (New-Cfg 30)
 
     Start-TestGroup 'status: data collection and rendering'
 
@@ -296,6 +487,9 @@ try {
     Assert-False (Test-Path $histDir) 'history dir removed'
 } finally {
     Remove-Item Env:\CQK_MOCK_MODE -ErrorAction SilentlyContinue
+    # The §7 groups point this at a workspace file to prove "codex exec = 0"; the
+    # workspace goes anyway, but the variable must not outlive the file.
+    Remove-Item Env:\CQK_MOCK_EXEC_ARGS_FILE -ErrorAction SilentlyContinue
     # Safety: never leave the test task behind.
     $null = Invoke-TestGit -RepoPath $null -ArgumentList @() # no-op keep helper loaded
     try {

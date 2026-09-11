@@ -691,7 +691,7 @@ waits-per-attempt 调大。于是 6 处钉死的数字（40 / 80 / 140 / 720 / 9
   `logger.ps1`/`runner.ps1` 的 `$Event` 是同一取舍的既有先例；调用点写成 `-Profile $prof` 仍清晰。
   （CI 本身不跑 analyzer，与 CQK-037 一节所述一致，analyzer 是本地门禁。）
 - `tests/secret-scan.ps1` 独立跑：**84 files, no path exclusions, 0 issues**。
-  新测试里的「投毒 token」最初写成字面量 `sk-should-never-be-written`，被扫描器的
+  新测试里的「投毒 token」最初写成一个 `sk-` 开头、后接 20+ 个单词字符的字面量，被扫描器的
   `sk-[A-Za-z0-9_\-]{20,}` 命中——改为拼接构造，与 `secret-scan.test.ps1` 自身遵守的规则一致。
 
 ### 一次假失败的教训（值得复述）
@@ -700,5 +700,58 @@ waits-per-attempt 调大。于是 6 处钉死的数字（40 / 80 / 140 / 720 / 9
 还在睡眠就抢走了子进程 spawn 资源。排查时踩到第二个坑——用 `Win32_Process.CommandLine -like
 '*mock-appserver*'` 找残留，探测命令自身（以及 Git 的 bash 包装）也含该字符串，于是「查到 1 个」
 是假的。正确姿势：按 `Name` 过滤 + 排除自身 PID + 看 `CreationDate` 年龄再信数字。
+
+## 会话：第四轮 阶段 F —— CQK-039 Install/Apply armed gate（完成）
+
+### 交付
+- **`scripts/install.ps1`（新增 `Get-ExecutionProfileGate` :200-273 / `Get-ExecutionProfileGateSummary` :275-293）**：
+  §7 门禁表的唯一实现点。返回 `@{attempted; armed; validation; profile; issues; warnings; cache}`。
+  三种走法各自明确：VALID → 写缓存后干净返回；INVALID → 写缓存（面板要知道最后一次真实结论）；
+  **UNAVAILABLE → 刻意不碰缓存**（读失败证明不了任何事，覆盖掉上次 verdict 会让离线面板撒谎）。
+  armed 时产 1 条 issue（文案尾随 `$Stage` 区分「任务未注册」/「既有计划任务保持不变」）；
+  非 armed 时产 1 条 warning，`issues` 保持为空 —— 因为本仓库里非空 `issues` 即 `ok=$false`，
+  把 MonitorOnly 的模型笔误算作 issue 就等于把只读安装变成不可安装，正是 §7 明令禁止的那一格。
+- **`Invoke-KeeperInstall` 第 3 步（:330-343）**：门禁位于环境校验与额度探测**之后**、
+  `if ($issues.Count -gt 0) { return }` **之前**，因此阻断时 Task Scheduler 一次都没被碰过。
+  前置条件 `$pf.codexPath -and $issues.Count -eq 0`：已知损坏的环境不再开 app-server 会话。
+  `-SkipProbe` **不**跳过门禁（§14.1 要 Install/Apply 走 Live 强校验，可绕过的门禁不是门禁）。
+  每条返回都带 `warnings` + `profile`；控制台多打 `[WARN]` 行与 `Execution profile:` 一行摘要。
+- **`scripts/apply-config.ps1`（:41-45）**：`Resolve-CodexCommand` 后立刻过门禁，位置在**两次**
+  `Register-KeeperTask`（:52/:55）**之前**。注册是对 live 任务的 read-modify-write 且无回滚，
+  所以「先门禁、后写」是让 §7「Apply 失败必须保持原有计划任务配置不变」在结构上成立、
+  并可被测试廉价验证（只需断言 live 任务的 interval / Description 仍是旧值）的唯一次序。
+- **`scripts/common.ps1`**：新增 `Test-AutoAnchorArmed`（mode=AutoAnchor AND enabled=true 的**唯一拼法**），
+  并把 `Get-CodexTickBudgetSeconds`(:448)、`runner.ps1`(:212)、任务描述(:149)、本门禁(:239) 四处
+  手写合取统一收敛到它；`Test-ConfigShape` 里模型/等级的注释改为「形态归 L1，语义归 CQK-038 解析器 +
+  §7 门禁 + §8 的 Claim 前复验」。
+- **`tests/install-status.test.ps1`（+6 组）**：T02 端到端阻断（`Installed: NO`，并用
+  `Assert-False (Test-Path $env:CQK_MOCK_EXEC_ARGS_FILE)` 兑现「codex exec = 0」）、
+  UNAVAILABLE×3（`config-error` / `catalog-error` / `catalog-badschema`，刻意不含会睡 120s 的
+  `catalog-timeout`）、非 armed 两格仅警告 + 端到端 MonitorOnly 仍可安装、blocked Apply 不动 live 任务、
+  §14.1 缓存（VALID 写 / UNAVAILABLE 不改 / INVALID 更新 + §23 裸文本负向扫描）、门禁摘要四态。
+
+### 两个必须记下的坑（详见 findings.md）
+1. `Test-ConfigShape` 自带 `codex.queryTimeoutSeconds >= 5` 硬下限：把测试配置的 timeout 调到 2s
+   不会让门禁更快，只会让配置在 L1 就被判非法、门根本不开，表现为 `$blocked.profile` 为 `$null`
+   连带 4 FAIL + 1 终止性错误。修法是夹具默认 `-Timeout 5` **且**在 `New-ArmedCfg` 内 fail-fast
+   `throw`，让未来任何 L1 规则漂移都无法再伪装成 Profile 判定。
+2. `docs/` 也在 `tests/secret-scan.ps1` 扫描范围内：本节上一版草稿原文引用了一个凭据形状的字面量，
+   直接把 `secret-scan.test.ps1` 打挂。规划笔记描述凭据只能用文字。
+
+### 回归
+- `tests/install-status.test.ps1`：PS7 单文件 EXIT=0（18 组，含本次 6 组）；WinPS 5.1 单文件 EXIT=0。
+- `tests/run-all.ps1`：**PS7 19/19 通过**；**WinPS 5.1 `RESULT: all 19 test file(s) passed.`**
+- PSScriptAnalyzer（本次 6 个文件）：**ERRORS=0 / TOTAL=31**。其中 3 条
+  `PSAvoidAssignmentToAutomaticVariable` 逐文件定位后确认为**既有基线**：
+  `codex-profile.ps1` :264/:287 的公开参数 `-Profile`（仅函数作用域内遮蔽，画像路径从不读 `$PROFILE`）、
+  `runner.ps1` :37 的 `$Event`（`logger.ps1` 同规则的先例）。仓库级 `scripts` 递归基线仍是
+  ERRORS=0 / TOTAL=70，规则种类未新增。（CI 不跑 analyzer，analyzer 是本地门禁。）
+- `tests/secret-scan.ps1`：脱敏后 0 issues。
+
+### 下一步
+- 阶段 F 续：**CQK-040** 在 `Invoke-AutoAnchorIfNeeded` 的 **Claim 之前**（auto-anchor.ps1:164-169
+  守卫、:180-189 认领）做 Live Profile 复验：INVALID/UNAVAILABLE → 审计留 skip 记录、不 claim、
+  不 exec、下一轮可复验；同时把 `Get-CodexProfileBudgetSeconds` 正式接入
+  `Get-CodexTickBudgetSeconds`，并重新核对 6 个钉死的预算数字。
 
 

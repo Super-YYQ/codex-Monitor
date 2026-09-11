@@ -18,6 +18,9 @@ if (-not (Get-Command Invoke-Preflight -ErrorAction SilentlyContinue)) {
 if (-not (Get-Command Invoke-CodexRateLimitsRead -ErrorAction SilentlyContinue)) {
     . (Join-Path $script:CqkInstallDir 'quota-client.ps1')
 }
+if (-not (Get-Command Resolve-ExecutionProfile -ErrorAction SilentlyContinue)) {
+    . (Join-Path $script:CqkInstallDir 'codex-profile.ps1')
+}
 
 function Get-KeeperPowerShellPath {
     $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
@@ -143,7 +146,7 @@ function Get-KeeperTaskDescription {
     param([hashtable]$Config)
     $mode = if ($Config) { [string]$Config.mode } else { 'MonitorOnly' }
     if ([string]::IsNullOrWhiteSpace($mode)) { $mode = 'MonitorOnly' }
-    $anchoring = ($mode -eq 'AutoAnchor') -and (Test-AutoAnchorEnabled $Config)
+    $anchoring = Test-AutoAnchorArmed $Config
     if ($anchoring) {
         return 'Codex Quota Keeper: scheduled Codex quota polling + EXPERIMENTAL auto-anchoring (AutoAnchor). One-shot runner, never resident.'
     }
@@ -194,21 +197,120 @@ function Register-KeeperTask {
     return $tp.TaskName
 }
 
+function Get-ExecutionProfileGate {
+    # doc v3.0 §7: strong semantic validation is NOT a universal blocker. The gate
+    # only bites when AutoAnchor is genuinely armed (mode=AutoAnchor AND
+    # codex.autoAnchor.enabled=true), because that is the only state where a model
+    # call is actually going to happen:
+    #
+    #   mode=MonitorOnly                  -> warning only (read-only install stands)
+    #   mode=AutoAnchor + enabled=false   -> warning only (no model runs today)
+    #   mode=AutoAnchor + enabled=true    -> INVALID or UNAVAILABLE blocks
+    #
+    # UNAVAILABLE blocks too when armed: "could not check" is not "checked and
+    # fine", and an unattended keeper must fail closed rather than anchor on an
+    # unverified profile.
+    #
+    # The resolution is LIVE (one app-server session: config/read + the full
+    # model/list) rather than reused from preflight, because §6.2 requires the
+    # profile to be read in the same Codex environment `codex exec` will use.
+    #
+    # Returns @{ attempted; armed; validation; profile; issues; warnings; cache }.
+    # `issues` is what a caller appends to its blocking list; `warnings` is a
+    # SEPARATE list on purpose - a MonitorOnly config with a typo'd model must not
+    # become un-installable, and folding the warning into `issues` would do exactly
+    # that (any non-empty issue list means ok=$false here).
+    param(
+        [hashtable]$Config,
+        [string]$CodexPath = '',
+        [string]$KeeperRoot = '',
+        [string]$Stage = 'Install'
+    )
+    $out = @{
+        attempted  = $false
+        armed      = $false
+        validation = ''
+        profile    = $null
+        issues     = @()
+        warnings   = @()
+        cache      = $null
+    }
+    if ($null -eq $Config) { return $out }
+    $armed = Test-AutoAnchorArmed $Config
+    $out.armed = $armed
+
+    $prof = Resolve-ExecutionProfile -Config $Config -CodexPath $CodexPath
+    $out.attempted = $true
+    $out.profile = $prof
+    $out.validation = [string]$prof.validation
+
+    $aa = Get-AutoAnchorConfig $Config
+    $configured = "codex.autoAnchor.model='$($aa.model)' reasoningEffort='$($aa.reasoningEffort)'"
+    if ($prof.validation -eq 'VALID') {
+        # Nothing to report, but do leave the panel something to show offline
+        # (§14.1): this is the freshest verified profile anyone has taken.
+        $out.cache = Write-ExecutionProfileCache -KeeperRoot $KeeperRoot -Profile $prof
+        return $out
+    }
+    if ($prof.validation -eq 'INVALID') {
+        $out.cache = Write-ExecutionProfileCache -KeeperRoot $KeeperRoot -Profile $prof
+    }
+    # UNAVAILABLE deliberately does NOT touch the cache: a read failure says
+    # nothing about the profile, and overwriting the last real verdict with it
+    # would make the offline status panel lie about a profile that was fine.
+    $text = "execution profile could not be verified ($($prof.errorKind)): $($prof.validationReason)"
+    if ($prof.validation -eq 'INVALID') {
+        $text = "execution profile is invalid: $($prof.validationReason)"
+    }
+    if ($armed) {
+        $tail = 'the task was not registered'
+        if ($Stage -ne 'Install') { $tail = 'the existing scheduled task was left unchanged' }
+        $out.issues += "AutoAnchor is armed but its $text ($configured). Fix codex.autoAnchor.model / reasoningEffort or the Codex CLI config they inherit; $tail."
+        return $out
+    }
+    $out.warnings += "AutoAnchor is not armed, so its $text ($configured). Warning only: no model call is configured, nothing here blocks $Stage."
+    return $out
+}
+
+function Get-ExecutionProfileGateSummary {
+    # One line for the install/apply console: what the keeper will actually run,
+    # and whether anyone checked. A gate that only ever speaks when it fails
+    # leaves the operator unable to tell "verified good" from "never looked".
+    param($Gate)
+    if ($null -eq $Gate -or -not $Gate.attempted) { return 'not checked (environment validation failed first)' }
+    $prof = $Gate.profile
+    $state = if ($Gate.armed) { 'armed' } else { 'not armed' }
+    if ($prof.validation -ne 'VALID') {
+        $reason = [string]$prof.validationReason
+        if ($reason.Length -gt 160) { $reason = $reason.Substring(0, 157) + '...' }
+        return "$($prof.validation) [$state] - $reason"
+    }
+    # An empty effort is a legitimate VALID answer (the model declares no default
+    # and the config says nothing), so it gets a word rather than a blank.
+    $effort = [string]$prof.effectiveReasoningEffort
+    if (-not $effort) { $effort = 'cli-default' }
+    return "VALID [$state] - $($prof.effectiveModel) / $effort (source: $($prof.modelSource))"
+}
+
 function Invoke-KeeperInstall {
-    # Returns @{ ok; issues; taskName; machine; probe; codexPath }
+    # Returns @{ ok; issues; warnings; taskName; machine; probe; codexPath }
     param(
         [string]$KeeperRoot = '',
         [string]$ConfigFile = '',
         [switch]$SkipProbe
     )
     $issues = @()
+    $warnings = @()
+    # Set when a config is needed; -SkipProbe skips the read that would otherwise
+    # load it, so every later use has to test for null instead of assuming.
+    $loaded = $null
     if (-not $KeeperRoot) { $KeeperRoot = Get-KeeperRoot }
     if (-not $ConfigFile) { $ConfigFile = Get-ConfigPath $KeeperRoot }
 
     # 1. Environment validation (PS version, git, codex, repo whitelist, runtime).
     $pf = Invoke-Preflight -Config $null -ConfigPath $ConfigFile -KeeperRoot $KeeperRoot
     if ($null -eq $pf -or -not $pf.machine) {
-        return @{ ok = $false; issues = @('preflight failed before producing a machine identity'); taskName = $null; machine = $null; probe = $null; codexPath = $null }
+        return @{ ok = $false; issues = @('preflight failed before producing a machine identity'); warnings = @(); profile = $null; taskName = $null; machine = $null; probe = $null; codexPath = $null }
     }
     $issues += $pf.issues
     if ($PSVersionTable.PSVersion.Major -lt 5) {
@@ -225,18 +327,33 @@ function Invoke-KeeperInstall {
         }
     }
 
-    if ($issues.Count -gt 0) {
-        return @{ ok = $false; issues = $issues; taskName = $null; machine = $pf.machine; probe = $probe; codexPath = $pf.codexPath }
+    # 3. Execution profile gate (doc v3.0 §7). Deliberately after the checks above
+    # and BEFORE the issue-list return below: a blocking profile therefore stops
+    # the registration without having touched Task Scheduler at all. Skipped when
+    # an earlier check already failed - there is no point opening an app-server
+    # session in an environment that is known-broken, and the install is blocked
+    # either way. -SkipProbe does NOT skip this: §14.1 makes Install/Apply live
+    # validation, and a bypassable gate is not a gate.
+    $gate = $null
+    if ($pf.codexPath -and $issues.Count -eq 0) {
+        if ($null -eq $loaded) { $loaded = Load-Config $ConfigFile }
+        $gate = Get-ExecutionProfileGate -Config $loaded.config -CodexPath $pf.codexPath -KeeperRoot $KeeperRoot -Stage 'Install'
+        $issues += $gate.issues
+        $warnings += $gate.warnings
     }
 
-    # 3. Machine identity already ensured by preflight (random UUID + label).
+    if ($issues.Count -gt 0) {
+        return @{ ok = $false; issues = $issues; warnings = $warnings; profile = $gate; taskName = $null; machine = $pf.machine; probe = $probe; codexPath = $pf.codexPath }
+    }
 
-    # 4/5. Register the per-user scheduled task.
-    $loaded = Load-Config $ConfigFile
+    # 4. Machine identity already ensured by preflight (random UUID + label).
+
+    # 5/6. Register the per-user scheduled task.
+    if ($null -eq $loaded) { $loaded = Load-Config $ConfigFile }
     $taskName = Register-KeeperTask -Config $loaded.config -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile
     $forcedAnchor = Invoke-ForcedAnchorIfRequested -Config $loaded.config -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile
 
-    return @{ ok = $true; issues = @(); taskName = $taskName; machine = $pf.machine; probe = $probe; codexPath = $pf.codexPath; forcedAnchor = $forcedAnchor }
+    return @{ ok = $true; issues = @(); warnings = $warnings; profile = $gate; taskName = $taskName; machine = $pf.machine; probe = $probe; codexPath = $pf.codexPath; forcedAnchor = $forcedAnchor }
 }
 
 # Direct execution (pwsh -File / install.cmd): run the install interactively.
@@ -245,10 +362,12 @@ if ($MyInvocation.InvocationName -ne '.') {
     Write-Host 'Codex Quota Keeper - Install'
     Write-Host '========================================'
     foreach ($i in $result.issues) { Write-Host "  [ISSUE] $i" -ForegroundColor Yellow }
+    foreach ($w in $result.warnings) { Write-Host "  [WARN] $w" -ForegroundColor DarkYellow }
     if ($result.ok) {
         Write-Host "  Installed        : YES (task '$($result.taskName)')"
         Write-Host "  Machine identity : $($result.machine.label) [$($result.machine.machineId)]"
         Write-Host "  Quota probe      : $(if ($SkipProbe) { 'SKIPPED (-SkipProbe)' } else { 'OK (read-only, no model call)' })"
+        Write-Host "  Execution profile: $(Get-ExecutionProfileGateSummary -Gate $result.profile)"
         Write-Host "  Forced anchor    : $(if ($result.forcedAnchor.started) { 'STARTED (codex.autoAnchor.anchorOnApply=true)' } else { "no ($($result.forcedAnchor.reason))" })"
         Write-Host ''
         Write-Host '  Next: double-click status.cmd to verify.'

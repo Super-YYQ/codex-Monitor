@@ -254,6 +254,13 @@ function Get-ExecutionProfileCacheFields {
     # In particular NOT the catalog, NOT supportedReasoningEfforts, NOT a token,
     # NOT any part of the raw config/read answer, and not configuredModel either
     # (that is read straight from config.json by whoever displays it).
+    #
+    # validationReason / errorKind are deliberately OUT even though the offline
+    # panel would look better with them: §23 limits the cache to the fields it
+    # names, and a reason string is text this repository does not control (an
+    # app-server message can quote a path, an account label or a URL). A status
+    # panel that wants the WHY has to go -Live, which is exactly the boundary the
+    # doc draws between the safe cache and the live read.
     param($Profile)
     $out = @{
         effectiveModel           = ''

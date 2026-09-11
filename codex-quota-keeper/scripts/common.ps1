@@ -329,6 +329,19 @@ function Test-AutoAnchorEnabled {
     return (Get-AutoAnchorConfig $Config).enabled
 }
 
+function Test-AutoAnchorArmed {
+    # "Would this config actually make the keeper call a model?" - mode alone is
+    # not enough and enabled alone is not enough; the runner needs both. Doc v3.0
+    # §7 makes this exact conjunction the switch between "a bad execution profile
+    # is a warning" and "a bad execution profile blocks the install", so it is
+    # spelled once here. Every place that hand-wrote the conjunction now calls
+    # this, because a gate that drifts from the predicate it guards is a gate that
+    # silently stops firing.
+    param([hashtable]$Config)
+    if ($null -eq $Config) { return $false }
+    return ([string]$Config.mode -eq 'AutoAnchor') -and (Test-AutoAnchorEnabled $Config)
+}
+
 function Get-ProxyConfig {
     # codex.proxy = '' (off) or an http/https/socks5 proxy URL handed to the codex
     # child process as HTTP_PROXY/HTTPS_PROXY/ALL_PROXY (CQK-020 proxy support).
@@ -432,8 +445,7 @@ function Get-CodexTickBudgetSeconds {
     param([hashtable]$Config)
     $read = Get-CodexAttemptBudgetSeconds $Config
     $seconds = $read.seconds
-    $aa = Get-AutoAnchorConfig $Config
-    if ($Config -and [string]$Config.mode -eq 'AutoAnchor' -and $aa.enabled) {
+    if (Test-AutoAnchorArmed $Config) {
         $seconds += (Get-AnchorExecBudgetSeconds $Config) + $read.seconds
     }
     $coord = Get-CoordinationConfig $Config
@@ -764,10 +776,14 @@ function Test-ConfigShape {
             $issues += ("codex.autoAnchor.schedule has {0} slot(s) but maxPerDay is {1}; the daily cap would block later slots" -f @($aa.schedule).Count, [int]$aa.maxPerDay)
         }
         # Model / reasoning effort passthrough (codex exec -m / -c model_reasoning_effort=).
-        # Deliberately NOT a semantic whitelist: valid values (e.g. reasoning tiers)
-        # evolve with CLI/model versions, so only the safe shape is enforced. A
-        # typo'd value surfaces at exec time through the existing fail-closed
-        # ANCHOR_ABORTED path - after the config check would have had its chance.
+        # Only the safe SHAPE is enforced here - deliberately no static whitelist,
+        # because valid values evolve with CLI/model versions and this layer has no
+        # idea what the local Codex serves (doc v3.0 §5 设计原则: the catalog is the
+        # authority, and it is only reachable live). The semantic half of the check
+        # is CQK-038's resolver, which Install/Apply run against the real CLI before
+        # registering anything (§7), and the runner revalidates before every Claim
+        # (§8). A typo'd value therefore fails closed at install time when anchoring
+        # is armed, and at anchor time afterwards, instead of at exec time.
         if (-not [string]::IsNullOrWhiteSpace([string]$aa.model)) {
             if ([string]$aa.model -cnotmatch '^[A-Za-z0-9._-]{1,100}$') {
                 $issues += ("codex.autoAnchor.model must be 1-100 chars of letters/digits/dot/underscore/dash (got '{0}')" -f [string]$aa.model)

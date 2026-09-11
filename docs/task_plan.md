@@ -144,8 +144,10 @@ codex-quota-keeper/
       来源永远是本机 Codex CLI 自身，**仓库内不写任何静态模型白名单**。
 
 ## 阶段 F：安装/运行期门禁（CQK-039 + 040）
-- [ ] CQK-039 Install/Apply armed gate：mode=AutoAnchor + enabled=true 硬阻断；MonitorOnly 或
+- [x] CQK-039 Install/Apply armed gate：mode=AutoAnchor + enabled=true 硬阻断；MonitorOnly 或
       enabled=false 仅警告；UNAVAILABLE fail closed；Apply 失败不得改动既有计划任务。
+      （`Get-ExecutionProfileGate` / `Get-ExecutionProfileGateSummary` @ install.ps1；
+      issues vs warnings 双列表；UNAVAILABLE 不写 cache；apply-config 在两次 Register 之前门禁。）
 - [ ] CQK-040 运行期 Claim **之前**做 live Profile 复验：INVALID/UNAVAILABLE → 不 claim、不 exec、下一轮再试。
 
 ## 阶段 G：审计与计数（CQK-041 + 042）
