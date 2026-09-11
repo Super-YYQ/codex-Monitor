@@ -87,6 +87,29 @@ function Claim-AnchorEvent {
     return Claim-DistributedAnchorEvent -Config $Config -KeeperRoot $KeeperRoot -EventId $EventId -Machine $Machine -ClaimMinutes $ClaimMinutes
 }
 
+function New-AnchorInvocationId {
+    # doc v3.0 §4.1: one PHYSICAL codex exec gets its own audit id, because a
+    # single call may be triggered by several merged reset/schedule events. A
+    # trigger eventId can therefore never be reused as the model-call id - and
+    # the id must not be derived from just one of them (that is how
+    # $claimed[0] silently dropped the rest of the merged triggers).
+    # Shape: anchor-<yyyyMMddTHHmmss>-<6 hex>, like the doc's example. The digest
+    # covers the trigger set, the start second, the machine and the run id - all
+    # four are present in the audit record, so the soak runbook can re-derive the
+    # id from the record it is checking. Two physical execs can never share a
+    # trigger set anyway: every claimed event ends terminal (COMPLETED/FAILED/
+    # EXPIRED), and any existing claim blocks execution.
+    param([string[]]$TriggerEventIds, [string]$StartedAt, [string]$MachineId)
+    $stamp = 'unknown'
+    if ($StartedAt -match '^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})') {
+        $stamp = ($Matches[1] + $Matches[2] + $Matches[3] + 'T' + $Matches[4] + $Matches[5] + $Matches[6])
+    }
+    $runId = $(if ($script:CqkRunId) { [string]$script:CqkRunId } else { '' })
+    $ids = @($TriggerEventIds | ForEach-Object { [string]$_ } | Sort-Object)
+    $digest = Get-Sha256Hex (($ids -join ',') + '|' + $StartedAt + '|' + $MachineId + '|' + $runId)
+    return 'anchor-' + $stamp + '-' + $digest.Substring(0, 6)
+}
+
 function Test-LeaseRevalidation {
     # CQK-014: after claiming, re-confirm the leader lease is still ours AND has
     # enough remaining time for the safe execution window.
@@ -111,7 +134,16 @@ function Test-LeaseRevalidation {
 
 function Invoke-AutoAnchorIfNeeded {
     # Called by runner when mode=AutoAnchor and codex.autoAnchor=true.
-    # Returns @{ anchored; events; historyFiles }.
+    # Returns @{ anchored; events }.
+    #
+    # SINGLE WRITER (doc v3.0 §4, CQK-036): this module executes the business
+    # logic and RETURNS events - it never calls Write-OutboxEvent /
+    # Write-HistoryEvent itself. The runner is the only Event Persistence
+    # Owner, so one physical codex exec produces exactly one audit record.
+    # The ANCHOR_EXECUTED / ANCHOR_ABORTED event emitted for a physical exec
+    # carries eventId = anchorInvocationId (§4.1: a trigger eventId can never be
+    # reused as the model-call id) plus the post-anchor windows, so the runner
+    # needs no second pass to key the audit on the invocation.
     # -ForceAnchor (codex.autoAnchor.anchorOnApply -> install/apply-config) fires
     # one anchor right away, bypassing keepalive and the minimum gap; the guard
     # still enforces the daily cap and all fail-closed checks.
@@ -201,7 +233,6 @@ function Invoke-AutoAnchorIfNeeded {
     if ($localOnly) {
         $out.events += ,@{ event = 'ANCHOR_LOCAL'; reason = 'coordination disabled; durable local claim file only' }
     }
-    $before = $State.buckets
     $workDir = Join-Path (Get-RuntimeDir $KeeperRoot) 'anchor-work'
     Ensure-Directory $workDir | Out-Null
     $anchorCfgExec = Get-AutoAnchorConfig $Config
@@ -219,21 +250,25 @@ function Invoke-AutoAnchorIfNeeded {
     $verified = [bool]$verify.ok
     $endedAt = Get-IsoTimestamp
 
+    # doc v3.0 §4.1: this physical exec gets exactly one audit id, shared by the
+    # runtime log, the local history and the remote history (via the outbox).
+    $invocationId = New-AnchorInvocationId -TriggerEventIds $claimed -StartedAt $startedAt `
+        -MachineId ([string]$Machine.machineId)
+
     $anchorInfo = @{
-        phase           = $(if ($verified -and $exec.ok) { 'ANCHORED' } else { 'ABORTED' })
-        trigger         = [string]$guard.triggerKind
-        localOnly       = $localOnly
-        eventIds        = $claimed
-        startedAt       = $startedAt
-        endedAt         = $endedAt
-        durationSecs    = [int]$sw.Elapsed.TotalSeconds
-        execExitCode    = $exec.exitCode
-        verified        = $verified
-        model           = $(if ([string]::IsNullOrWhiteSpace([string]$anchorCfgExec.model)) { $null } else { [string]$anchorCfgExec.model })
-        reasoningEffort = $(if ([string]::IsNullOrWhiteSpace([string]$anchorCfgExec.reasoningEffort)) { $null } else { [string]$anchorCfgExec.reasoningEffort })
-        before          = $before
-        after           = $(if ($verify.ok) { $verify.buckets } else { $null })
-        reason          = $(if (-not $exec.ok) { "exec failed ($($exec.exitCode))" } elseif (-not $verified) { 'post-anchor verification failed; no retry' } else { $null })
+        phase             = $(if ($verified -and $exec.ok) { 'ANCHORED' } else { 'ABORTED' })
+        trigger           = [string]$guard.triggerKind
+        localOnly         = $localOnly
+        anchorInvocationId = $invocationId
+        triggerEventIds   = $claimed
+        startedAt         = $startedAt
+        endedAt           = $endedAt
+        durationSecs      = [int]$sw.Elapsed.TotalSeconds
+        execExitCode      = $exec.exitCode
+        verified          = $verified
+        model             = $(if ([string]::IsNullOrWhiteSpace([string]$anchorCfgExec.model)) { $null } else { [string]$anchorCfgExec.model })
+        reasoningEffort   = $(if ([string]::IsNullOrWhiteSpace([string]$anchorCfgExec.reasoningEffort)) { $null } else { [string]$anchorCfgExec.reasoningEffort })
+        reason            = $(if (-not $exec.ok) { "exec failed ($($exec.exitCode))" } elseif (-not $verified) { 'post-anchor verification failed; no retry' } else { $null })
     }
 
     # Execution consumed quota regardless of verification: count it.
@@ -244,11 +279,23 @@ function Invoke-AutoAnchorIfNeeded {
 
     foreach ($id in $claimed) { Add-ProcessedEvent -State $State -EventId $id }
 
+    # ---- ONE invocation audit, written by the Runner (single writer) ---------
+    # doc v3.0 §4: AutoAnchor = business execution + returns events; Runner = the
+    # only Event Persistence Owner. The event below IS that invocation audit as
+    # far as this module is concerned: keyed on anchorInvocationId (with the id
+    # and the full trigger set also nested under `anchor`, because that is the
+    # only path Sanitize-Record keeps), and carrying the post-anchor verification
+    # read so the record shows the effect. Never keyed on $claimed[0], which
+    # silently dropped every merged trigger after the first.
     if ($verified -and $exec.ok) {
-        $out.events += ,@{ event = 'ANCHOR_EXECUTED'; anchor = $anchorInfo }
+        $out.events += ,@{ event = 'ANCHOR_EXECUTED'; eventId = $invocationId
+                           anchorInvocationId = $invocationId; triggerEventIds = $claimed
+                           windows = $verify.windows; anchor = $anchorInfo }
         $out.anchored = $true
     } else {
-        $out.events += ,@{ event = 'ANCHOR_ABORTED'; reason = $anchorInfo.reason; anchor = $anchorInfo }
+        $out.events += ,@{ event = 'ANCHOR_ABORTED'; eventId = $invocationId
+                           anchorInvocationId = $invocationId; triggerEventIds = $claimed
+                           reason = $anchorInfo.reason; anchor = $anchorInfo }
     }
 
     # Finalize every claimed event: COMPLETED on verified success, FAILED otherwise.
@@ -263,24 +310,5 @@ function Invoke-AutoAnchorIfNeeded {
             -Result $anchorInfo.reason -ClaimedAt $startedAt -CompletedAt $endedAt -LocalOnly $localOnly
     }
 
-    # History record with before/after snapshots (doc 01 §6): durable outbox
-    # entry + local JSONL audit copy.
-    $logging = Get-LoggingConfig $Config
-    $anchorRecord = @{
-        eventId      = [string]$claimed[0]
-        event        = $(if ($verified -and $exec.ok) { 'ANCHOR_EXECUTED' } else { 'ANCHOR_ABORTED' })
-        machineId    = [string]$Machine.machineId
-        machineLabel = [string]$Machine.label
-        role         = 'LEADER'
-        mode         = [string]$Config.mode
-        windows      = $anchorInfo.after
-        anchor       = $anchorInfo
-        error        = $anchorInfo.reason
-    }
-    $null = Write-OutboxEvent -Root $KeeperRoot -Record $anchorRecord -MachineId ([string]$Machine.machineId) `
-        -RunId $(if ($Election.runId) { [string]$Election.runId } else { '' }) `
-        -IncludeMachineLabel:([bool]$logging.includeMachineLabel) -When $now
-    $null = Write-HistoryEvent -Root $KeeperRoot -Record $anchorRecord `
-        -IncludeMachineLabel:([bool]$logging.includeMachineLabel) -When $now
     return $out
 }

@@ -536,4 +536,56 @@ R19. `267073e` + 本次 docs commit **CQK-034/035 发布工程 + 收尾（README
   加 `.gitattributes` 属仓库级行为变更，留给用户定夺。
 - github MCP 本会话全程 400 连接失败，需用户检查其凭证配置（本轮所有平台查询改走 `gh api`）。
 
+---
+
+## 第四轮 v3.0 — 阶段 D：CQK-036 Anchor Audit 双写消除（2026-09-11 完成）
+
+基线 `cdca944`（= 文档 §「v3.0 基线」）。改动 4 个源文件 + 2 个规划文件。
+
+- **`auto-anchor.ps1` 改为纯业务模块**：删除全部 `Write-OutboxEvent` / `Write-HistoryEvent`
+  调用（原文档 P0-01 证据 :266-284 的双写点）。模块现在只**返回事件**，Runner 是唯一的
+  Event Persistence Owner（doc v3.0 §4）。
+- **新增 `New-AnchorInvocationId`**（:90-111）：一次物理 `codex exec` 一个 `anchorInvocationId`，
+  形如 `anchor-<yyyyMMddTHHmmss>-<6hex>`（与文档示例同形状）。摘要覆盖**全部**已 claim 的
+  trigger eventId（排序后拼接）+ startedAt + machineId + runId —— 修掉旧代码
+  `$anchorRecord.eventId = [string]$claimed[0]` 丢掉合并触发其余 id 的缺陷（§4.1：
+  trigger eventId 永远不能复用为模型调用 id）。
+- **`ANCHOR_EXECUTED` / `ANCHOR_ABORTED` 事件自带 `eventId = anchorInvocationId`**，并同时把
+  `anchorInvocationId` + 完整 `triggerEventIds` 嵌进 `anchor` 对象（`Sanitize-Record` 只保留
+  `anchor.*`，见 `common.ps1:249-272`，嵌套是唯一能落到本地 history 的路径），并携带
+  post-anchor 复验读到的 `windows`。Runner 不再需要第二遍就能按 invocation 键化审计。
+- **`runner.ps1`**：事件→日志循环与 significant→Outbox/History 写入逻辑保持单一路径，
+  只是补上 anchor 对象的传递（§9.1 要求 runtime log 必须携带 Anchor 对象，三处审计面不可漂移）。
+- **新增测试 T07 / T08**（doc v3.0 §19，`tests/auto-anchor.test.ps1` 两个新组）：
+  - **T07**（1 个 trigger → 1 exec = 1 Anchor Audit = 1 Outbox = 1 History）：读 schedule 到期槽
+    触发单次锚定，断言三处表面各恰好 1 条 `ANCHOR_EXECUTED`、0 条 `ANCHOR_ABORTED`、
+    exec 调用 1 次（`CQK_MOCK_EXEC_ARGS_FILE` 非空行数）、本地 history 无 `ANCHOR_LOCAL`、
+    claim 文件 1 条且 COMPLETED、invocation id 形状匹配 `^anchor-\d{8}T\d{6}-[0-9a-f]{6}$`、
+    同一 id 贯穿 history/outbox、outbox 记录带 `eventId` 且文件名（`BaseName`）即该 id、
+    trigger 数 1、claim 文件仍按 trigger eventId 键化、且 invocation id ≠ trigger id。
+  - **T08**（2 个 reset 同轮 → 2 Claim + 1 exec + 1 Invocation Audit）：用新夹具模式
+    `multi-reset-baseline` → `multi-reset`（两个 bucket 都带 primary 窗口，只有 resetsAt 前进，
+    普通 `multi-bucket` 模式做不到，已在 mock 注释里写明）触发同轮 2 个 reset，断言
+    2 claim / 1 exec / 三处表面各 1 条 invocation 审计、history 里 0 条 `ANCHOR_ABORTED`、
+    `triggerEventIds` 恰为 2 个且等于硬编码 SHA-256 输入（`bucket-a|primary|300|1788062400|reset`、
+    `bucket-b|primary|300|1788063000|reset`）、两个 claim 均 COMPLETED、每个 claim 都能映射到
+    已记录的 trigger，以及**第三滴答仍然安静**（1 次 exec、1 条 ANCHOR_EXECUTED，不重复审计）。
+- 顺带修正测试文件里三处断言缺陷：`ANCHOR_ABORTED` 期望值写反（1→0）；一条「trigger id 与
+  invocation id 不同」的断言实际是拿 claim 的 `eventId` 自比（恒真）→ 拆成真实的键化断言 +
+  `$inv -ne $claim.eventId`；以及使用了 `test-helper.ps1` 里**不存在**的 `Assert-NotEqual`
+  → 改 `Assert-True ($a -ne $b)`。
+- **回归**：`tests/run-all.ps1` PS7 17/17 文件通过；WinPS 5.1 全量跑 `16 passed, 1 failed`，
+  唯一失败是 `secret-scan.test.ps1` 报 `tmp-runall51.log` **正由另一进程使用**（后台跑全量时
+  它自己写的那个临时日志），删除日志后单跑 `powershell tests/secret-scan.test.ps1` → 0 失败。
+  属于自引用假阳性，非代码问题；`auto-anchor.test.ps1` 在 5.1 下 15 组全绿。
+
+### 下一步
+- 阶段 E：**CQK-037** 抽共享 JSON-RPC 会话层 `scripts/app-server-client.ps1`（把
+  `quota-client.ps1:12-156` 的 Start/Stop/Send/Wait/FailureDetail/ServerStartInfo 提出来，
+  由 `quota-client.ps1` dot-source ⇒ 5 个脚本 + 4 个测试的消费点零改动），新增
+  `Invoke-CodexConfigRead` / `Invoke-CodexModelList`（`nextCursor` 分页 + 严格页/条上限），
+  **同一 commit 扩 mock 的 `config/read` / `model/list` 处理器**（`default { }` 会静默吞新方法）。
+  注意 `Get-CodexAttemptBudgetSeconds` 的 `$script:CQK_JSONRPC_WAITS_PER_ATTEMPT = 2` 含义会随
+  同一会话追加 RPC 而改变，须与 CQK-031 的计划任务时限推导一起核算。
+
 

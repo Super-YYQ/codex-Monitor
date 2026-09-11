@@ -15,6 +15,11 @@
 #   swapped       primary carries a 10080-min window (identify by windowDurationMins, not name)
 #   fractional    usedPercent with decimals
 #   multi-bucket  rateLimitsByLimitId with two independent buckets
+#   multi-reset-baseline / multi-reset
+#                 the same multi-bucket pair, each bucket carrying a PRIMARY
+#                 window whose resetsAt advances between the two modes - doc
+#                 v3.0 §19 T08's "2 resets in one tick" input (the ordinary
+#                 multi-bucket mode cannot produce it: bucket-b has no primary)
 #   credits       credits / spendControlReached metadata
 #   unknown-meta  unknown metadata keys must not break parsing
 #   limit-reached rateLimitReachedType set on the result
@@ -308,6 +313,26 @@ while ($true) {
                                             secondary = (Get-MockWindow 10080 33 1788667200) }
                             'bucket-a' = @{ limitId = 'bucket-a'; limitName = 'Bucket A'; planType = 'pro'
                                             primary = (Get-MockWindow 300 10 1788062400) }
+                        }
+                    }
+                }
+            } elseif ($mode -eq 'multi-reset-baseline' -or $mode -eq 'multi-reset') {
+                # T08 (doc v3.0 §19): "2 resets in the same tick -> 2 claims + 1
+                # exec + 1 invocation audit". Both buckets must carry a PRIMARY
+                # window, and the two modes must agree on the window KEYS
+                # (bucketId|windowType) and on windowDurationMins - a key missing
+                # from the previous snapshot is skipped (state-machine.ps1
+                # Get-StateEvents) and the duration is part of the event id.
+                # Only resetsAt may advance, which is what makes the reset fire.
+                $reset = ($mode -eq 'multi-reset')
+                Send-MockResponse @{
+                    jsonrpc = '2.0'; id = $id
+                    result  = @{
+                        rateLimitsByLimitId = @{
+                            'bucket-b' = @{ limitId = 'bucket-b'; limitName = 'Bucket B'; planType = 'pro'
+                                            primary = (Get-MockWindow 300 $(if ($reset) { 3 } else { 10 }) $(if ($reset) { 1900001000 } else { 1788063000 })) }
+                            'bucket-a' = @{ limitId = 'bucket-a'; limitName = 'Bucket A'; planType = 'pro'
+                                            primary = (Get-MockWindow 300 $(if ($reset) { 2 } else { 10 }) $(if ($reset) { 1900000000 } else { 1788062400 })) }
                         }
                     }
                 }

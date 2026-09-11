@@ -244,7 +244,13 @@ try {
         if (-not $ev) { continue }
         $level = 'INFO'
         if ($ev.event -in @('AUTH_ERROR', 'SCHEMA_UNKNOWN', 'LIMIT_REACHED', 'READ_FAILED')) { $level = 'ERROR' }
-        Write-RunnerLog -Event ([string]$ev.event) -Level $Level -ErrorText $ev.message
+        # Anchor events come back with `reason` + an `anchor` object instead of
+        # `message`; doc v3.0 §9.1 requires the runtime log to carry the Anchor
+        # object, so the three audit surfaces cannot drift.
+        $text = $(if ($ev.message) { $ev.message } elseif ($ev.reason) { $ev.reason } else { $null })
+        Write-RunnerLog -Event ([string]$ev.event) -Level $Level -ErrorText $text `
+            -ErrorKind ([string]$(if ($ev.kind) { $ev.kind } else { $ev.errorKind })) `
+            -Windows $(if ($ev.windows) { $ev.windows } else { $null }) -Anchor $ev.anchor
     }
 
     # ---- sanitized history records (significant events only, doc 03 §12) ----
@@ -260,7 +266,9 @@ try {
             runId        = $script:CqkRunId
             role         = $election.role
             mode         = [string]$cfg.mode
-            windows      = $read.windows
+            # An anchor invocation carries its own post-exec verification read;
+            # everything else is stamped with this tick's read.
+            windows      = $(if ($ev.windows) { $ev.windows } else { $read.windows })
             anchor       = $ev.anchor
             errorKind    = $(if ($ev.kind) { $ev.kind } else { $ev.errorKind })
             error        = $(if ($ev.message) { $ev.message } else { $ev.reason })

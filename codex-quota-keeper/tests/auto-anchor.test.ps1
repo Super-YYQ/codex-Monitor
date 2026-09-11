@@ -67,6 +67,78 @@ function Get-LogEventNames {
     return $names
 }
 
+# --- audit-uniqueness readers (doc v3.0 §19 T07/T08, CQK-036) ---------------
+# Every existing history check in this file does a substring match on the raw
+# file, which cannot see a DUPLICATE audit record. These helpers parse line by
+# line so "exactly one invocation audit" is actually asserted.
+
+function Get-RunnerLogRecords {
+    param([string]$KeeperRoot)
+    $recs = @()
+    Get-ChildItem -LiteralPath (Join-Path $KeeperRoot 'runtime\logs') -Filter 'keeper-*.jsonl' -File -ErrorAction SilentlyContinue | ForEach-Object {
+        foreach ($line in [System.IO.File]::ReadAllLines($_.FullName)) {
+            $r = ConvertFrom-JsonSafe $line
+            if ($null -ne $r) { $recs += $r }
+        }
+    }
+    return , $recs
+}
+
+function Get-HistoryRecords {
+    param([string]$KeeperRoot)
+    $recs = @()
+    Get-ChildItem -LiteralPath (Join-Path $KeeperRoot 'history') -Filter 'events-*.jsonl' -File -ErrorAction SilentlyContinue | ForEach-Object {
+        foreach ($line in [System.IO.File]::ReadAllLines($_.FullName)) {
+            $r = ConvertFrom-JsonSafe $line
+            if ($null -ne $r) { $recs += $r }
+        }
+    }
+    return , $recs
+}
+
+function Get-OutboxRecords {
+    param([string]$KeeperRoot)
+    $recs = @()
+    $dir = Join-Path (Join-Path $KeeperRoot 'runtime') 'outbox'
+    Get-ChildItem -LiteralPath $dir -Filter '*.json' -File -ErrorAction SilentlyContinue | ForEach-Object {
+        $r = ConvertFrom-JsonSafe ([System.IO.File]::ReadAllText($_.FullName))
+        if ($null -ne $r) { $recs += $r }
+    }
+    return , $recs
+}
+
+function Get-OutboxFileIds {
+    # Write-OutboxEvent names the file after Record.eventId, so the basenames ARE
+    # the event ids for every event that carries one (anchor invocations do).
+    param([string]$KeeperRoot)
+    $dir = Join-Path (Join-Path $KeeperRoot 'runtime') 'outbox'
+    return @(Get-ChildItem -LiteralPath $dir -Filter '*.json' -File -ErrorAction SilentlyContinue | ForEach-Object { $_.BaseName })
+}
+
+function Get-AnchorClaimRecords {
+    param([string]$KeeperRoot)
+    $recs = @()
+    $dir = Get-AnchorClaimsDir $KeeperRoot
+    Get-ChildItem -LiteralPath $dir -Filter '*.json' -File -ErrorAction SilentlyContinue | ForEach-Object {
+        $r = ConvertFrom-JsonSafe ([System.IO.File]::ReadAllText($_.FullName))
+        if ($null -ne $r) { $recs += $r }
+    }
+    return , $recs
+}
+
+function Count-AnchorEvents {
+    # @(...) guard: a single match must still count as 1 (PowerShell unrolls it).
+    param($Records, [string]$EventName)
+    return @(@($Records) | Where-Object { $_.event -eq $EventName }).Count
+}
+
+function Get-ExecCallCount {
+    # The mock appends one line per `codex exec` invocation.
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return 0 }
+    return @([System.IO.File]::ReadAllLines($Path) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count
+}
+
 Start-TestGroup 'anchor: prompt whitelist'
 
 Assert-True (Test-AnchorPromptAllowed -Prompt 'Reply exactly OK.') 'default prompt allowed'
@@ -472,6 +544,132 @@ try {
         Assert-False ("$argLine10" -match '(^|\s)-m(\s|$)') 'no -m flag when model unset'
         Assert-False ("$argLine10" -match 'model_reasoning_effort') 'no effort override when reasoningEffort unset'
     }
+    Remove-Item Env:\CQK_MOCK_EXEC_ARGS_FILE -ErrorAction SilentlyContinue
+    $env:CQK_MOCK_MODE = 'normal'
+
+    Start-TestGroup 'anchor: CQK-036 T07 - one exec yields exactly one audit in every surface'
+
+    # doc v3.0 §19 T07: 1 trigger -> "1 exec = 1 Anchor Audit = 1 Outbox = 1
+    # History". The pre-CQK-036 code path wrote the ANCHOR_EXECUTED record from
+    # inside AutoAnchor AND again from the Runner, so every count below was 2.
+    # Local-only + a due schedule slot gives a deterministic single trigger, and
+    # historySync disabled keeps the outbox undrained so it can be counted.
+    $keeperRoot11 = Join-Path $ws 'keeper11'
+    New-Item -ItemType Directory -Path $keeperRoot11 -Force | Out-Null
+    $cfgFile11 = Join-Path $keeperRoot11 'config.json'
+    $slotBase11 = (Get-Date).AddMinutes(-1)
+    $slotAt11 = if ($slotBase11.Date -ne (Get-Date).Date) { (Get-Date).Date } else { $slotBase11 }
+    $cfgSingle = New-TestConfig @{
+        mode   = 'AutoAnchor'
+        codex  = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 300; keepaliveIntervalMinutes = 0; schedule = @($slotAt11.ToString('HH:mm')) } }
+        github = @{ coordination = @{ enabled = $false }; historySync = @{ enabled = $false } }
+    }
+    $null = Write-TestConfigFile $cfgFile11 $cfgSingle
+    $execArgsFile11 = Join-Path $ws 'exec-args-11.txt'
+    $env:CQK_MOCK_MODE = 'idle'
+    $env:CQK_MOCK_EXEC = 'ok'
+    $env:CQK_MOCK_EXEC_ARGS_FILE = $execArgsFile11
+    $rU1 = Invoke-RunnerSub -KeeperRoot $keeperRoot11 -ConfigFile $cfgFile11
+    Assert-Equal 0 $rU1.exitCode "audit-uniqueness run ok ($($rU1.output))"
+
+    $logs11 = Get-RunnerLogRecords $keeperRoot11
+    $hist11 = Get-HistoryRecords $keeperRoot11
+    $obox11 = Get-OutboxRecords $keeperRoot11
+    $claims11 = Get-AnchorClaimRecords $keeperRoot11
+
+    $logExec11 = @($logs11 | Where-Object { $_.event -eq 'ANCHOR_EXECUTED' })
+    $histExec11 = @($hist11 | Where-Object { $_.event -eq 'ANCHOR_EXECUTED' })
+    $oboxExec11 = @($obox11 | Where-Object { $_.event -eq 'ANCHOR_EXECUTED' })
+    Assert-Equal 1 $logExec11.Count 'runtime log has exactly one ANCHOR_EXECUTED'
+    Assert-Equal 1 $histExec11.Count 'local history has exactly one ANCHOR_EXECUTED'
+    Assert-Equal 1 $oboxExec11.Count 'outbox has exactly one ANCHOR_EXECUTED'
+    Assert-Equal 0 (Count-AnchorEvents $logs11 'ANCHOR_ABORTED') 'no abort audit alongside the success'
+    Assert-Equal 1 (Get-ExecCallCount $execArgsFile11) 'exactly one physical codex exec'
+    Assert-Equal 0 (Count-AnchorEvents $hist11 'ANCHOR_LOCAL') 'ANCHOR_LOCAL stays a runtime-log-only event'
+    Assert-Equal 1 $claims11.Count 'one durable claim for the single trigger'
+    Assert-Equal 'COMPLETED' ([string]$claims11[0].state) 'the claim reached a terminal COMPLETED state'
+
+    # The whole point of CQK-036: one id, shared by all three audit surfaces.
+    $inv11 = [string]$logExec11[0].anchor.anchorInvocationId
+    Assert-True ($inv11 -match '^anchor-\d{8}T\d{6}-[0-9a-f]{6}$') "invocation id has the documented shape ($inv11)"
+    Assert-Equal $inv11 ([string]$histExec11[0].anchor.anchorInvocationId) 'history carries the same invocation id'
+    Assert-Equal $inv11 ([string]$oboxExec11[0].anchor.anchorInvocationId) 'outbox carries the same invocation id'
+    Assert-Equal $inv11 ([string]$oboxExec11[0].eventId) 'the outbox file is keyed on the invocation id'
+    Assert-True (@(Get-OutboxFileIds $keeperRoot11) -contains $inv11) 'the outbox filename matches the invocation id'
+    Assert-Equal 1 @($logExec11[0].anchor.triggerEventIds).Count 'one trigger mapped to the invocation'
+    Assert-Equal ([string]$claims11[0].eventId) ([string]$logExec11[0].anchor.triggerEventIds[0]) `
+        'the claim file stays keyed on the trigger eventId'
+    Assert-True ($inv11 -ne [string]$claims11[0].eventId) 'the invocation id is not a copy of the trigger id (§4.1)'
+
+    Start-TestGroup 'anchor: CQK-036 T08 - two merged resets give 2 claims, 1 exec, 1 audit'
+
+    # doc v3.0 §19 T08: two reset events observed in one tick -> "2 Claim + 1
+    # exec + 1 Invocation Audit". Both buckets must carry a primary window whose
+    # resetsAt advances, which is what mock modes multi-reset-baseline/-reset do.
+    # Tick 1 is only a baseline (no previous snapshot -> no reset inference).
+    $keeperRoot12 = Join-Path $ws 'keeper12'
+    New-Item -ItemType Directory -Path $keeperRoot12 -Force | Out-Null
+    $cfgFile12 = Join-Path $keeperRoot12 'config.json'
+    $cfgMerge = New-TestConfig @{
+        mode   = 'AutoAnchor'
+        codex  = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 1; keepaliveIntervalMinutes = 0 } }
+        github = @{ coordination = @{ enabled = $false }; historySync = @{ enabled = $false } }
+    }
+    $null = Write-TestConfigFile $cfgFile12 $cfgMerge
+    $execArgsFile12 = Join-Path $ws 'exec-args-12.txt'
+    $env:CQK_MOCK_MODE = 'multi-reset-baseline'
+    $env:CQK_MOCK_EXEC = 'ok'
+    $env:CQK_MOCK_EXEC_ARGS_FILE = $execArgsFile12
+    $rM1 = Invoke-RunnerSub -KeeperRoot $keeperRoot12 -ConfigFile $cfgFile12
+    Assert-Equal 0 $rM1.exitCode "multi-reset baseline run ok ($($rM1.output))"
+    Assert-Equal 0 (Count-AnchorEvents (Get-RunnerLogRecords $keeperRoot12) 'ANCHOR_EXECUTED') 'baseline tick makes no model call'
+    Assert-Equal 0 (Get-ExecCallCount $execArgsFile12) 'baseline tick runs no exec'
+
+    $env:CQK_MOCK_MODE = 'multi-reset'
+    $rM2 = Invoke-RunnerSub -KeeperRoot $keeperRoot12 -ConfigFile $cfgFile12
+    Assert-Equal 0 $rM2.exitCode "multi-reset run ok ($($rM2.output))"
+
+    $resetIdA = Get-Sha256Hex 'bucket-a|primary|300|1788062400|reset'
+    $resetIdB = Get-Sha256Hex 'bucket-b|primary|300|1788063000|reset'
+    $logs12 = Get-RunnerLogRecords $keeperRoot12
+    $hist12 = Get-HistoryRecords $keeperRoot12
+    $obox12 = Get-OutboxRecords $keeperRoot12
+    $claims12 = Get-AnchorClaimRecords $keeperRoot12
+
+    $logExec12 = @($logs12 | Where-Object { $_.event -eq 'ANCHOR_EXECUTED' })
+    $histExec12 = @($hist12 | Where-Object { $_.event -eq 'ANCHOR_EXECUTED' })
+    $oboxExec12 = @($obox12 | Where-Object { $_.event -eq 'ANCHOR_EXECUTED' })
+    Assert-Equal 2 $claims12.Count '2 claims - one per reset event'
+    Assert-Equal 1 (Get-ExecCallCount $execArgsFile12) '1 physical codex exec for the merged triggers'
+    Assert-Equal 1 $logExec12.Count '1 invocation audit in the runtime log'
+    Assert-Equal 1 $histExec12.Count '1 invocation audit in local history'
+    Assert-Equal 1 $oboxExec12.Count '1 invocation audit in the outbox'
+    Assert-Equal 0 (Count-AnchorEvents $hist12 'ANCHOR_ABORTED') 'no leftover per-event abort records'
+
+    # Both trigger ids survive on the single invocation record (pre-CQK-036 only
+    # $claimed[0] was keyed, silently dropping the second reset).
+    $trig12 = @($logExec12[0].anchor.triggerEventIds | ForEach-Object { [string]$_ })
+    Assert-Equal 2 $trig12.Count 'the invocation record lists both triggers'
+    Assert-True ($trig12 -contains $resetIdA) "trigger bucket-a present ($resetIdA)"
+    Assert-True ($trig12 -contains $resetIdB) "trigger bucket-b present ($resetIdB)"
+    foreach ($c in $claims12) {
+        Assert-Equal 'COMPLETED' ([string]$c.state) "claim $($c.eventId.Substring(0, 8)) completed"
+    }
+    Assert-True (@($claims12 | Where-Object { $trig12 -contains [string]$_.eventId }).Count -eq 2) 'every claim maps to a recorded trigger'
+
+    $inv12 = [string]$logExec12[0].anchor.anchorInvocationId
+    Assert-True ($inv12 -match '^anchor-\d{8}T\d{6}-[0-9a-f]{6}$') "merged invocation id has the documented shape ($inv12)"
+    Assert-Equal $inv12 ([string]$histExec12[0].anchor.anchorInvocationId) 'history shares the merged invocation id'
+    Assert-Equal $inv12 ([string]$oboxExec12[0].anchor.anchorInvocationId) 'outbox shares the merged invocation id'
+    Assert-True ($inv12 -ne $resetIdA) 'the invocation id is not a copy of a trigger id'
+
+    # Tick 3: both resets are processed and keepalive is off, so the merged set
+    # can never be re-executed - a duplicate audit would need a second exec.
+    $rM3 = Invoke-RunnerSub -KeeperRoot $keeperRoot12 -ConfigFile $cfgFile12
+    Assert-Equal 0 $rM3.exitCode "multi-reset repeat run ok ($($rM3.output))"
+    Assert-Equal 1 (Get-ExecCallCount $execArgsFile12) 'the merged invocation is never re-executed'
+    Assert-Equal 1 (Count-AnchorEvents (Get-HistoryRecords $keeperRoot12) 'ANCHOR_EXECUTED') 'still exactly one invocation audit after a third tick'
+
     Remove-Item Env:\CQK_MOCK_EXEC_ARGS_FILE -ErrorAction SilentlyContinue
     $env:CQK_MOCK_MODE = 'normal'
 } finally {
