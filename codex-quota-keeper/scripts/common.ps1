@@ -24,6 +24,16 @@ $script:CQK_MAX_QUERY_TIMEOUT_SECONDS = 180
 # JSON-RPC waits one quota attempt performs: `initialize` (id 1) and
 # `account/rateLimits/read` (id 7), each bounded by queryTimeoutSeconds.
 $script:CQK_JSONRPC_WAITS_PER_ATTEMPT = 2
+# CQK-038: JSON-RPC waits one Execution Profile resolution can perform, on the
+# single session the resolver opens: `initialize` (1) + `config/read` (1) + the
+# model/list pages (1..CQK_MODEL_LIST_MAX_PAGES). The page count is the reason a
+# wait count could not simply be reused from the quota path, and the ceiling is
+# what keeps a paginating catalog from turning into an unbounded task. Pinned
+# against CQK_MODEL_LIST_MAX_PAGES by codex-profile.test.ps1 so the two cannot
+# drift. No proxy fallback is added: the profile must be read in the SAME
+# environment `codex exec` will run in (doc v3.0 §6.2), so a second attempt
+# without the proxy would answer a different question.
+$script:CQK_PROFILE_WAITS_CEILING = 8
 # Worst-case wall clock of the git operations one tick can issue (fetch 60 +
 # ls-remote 20 + show 15 + push 90 + a few 15 s index calls, rounded up). Folded
 # into the task time limit only when a remote repo is configured at all.
@@ -63,6 +73,10 @@ function Get-AnchorClaimPath {
     param([string]$Root, [string]$EventId)
     return Join-Path (Get-AnchorClaimsDir $Root) ($EventId + '.json')
 }
+# CQK-038/046: last safely-cached Execution Profile (runtime/execution-profile.json).
+# Whitelist fields only - never a token, an account detail or the raw config blob
+# (doc v3.0 §23). The default status panel reads this file instead of going online.
+function Get-ExecutionProfilePath { param([string]$Root) Join-Path (Get-RuntimeDir $Root) 'execution-profile.json' }
 
 function Ensure-Directory {
     param([string]$Path)
@@ -355,9 +369,9 @@ function Get-CodexAttemptBudgetSeconds {
     # exactly two waits after the transport moved into app-server-client.ps1 - the
     # extraction changed who owns the pipes, not how many round trips happen. The
     # Execution Profile path is different in kind because `model/list` paginates
-    # (handshake + config/read + 1..N pages), so a wait-count would be a lie there;
-    # when the live profile resolution enters the tick (CQK-038/040) it joins this
-    # model as its own bounded ceiling, not as a bigger waits-per-attempt number.
+    # (handshake + config/read + 1..N pages), so a wait-count would be a lie there:
+    # CQK-038 gave it its own ceiling in Get-CodexProfileBudgetSeconds, and CQK-040
+    # adds that ceiling to the tick when the tick starts paying for it.
     # Returns @{ seconds; waitsPerAttempt; attempts; proxyConfigured }.
     param([hashtable]$Config)
     $timeout = 20
@@ -371,6 +385,29 @@ function Get-CodexAttemptBudgetSeconds {
         waitsPerAttempt = $waits
         attempts        = $attempts
         proxyConfigured = ($attempts -eq 2)
+    }
+}
+
+function Get-CodexProfileBudgetSeconds {
+    # CQK-038: worst-case wall clock of ONE Resolve-ExecutionProfile
+    # (codex-profile.ps1). Same model as the quota read - each wait is bounded by
+    # queryTimeoutSeconds - but the wait COUNT differs, because one resolution is
+    # one session (initialize + config/read) plus 1..N model/list pages. There is
+    # no proxy fallback: the profile is read in the environment `codex exec` will
+    # use, and a direct attempt after a failed proxy one would describe a
+    # different environment (doc v3.0 §6.2). Process spawn/teardown sits on top.
+    #
+    # Not folded into Get-CodexTickBudgetSeconds yet: the runtime gate that makes
+    # the tick pay for this lands with CQK-040, and inflating the task limit for
+    # work the tick does not do would be a lie in the other direction.
+    # Returns @{ seconds; waitsCeiling }.
+    param([hashtable]$Config)
+    $timeout = 20
+    if ($null -ne $Config -and $null -ne $Config.codex) { $timeout = [int]$Config.codex.queryTimeoutSeconds }
+    if ($timeout -le 0) { $timeout = 20 }
+    return @{
+        seconds      = $timeout * $script:CQK_PROFILE_WAITS_CEILING
+        waitsCeiling = $script:CQK_PROFILE_WAITS_CEILING
     }
 }
 

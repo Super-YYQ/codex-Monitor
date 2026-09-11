@@ -52,6 +52,25 @@ function Get-CodexAppServerErrorKind {
     return 'PROTOCOL_ERROR'
 }
 
+function Get-CodexErrorRetryable {
+    # doc v3.0 §11: the low-level client owns BOTH halves of the classification -
+    # the kind and whether it may be retried - so Install / Runner / Status never
+    # re-derive the policy from message text. The table is the doc's, verbatim:
+    # transport faults are retryable, a rejected credential or a rejected schema
+    # is not, and PROFILE_UNAVAILABLE is retryable by default because the usual
+    # cause is a transient read failure (Runtime still fails closed on it).
+    # 'SETUP_ERR' is the pre-CQK-043 spelling; CQK-043 renames it to SETUP_ERROR
+    # and both spellings stay non-retryable until then.
+    param([string]$ErrorKind)
+    switch ($ErrorKind) {
+        'NETWORK_ERROR'       { return $true }
+        'TIMEOUT'             { return $true }
+        'EOF'                 { return $true }
+        'PROFILE_UNAVAILABLE' { return $true }
+        default               { return $false }
+    }
+}
+
 function Get-CodexServerStartInfo {
     # Launches any codex shape (native exe, npm codex.cmd, or a mock .ps1) through
     # the unified launcher (CQK-004).
@@ -341,28 +360,23 @@ function Get-CodexAppServerConfigValue {
     return $out
 }
 
-function Invoke-CodexConfigRead {
+function Invoke-CodexConfigReadInSession {
     # Reads the *effective* Codex configuration for this environment (config.toml
-    # + CLI defaults + account overrides, as the CLI itself resolves it).
-    # Returns @{ ok; model; modelReasoningEffort; modelProvider; errorKind; message }.
+    # + CLI defaults + account overrides, as the CLI itself resolves it) over an
+    # ALREADY INITIALIZED session. Returns
+    # @{ ok; model; modelReasoningEffort; modelProvider; errorKind; message }.
     # The raw config object is deliberately not returned at all.
-    param(
-        [hashtable]$Config,
-        [string]$CodexPath = '',
-        [int]$TimeoutSeconds = 0,
-        $Environment = $null
-    )
-    $res = Invoke-CodexAppServerSession -Config $Config -CodexPath $CodexPath `
-        -TimeoutSeconds $TimeoutSeconds -Environment $Environment -Body {
-        param($Session, $Timeout)
-        return Invoke-CodexAppServerRequest -Session $Session -Method 'config/read' -Params @{} -TimeoutSeconds $Timeout
-    }
-    if (-not $res.ok) {
+    # The Execution Profile resolver needs config/read and model/list from the
+    # SAME session (one child process, one environment - doc v3.0 §6.2), so the
+    # schema lives here and the session-opening wrapper below stays trivial.
+    param($Session, [int]$TimeoutSeconds = 20)
+    $reply = Invoke-CodexAppServerRequest -Session $Session -Method 'config/read' -Params @{} -TimeoutSeconds $TimeoutSeconds
+    if (-not $reply.ok) {
         return @{ ok = $false; model = $null; modelReasoningEffort = $null; modelProvider = $null;
-                  errorKind = $res.errorKind; message = $res.message }
+                  errorKind = $reply.errorKind; message = $reply.message }
     }
     $result = $null
-    if ($res.response -is [hashtable] -and $res.response.ContainsKey('result')) { $result = $res.response.result }
+    if ($reply.response -is [hashtable] -and $reply.response.ContainsKey('result')) { $result = $reply.response.result }
     if ($result -isnot [hashtable]) {
         return @{ ok = $false; model = $null; modelReasoningEffort = $null; modelProvider = $null;
                   errorKind = 'SCHEMA_UNKNOWN'; message = 'config/read returned no config object; failing closed' }
@@ -376,6 +390,26 @@ function Invoke-CodexConfigRead {
         errorKind            = $null
         message              = $null
     }
+}
+
+function Invoke-CodexConfigRead {
+    # Session-opening wrapper: one child process, one config/read.
+    # Returns @{ ok; model; modelReasoningEffort; modelProvider; errorKind; message }.
+    param(
+        [hashtable]$Config,
+        [string]$CodexPath = '',
+        [int]$TimeoutSeconds = 0,
+        $Environment = $null
+    )
+    $res = Invoke-CodexAppServerSession -Config $Config -CodexPath $CodexPath `
+        -TimeoutSeconds $TimeoutSeconds -Environment $Environment -Body {
+        param($Session, $Timeout)
+        return Invoke-CodexConfigReadInSession -Session $Session -TimeoutSeconds $Timeout
+    }
+    if ($res -is [hashtable] -and $res.ContainsKey('ok') -and $res.ContainsKey('modelProvider')) { return $res }
+    # Launch / handshake failure path: no values at all.
+    return @{ ok = $false; model = $null; modelReasoningEffort = $null; modelProvider = $null;
+              errorKind = $res.errorKind; message = $res.message }
 }
 
 function Get-CodexModelListEntry {
@@ -411,22 +445,96 @@ function Get-CodexModelListEntry {
     }
 }
 
-function Invoke-CodexModelList {
+function Invoke-CodexModelListInSession {
     # Fetches the model catalog THIS Codex CLI + account + provider actually
-    # serves. There is no static model list in this repository on purpose: the
-    # only authority is what the local CLI reports (doc v3.0 §5 设计原则).
+    # serves, over an ALREADY INITIALIZED session. There is no static model list
+    # in this repository on purpose: the only authority is what the local CLI
+    # reports (doc v3.0 §5 设计原则).
     #
     # Pagination is mandatory. `model/list` returns {data, nextCursor} and a
     # caller that stops after the first page can declare a model invalid merely
-    # because it lives on page 2 - the failure mode §5.2 L2 explicitly forbids.
+    # because it lives on page 2 - the failure mode §5.1 L2 explicitly forbids.
     # A cursor the server rejects is a hard error, never "no more pages" (the
     # live server answers -32600 "invalid cursor"), and hitting the page/item cap
     # fails closed instead of returning a confident partial answer.
     #
     # Returns @{ ok; models; defaultModel; pages; errorKind; message }.
-    # -IncludeHidden defaults on, so a model that exists but is hidden is never
-    # reported as invalid; the flag exists because a caller may want the strictly
-    # advertised catalog instead.
+    # -IncludeHidden defaults on, so an entry that exists but is hidden is still
+    # reported - the Execution Profile resolver needs it to tell "retired" apart
+    # from "never existed" instead of calling both INVALID. The flag exists
+    # because a caller may want the strictly advertised catalog instead.
+    param(
+        $Session,
+        [int]$TimeoutSeconds = 20,
+        [bool]$IncludeHidden = $script:CQK_MODEL_LIST_INCLUDE_HIDDEN
+    )
+    $models = @()
+    $seen = @{}
+    $cursor = $null
+    $pages = 0
+    while ($true) {
+        $params = @{ limit = $script:CQK_MODEL_LIST_PAGE_SIZE; includeHidden = $IncludeHidden }
+        if ($null -ne $cursor) { $params['cursor'] = $cursor }
+        $reply = Invoke-CodexAppServerRequest -Session $Session -Method 'model/list' -Params $params -TimeoutSeconds $TimeoutSeconds
+        if (-not $reply.ok) {
+            return @{ ok = $false; models = @(); defaultModel = $null; pages = $pages;
+                      errorKind = $reply.errorKind; message = $reply.message }
+        }
+        $pages++
+        $result = $null
+        if ($reply.response -is [hashtable] -and $reply.response.ContainsKey('result')) { $result = $reply.response.result }
+        if ($result -isnot [hashtable] -or -not $result.ContainsKey('data')) {
+            return @{ ok = $false; models = @(); defaultModel = $null; pages = $pages;
+                      errorKind = 'SCHEMA_UNKNOWN'; message = 'model/list returned no data array; failing closed' }
+        }
+        $data = $result.data
+        if ($data -is [string] -or $data -isnot [System.Collections.IEnumerable]) {
+            return @{ ok = $false; models = @(); defaultModel = $null; pages = $pages;
+                      errorKind = 'SCHEMA_UNKNOWN'; message = 'model/list data is not a list; failing closed' }
+        }
+        foreach ($item in @($data)) {
+            $entry = Get-CodexModelListEntry $item
+            if ($null -eq $entry) { continue }
+            $key = $entry.model.ToLowerInvariant()
+            if ($seen.ContainsKey($key)) { continue }
+            $seen[$key] = $true
+            $models += ,$entry
+        }
+        if (@($models).Count -gt $script:CQK_MODEL_LIST_MAX_ITEMS) {
+            return @{ ok = $false; models = @(); defaultModel = $null; pages = $pages;
+                      errorKind = 'SCHEMA_UNKNOWN'
+                      message = ("model/list exceeded {0} entries; the catalog was not fully read, so a missing model cannot be treated as invalid - failing closed" -f $script:CQK_MODEL_LIST_MAX_ITEMS) }
+        }
+        $next = $null
+        if ($result.ContainsKey('nextCursor')) { $next = $result.nextCursor }
+        if ($null -eq $next -or "$next" -eq '') { break }
+        if ($pages -ge $script:CQK_MODEL_LIST_MAX_PAGES) {
+            return @{ ok = $false; models = @(); defaultModel = $null; pages = $pages;
+                      errorKind = 'SCHEMA_UNKNOWN'
+                      message = ("model/list still had a cursor after {0} pages; the catalog was not fully read, so a missing model cannot be treated as invalid - failing closed" -f $script:CQK_MODEL_LIST_MAX_PAGES) }
+        }
+        $cursor = $next
+    }
+    $default = $null
+    foreach ($m in @($models)) {
+        if ($m.isDefault) { $default = $m.model; break }
+    }
+    if (@($models).Count -eq 0) {
+        # A logged-in Codex CLI with no models at all is not a real state; an
+        # "empty catalog" answer is far more likely to be a server/proxy that
+        # gave us nothing. Returning it as a success would make every model
+        # look invalid and refuse an armed AutoAnchor, so fail closed instead.
+        return @{ ok = $false; models = @(); defaultModel = $null; pages = $pages;
+                  errorKind = 'SCHEMA_UNKNOWN'
+                  message = 'model/list answered with an empty catalog; refusing to treat it as "no model is valid"' }
+    }
+    return @{ ok = $true; models = @($models); defaultModel = $default; pages = $pages;
+              errorKind = $null; message = $null }
+}
+
+function Invoke-CodexModelList {
+    # Session-opening wrapper: one child process, the whole catalog.
+    # Returns @{ ok; models; defaultModel; pages; errorKind; message }.
     param(
         [hashtable]$Config,
         [string]$CodexPath = '',
@@ -434,77 +542,17 @@ function Invoke-CodexModelList {
         $Environment = $null,
         [bool]$IncludeHidden = $script:CQK_MODEL_LIST_INCLUDE_HIDDEN
     )
+    # The per-call decision travels through -Options rather than being read out
+    # of the enclosing scope: a callback body does not own the caller's locals,
+    # and relying on dynamic scoping to reach them works only by accident of who
+    # passed the block.
     $res = Invoke-CodexAppServerSession -Config $Config -CodexPath $CodexPath `
-        -TimeoutSeconds $TimeoutSeconds -Environment $Environment -Body {
+        -TimeoutSeconds $TimeoutSeconds -Environment $Environment `
+        -Options @{ IncludeHidden = [bool]$IncludeHidden } -Body {
         param($Session, $Timeout, $Options)
-        # $IncludeHidden is the caller's parameter two frames up. PowerShell's
-        # scoping is dynamic, so a callback body does see it - but only because
-        # Invoke-CodexModelList is the function that passed this block. Keeping
-        # the read loop's tunables as script constants and the caller's choice as
-        # a named parameter is deliberate: the two are different in kind (a
-        # hard ceiling vs a per-call decision), and the test suite pins both.
-        $models = @()
-        $seen = @{}
-        $cursor = $null
-        $pages = 0
-        while ($true) {
-            $params = @{ limit = $script:CQK_MODEL_LIST_PAGE_SIZE; includeHidden = $IncludeHidden }
-            if ($null -ne $cursor) { $params['cursor'] = $cursor }
-            $reply = Invoke-CodexAppServerRequest -Session $Session -Method 'model/list' -Params $params -TimeoutSeconds $Timeout
-            if (-not $reply.ok) {
-                return @{ ok = $false; models = @(); defaultModel = $null; pages = $pages;
-                          errorKind = $reply.errorKind; message = $reply.message }
-            }
-            $pages++
-            $result = $null
-            if ($reply.response -is [hashtable] -and $reply.response.ContainsKey('result')) { $result = $reply.response.result }
-            if ($result -isnot [hashtable] -or -not $result.ContainsKey('data')) {
-                return @{ ok = $false; models = @(); defaultModel = $null; pages = $pages;
-                          errorKind = 'SCHEMA_UNKNOWN'; message = 'model/list returned no data array; failing closed' }
-            }
-            $data = $result.data
-            if ($data -is [string] -or $data -isnot [System.Collections.IEnumerable]) {
-                return @{ ok = $false; models = @(); defaultModel = $null; pages = $pages;
-                          errorKind = 'SCHEMA_UNKNOWN'; message = 'model/list data is not a list; failing closed' }
-            }
-            foreach ($item in @($data)) {
-                $entry = Get-CodexModelListEntry $item
-                if ($null -eq $entry) { continue }
-                $key = $entry.model.ToLowerInvariant()
-                if ($seen.ContainsKey($key)) { continue }
-                $seen[$key] = $true
-                $models += ,$entry
-            }
-            if (@($models).Count -gt $script:CQK_MODEL_LIST_MAX_ITEMS) {
-                return @{ ok = $false; models = @(); defaultModel = $null; pages = $pages;
-                          errorKind = 'SCHEMA_UNKNOWN'
-                          message = ("model/list exceeded {0} entries; the catalog was not fully read, so a missing model cannot be treated as invalid - failing closed" -f $script:CQK_MODEL_LIST_MAX_ITEMS) }
-            }
-            $next = $null
-            if ($result.ContainsKey('nextCursor')) { $next = $result.nextCursor }
-            if ($null -eq $next -or "$next" -eq '') { break }
-            if ($pages -ge $script:CQK_MODEL_LIST_MAX_PAGES) {
-                return @{ ok = $false; models = @(); defaultModel = $null; pages = $pages;
-                          errorKind = 'SCHEMA_UNKNOWN'
-                          message = ("model/list still had a cursor after {0} pages; the catalog was not fully read, so a missing model cannot be treated as invalid - failing closed" -f $script:CQK_MODEL_LIST_MAX_PAGES) }
-            }
-            $cursor = $next
-        }
-        $default = $null
-        foreach ($m in @($models)) {
-            if ($m.isDefault) { $default = $m.model; break }
-        }
-        if (@($models).Count -eq 0) {
-            # A logged-in Codex CLI with no models at all is not a real state; an
-            # "empty catalog" answer is far more likely to be a server/proxy that
-            # gave us nothing. Returning it as a success would make every model
-            # look invalid and refuse an armed AutoAnchor, so fail closed instead.
-            return @{ ok = $false; models = @(); defaultModel = $null; pages = $pages;
-                      errorKind = 'SCHEMA_UNKNOWN'
-                      message = 'model/list answered with an empty catalog; refusing to treat it as "no model is valid"' }
-        }
-        return @{ ok = $true; models = @($models); defaultModel = $default; pages = $pages;
-                  errorKind = $null; message = $null }
+        $include = $script:CQK_MODEL_LIST_INCLUDE_HIDDEN
+        if ($Options -is [hashtable] -and $Options.ContainsKey('IncludeHidden')) { $include = [bool]$Options.IncludeHidden }
+        return Invoke-CodexModelListInSession -Session $Session -TimeoutSeconds $Timeout -IncludeHidden $include
     }
     if ($res -is [hashtable] -and $res.ContainsKey('models')) { return $res }
     # Launch / handshake failure path: no catalog at all.

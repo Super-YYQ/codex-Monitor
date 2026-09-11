@@ -250,6 +250,17 @@ while ($true) {
 
     switch ([string]$msg.method) {
         'initialize' {
+            # CQK-038: one line per session. A test can then prove that the
+            # Execution Profile resolver read config/read AND model/list over ONE
+            # session - one child process, one environment, which is what doc
+            # v3.0 §6.2 requires ("Profile 必须在与真正 codex exec 相同的 Codex
+            # 环境中解析"). Two sessions would mean two environments.
+            if ($env:CQK_MOCK_SESSIONS_FILE) {
+                try {
+                    [System.IO.File]::AppendAllText($env:CQK_MOCK_SESSIONS_FILE, 'session' + [Environment]::NewLine,
+                        (New-Object System.Text.UTF8Encoding($false)))
+                } catch { }
+            }
             Send-MockResponse @{
                 jsonrpc = '2.0'; id = $msg.id
                 result  = @{ userAgent = @{ name = 'mock-codex'; version = '0.0.0-mock' } }

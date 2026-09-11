@@ -106,3 +106,28 @@
 
 结论：CQK-037/038 不再依赖假设，mock 夹具按上面的真实形状（含对象数组思考等级、数字 cursor、
 hidden 条目）来写，仓库内仍然不出现任何静态模型白名单。
+
+## CQK-038 实现期得出的解析语义（2026-09-11，本人实现结论，非外部内容）
+
+- **一次解析 = 一个 app-server 会话**：`config/read` 与 `model/list` 共用同一子进程，否则
+  §6.2「与真正 `codex exec` 相同环境」无法成立。可测性靠 mock 在 `initialize` 时往
+  `CQK_MOCK_SESSIONS_FILE` 追加一行来证明，而不是靠读代码信任。
+- **Profile 路径没有代理直连回退**，这与额度读路径**故意相反**。额度读回退只是换个网络出口；
+  Profile 回退会替「另一个环境」答题，再拿这个答案去给 exec 放行 —— 比读不到更糟。
+- **hidden == 已退役，判 INVALID 但理由不同**。「不在目录」和「在目录但 hidden」是同一个 verdict、
+  两种修法（改 typo vs 换模型）。客户端因此总是带 `includeHidden:true` 再判。
+- **条目缺 `supportedReasoningEfforts` → UNAVAILABLE / `SCHEMA_UNKNOWN`，不是 VALID**。
+  §21 的 fail-closed 读法：不声明能力的目录证明不了任何事。
+- **`retryable` 只由 `Get-CodexErrorRetryable` 从 `errorKind` 推出**（§11 唯一实现点）：
+  `PROFILE_INVALID` 永远 false（同一目录下次还是同一答案），`PROFILE_UNAVAILABLE` 通常 true
+  但「是否真重试」由上层策略决定 —— §11 里 Runtime 对 UNAVAILABLE 要 fail closed。
+- **§14.1 缓存是 7 键白名单投影**（`effectiveModel` / `effectiveReasoningEffort` / `modelProvider` /
+  `modelSource` / `reasoningEffortSource` / `validation` / `validatedAt`）。不含 configured*、不含
+  validationReason、不含 errorKind/retryable、不含目录。测试用「投毒 hashtable」证明投影不信任输入。
+- **运营陷阱（会反复咬人）**：`catalog-timeout` / `timeout` 夹具 `Start-Sleep -Seconds 120`。
+  残留 mock 进程会抢走子进程 spawn，让**完全无关**的测试组报 `TIMEOUT`/`UNAVAILABLE`。
+  查残留要用 `Get-CimInstance Win32_Process` 且**按 `Name` 过滤 + 排除自身 PID**：探测命令自身
+  含 `mock-appserver`（Git 的 bash 包装也含），否则「查到 1 个」是假的；再核 `CreationDate` 年龄。
+- **扫描器会扫测试文件自己**：测试里想放一个「长得像 token」的假值，必须**拼接构造**
+  （`'sk-' + 'should-never' + '-be-written'`），否则 `sk-[A-Za-z0-9_\-]{20,}` 直接把
+  `secret-scan.test.ps1` 打挂。`secret-scan.test.ps1` 早就遵守这条，新测试撞上去才发现。

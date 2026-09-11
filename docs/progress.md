@@ -642,4 +642,63 @@ waits-per-attempt 调大。于是 6 处钉死的数字（40 / 80 / 140 / 720 / 9
   「必须与真正 codex exec 同一 Codex 环境」+ L1/L2/L3 三层语义校验，仓库内零静态模型白名单），
   并在 `common.ps1` 加 `Get-ExecutionProfilePath`；一并决定 Profile 解析进 tick 的预算上限。
 
+## 会话：第四轮 阶段 E —— CQK-038 Execution Profile Resolver（完成）
+
+### 交付
+- **新增 `scripts/codex-profile.ps1`（302 行）**：
+  - `New-ExecutionProfile` —— §6.1 结构唯一构造点。字符串字段归一为 `''` 而非 `$null`：
+    5.1 的 `ConvertTo-Json` 把 `$null` 写成 `""`，缓存往返后语义会漂移。
+    `errorKind` / `retryable` 刻意**不属于** §6.1：它们描述本次解析尝试，按 §23 永不落盘。
+  - `Get-ExecutionProfileSelection` —— **纯函数**（无 I/O、无子进程），承载 §6.2 优先级 +
+    L2/L3 判定：model = 显式 > `config/read.model` > `model/list` 默认条目；
+    effort = 显式 > `config/read.model_reasoning_effort` > 目标模型 `defaultReasoningEffort`。
+    失败时**仍然返回已解析到的部分值**，让 §9 审计能看到「被拒绝时已知什么」。
+  - `Resolve-ExecutionProfile` —— 一次 `Invoke-CodexAppServerSession` 里读完 config/read +
+    分页 model/list。**一个会话 = 一个子进程 = 一个环境**，正是 §6.2 硬要求；
+    并且**不做代理直连回退**（与额度读路径相反）：回退会替另一个环境答题。
+  - `Get-/Write-/Read-ExecutionProfileCache` —— §14.1 `runtime/execution-profile.json`
+    是**白名单投影**（7 键），不是 Profile dump；写失败只报告不抛（缓存是便利，磁盘满不该毁掉一次锚定）。
+- **`scripts/app-server-client.ps1`**：`Get-CodexErrorRetryable`（§11 表的唯一实现）、
+  `Invoke-CodexConfigReadInSession`、`Invoke-CodexModelListInSession`（同一分页/上限实现复用到会话内）。
+- **`scripts/common.ps1`**：`Get-ExecutionProfilePath`（:79）、`$script:CQK_PROFILE_WAITS_CEILING = 8`、
+  `Get-CodexProfileBudgetSeconds`（:391-412）。
+- **`tests/fixtures/mock-appserver.ps1`**：`initialize` 分支按 `CQK_MOCK_SESSIONS_FILE` 记一行会话，
+  让「一次解析只用一个会话」变成可断言的事实；新增 `config-empty` / `config-error` / `catalog-*` 夹具。
+- **新增 `tests/codex-profile.test.ps1`（133 checks / 11 组）**：§6.2 双优先级、L2「从未存在」与
+  「已退役」分离、L3 支持/不支持/无能力清单、T01（形态问题留在配置层，消息**不得**提 catalog）、
+  T02/T03/T06 走真实读路径、T05 跨页命中不得判 INVALID、一次会话、§23 隐私（config 噪声零泄漏）、
+  §14.1 缓存白名单 + 投毒 Profile 无法夹带、§11 retryable（TIMEOUT→true、AUTH→false、PROFILE_INVALID→false）、
+  预算上限与分页上限不可脱钩。
+- **`docs/architecture.md`**：模块树补 `codex-profile.ps1`，「关键设计」补执行画像一节。
+
+### 三个刻意的设计决定
+1. **hidden/retired → INVALID，但理由文本与「不在目录中」不同**。客户端主动带 `includeHidden`，
+   就为了区分「打错字」和「CLI 升级后模型退役」——同一个 verdict，修法完全不同（T06 的解析半边）。
+2. **目录条目没有 `supportedReasoningEfforts` → UNAVAILABLE + `SCHEMA_UNKNOWN`**，不是 VALID。
+   这是 §21「无法证明有效即视为无效」的 fail-closed 读法：一份不声明能力的目录证明不了任何事。
+3. **`Get-CodexProfileBudgetSeconds` 只定义、不接入** `Get-CodexTickBudgetSeconds`。
+   接入会立刻改掉 6 处钉死的预算数字，而那是 CQK-040 把画像放进 tick 时才该付的账；
+   两者关系用 `Assert-Equal 8 ($script:CQK_PROFILE_WAITS_CEILING) (2 + $script:CQK_MODEL_LIST_MAX_PAGES)`
+   钉住，防止分页上限调整后天花板悄悄失真。
+
+### 回归
+- `tests/run-all.ps1`：**PS7 19/19 通过**；**WinPS 5.1 19/19 通过**。
+- PSScriptAnalyzer（本次 5 个文件）：**ERRORS=0 / TOTAL=35**；仓库级 `scripts` 递归基线
+  ERRORS=0 / TOTAL=70，规则种类未新增。
+  期间修掉局部变量级的 `PSAvoidAssignmentToAutomaticVariable`：`Resolve-ExecutionProfile` 内的
+  `$profile` 与自动变量 `$PROFILE` 同名 → 改 `$prof`。函数**参数** `-Profile` 保留：它只在函数
+  作用域内遮蔽、而画像路径从不读 `$PROFILE`，且 `github-sync.ps1` 的 `$args`、
+  `logger.ps1`/`runner.ps1` 的 `$Event` 是同一取舍的既有先例；调用点写成 `-Profile $prof` 仍清晰。
+  （CI 本身不跑 analyzer，与 CQK-037 一节所述一致，analyzer 是本地门禁。）
+- `tests/secret-scan.ps1` 独立跑：**84 files, no path exclusions, 0 issues**。
+  新测试里的「投毒 token」最初写成字面量 `sk-should-never-be-written`，被扫描器的
+  `sk-[A-Za-z0-9_\-]{20,}` 命中——改为拼接构造，与 `secret-scan.test.ps1` 自身遵守的规则一致。
+
+### 一次假失败的教训（值得复述）
+第一轮 e2e（T04）14 项全报 `errorKind=TIMEOUT`，而它后面的组全绿。根因**不是代码**：
+`catalog-timeout` / `timeout` 夹具会 `Start-Sleep -Seconds 120`，上一轮遗留的 mock 子进程
+还在睡眠就抢走了子进程 spawn 资源。排查时踩到第二个坑——用 `Win32_Process.CommandLine -like
+'*mock-appserver*'` 找残留，探测命令自身（以及 Git 的 bash 包装）也含该字符串，于是「查到 1 个」
+是假的。正确姿势：按 `Name` 过滤 + 排除自身 PID + 看 `CreationDate` 年龄再信数字。
+
 
