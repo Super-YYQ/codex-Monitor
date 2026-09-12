@@ -101,9 +101,8 @@
       // 与静默期一致（见 README「AutoAnchor」）。
       // 0 = 关闭兜底（空闲判定与重置触发仍然生效）
       // "keepaliveIntervalMinutes": 300,
-      // 立即触发 CLI：设为 true 后，每次运行 install.cmd / apply-config.cmd
-      // 都会立刻执行一次锚定（不等 300 分钟静默期、不受最小间隔限制；仍受每日上限
-      // 与 fail-closed 约束，同一分钟内的重复请求只执行一次）
+      // 立即触发 CLI：设为 true 后，install.cmd / apply-config.cmd 会请求立即锚定。
+      // 每个本地自然日最多实际尝试一次，不等静默期，仍受每日总上限与 fail-closed 约束。
       // "anchorOnApply": false,
       // 每日定时模式（与周期判断互斥，二选一）：「HH:mm」数组（本地时间，24 小时制且必须补零）。
       // 配置任意槽位即切换为纯定时模式：每个时间点后的第一次轮询触发一次 CLI，
@@ -117,8 +116,8 @@
       // 锚定执行的思考等级：传给 codex exec 的 -c model_reasoning_effort=<值> 覆盖。
       // 留空（默认）= 不覆盖，沿用 ~/.codex/config.toml 的 model_reasoning_effort 默认值。
       // 填写规则：小写字母开头，仅小写字母/数字/连字符，1-30 字符，如 "low"、"minimal"。
-      // 注意：合法档位随 CLI 版本与模型演进（低/中/高/更高档位各有命名），填错会在
-      // 锚定执行时被 CLI 拒绝并按既有 fail-closed 路径记为 ABORTED（仍占用当日次数）。
+      // 合法模型与档位以本机 CLI 的 config/read、model/list 校验结果为准。
+      // 配置无效或暂时无法校验时，在 Claim 和调用之前拒绝；不消耗当日调用次数。
       // 例："reasoningEffort": "low",
     },
   },

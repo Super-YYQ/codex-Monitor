@@ -1,11 +1,12 @@
-# Codex Quota Keeper - installer (doc 03 §4).
+﻿# Codex Quota Keeper - installer (doc 03 §4).
 # Validates the environment, runs a read-only quota probe, generates the machine
 # identity and registers a per-user Scheduled Task. No admin rights required.
 
 param(
     [string]$KeeperRoot = '',
     [string]$ConfigFile = '',
-    [switch]$SkipProbe
+    [switch]$SkipProbe,
+    [switch]$Detailed
 )
 
 $script:CqkInstallDir = Split-Path -Parent $PSCommandPath
@@ -239,7 +240,9 @@ function Get-ExecutionProfileGate {
     $armed = Test-AutoAnchorArmed $Config
     $out.armed = $armed
 
-    $prof = Resolve-ExecutionProfile -Config $Config -CodexPath $CodexPath
+    $workDir = Join-Path (Get-RuntimeDir $KeeperRoot) 'anchor-work'
+    Ensure-Directory $workDir | Out-Null
+    $prof = Resolve-ExecutionProfile -Config $Config -CodexPath $CodexPath -WorkingDirectory $workDir
     $out.attempted = $true
     $out.profile = $prof
     $out.validation = [string]$prof.validation
@@ -292,6 +295,20 @@ function Get-ExecutionProfileGateSummary {
     return "VALID [$state] - $($prof.effectiveModel) / $effort (source: $($prof.modelSource))"
 }
 
+function Invoke-KeeperInstallProbe {
+    param([hashtable]$Config, [string]$CodexPath)
+    $attempts = 0
+    for ($round = 1; $round -le 2; $round++) {
+        $result = Invoke-CodexRateLimitsRead -Config $Config -CodexPath $CodexPath
+        $attempts += [int]$result.attempts
+        $result.rounds = $round
+        $result.totalAttempts = $attempts
+        if ($result.ok -or -not $result.retryable -or
+            $result.errorKind -notin @('NETWORK_ERROR', 'TIMEOUT', 'EOF') -or $round -eq 2) { return $result }
+        Start-Sleep -Seconds 2
+    }
+}
+
 function Invoke-KeeperInstall {
     # Returns @{ ok; issues; warnings; taskName; machine; probe; codexPath }
     param(
@@ -299,6 +316,7 @@ function Invoke-KeeperInstall {
         [string]$ConfigFile = '',
         [switch]$SkipProbe
     )
+    $configIssues = @()
     $issues = @()
     $warnings = @()
     # Set when a config is needed; -SkipProbe skips the read that would otherwise
@@ -307,10 +325,13 @@ function Invoke-KeeperInstall {
     if (-not $KeeperRoot) { $KeeperRoot = Get-KeeperRoot }
     if (-not $ConfigFile) { $ConfigFile = Get-ConfigPath $KeeperRoot }
 
+    $configCheck = Load-Config $ConfigFile
+    $configIssues = @($configCheck.issues)
+
     # 1. Environment validation (PS version, git, codex, repo whitelist, runtime).
     $pf = Invoke-Preflight -Config $null -ConfigPath $ConfigFile -KeeperRoot $KeeperRoot
     if ($null -eq $pf -or -not $pf.machine) {
-        return @{ ok = $false; issues = @('preflight failed before producing a machine identity'); warnings = @(); profile = $null; taskName = $null; machine = $null; probe = $null; codexPath = $null }
+        return @{ configIssues = $configIssues; ok = $false; issues = $(if ($pf -and $pf.issues) { @($pf.issues) } else { @('preflight failed before producing a machine identity') }); warnings = @(); profile = $null; taskName = $null; machine = $null; probe = $null; codexPath = $null }
     }
     $issues += $pf.issues
     if ($PSVersionTable.PSVersion.Major -lt 5) {
@@ -319,9 +340,9 @@ function Invoke-KeeperInstall {
 
     # 2. Read-only connectivity probe (never calls the model).
     $probe = $null
-    if (-not $SkipProbe -and $pf.codexPath) {
+    if (-not $SkipProbe -and $pf.codexPath -and $issues.Count -eq 0) {
         $loaded = Load-Config $ConfigFile
-        $probe = Invoke-CodexRateLimitsRead -Config $loaded.config -CodexPath $pf.codexPath
+        $probe = Invoke-KeeperInstallProbe -Config $loaded.config -CodexPath $pf.codexPath
         if (-not $probe.ok) {
             $issues += "quota probe failed ($($probe.errorKind)): $($probe.message)"
         }
@@ -343,7 +364,7 @@ function Invoke-KeeperInstall {
     }
 
     if ($issues.Count -gt 0) {
-        return @{ ok = $false; issues = $issues; warnings = $warnings; profile = $gate; taskName = $null; machine = $pf.machine; probe = $probe; codexPath = $pf.codexPath }
+        return @{ configIssues = $configIssues; ok = $false; issues = $issues; warnings = $warnings; profile = $gate; taskName = $null; machine = $pf.machine; probe = $probe; codexPath = $pf.codexPath }
     }
 
     # 4. Machine identity already ensured by preflight (random UUID + label).
@@ -353,26 +374,57 @@ function Invoke-KeeperInstall {
     $taskName = Register-KeeperTask -Config $loaded.config -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile
     $forcedAnchor = Invoke-ForcedAnchorIfRequested -Config $loaded.config -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile
 
-    return @{ ok = $true; issues = @(); warnings = $warnings; profile = $gate; taskName = $taskName; machine = $pf.machine; probe = $probe; codexPath = $pf.codexPath; forcedAnchor = $forcedAnchor }
+    return @{ configIssues = $configIssues; ok = $true; issues = @(); warnings = $warnings; profile = $gate; taskName = $taskName; machine = $pf.machine; probe = $probe; codexPath = $pf.codexPath; forcedAnchor = $forcedAnchor }
 }
 
-# Direct execution (pwsh -File / install.cmd): run the install interactively.
-if ($MyInvocation.InvocationName -ne '.') {
-    $result = Invoke-KeeperInstall -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile -SkipProbe:$SkipProbe
-    Write-Host 'Codex Quota Keeper - Install'
-    Write-Host '========================================'
-    foreach ($i in $result.issues) { Write-Host "  [ISSUE] $i" -ForegroundColor Yellow }
-    foreach ($w in $result.warnings) { Write-Host "  [WARN] $w" -ForegroundColor DarkYellow }
-    if ($result.ok) {
-        Write-Host "  Installed        : YES (task '$($result.taskName)')"
-        Write-Host "  Machine identity : $($result.machine.label) [$($result.machine.machineId)]"
-        Write-Host "  Quota probe      : $(if ($SkipProbe) { 'SKIPPED (-SkipProbe)' } else { 'OK (read-only, no model call)' })"
-        Write-Host "  Execution profile: $(Get-ExecutionProfileGateSummary -Gate $result.profile)"
-        Write-Host "  Forced anchor    : $(if ($result.forcedAnchor.started) { 'STARTED (codex.autoAnchor.anchorOnApply=true)' } else { "no ($($result.forcedAnchor.reason))" })"
-        Write-Host ''
-        Write-Host '  Next: double-click status.cmd to verify.'
-    } else {
-        Write-Host '  Installed        : NO (fix the issues above and re-run)' -ForegroundColor Red
+function Get-InstallPreflightLines {
+    param($Result, [switch]$Detailed, [switch]$SkipProbe)
+    $lines = @('Codex Quota Keeper - 安装检查', '')
+    $lines += '【配置文件】'
+    if (@($Result.configIssues).Count -gt 0) {
+        $lines += '  [异常] 配置未通过校验，请修改后重试'
+        foreach ($issue in $Result.configIssues) { $lines += "  $(Hide-SensitiveText $issue)" }
+    } else { $lines += '  [正常] 配置格式及参数关系有效' }
+    $lines += '【Codex CLI】'
+    $lines += $(if ($Result.codexPath) { '  [正常] 已找到 Codex 命令' } else { '  [异常] 未找到；请安装 Codex CLI 或设置 codex.command' })
+    $lines += '【AutoAnchor 执行配置】'
+    $gate = $Result.profile
+    if (-not $gate -or -not $gate.attempted) { $lines += '  [注意] 未执行校验，请先解决前置检查问题' }
+    elseif ($gate.validation -eq 'VALID') { $lines += '  [正常] 模型与思考等级校验通过' }
+    elseif ($gate.armed) { $lines += '  [异常] 执行配置不支持或暂时不可校验；自动锚定已阻止' }
+    else { $lines += '  [注意] 执行配置未通过；当前不会自动调用模型，可继续只读监控' }
+    $lines += '【额度接口】'
+    if ($SkipProbe) { $lines += '  [注意] 已按 -SkipProbe 跳过额度探测' }
+    elseif (-not $Result.probe) { $lines += '  [注意] 前置检查未通过，尚未探测' }
+    elseif ($Result.probe.ok) { $lines += "  [正常] 只读连接成功（共 $($Result.probe.totalAttempts) 次连接尝试）" }
+    else {
+        $hint = switch ($Result.probe.errorKind) {
+            'AUTH_ERROR' { '请在 Codex 中重新登录' }
+            'RATE_LIMITED' { '请求被限流，请等待退避后重试' }
+            'SCHEMA_UNKNOWN' { '接口结构无法识别，请检查 CLI 兼容版本' }
+            'NETWORK_ERROR' { '网络连接失败，请检查代理、网络与证书' }
+            'TIMEOUT' { '连接超时，请检查网络后重试' }
+            'EOF' { '连接提前关闭，请检查 CLI 与代理' }
+            default { '接口调用失败；使用 -Detailed 查看详情' }
+        }
+        $lines += "  [异常] $hint（$($Result.probe.errorKind)）"
     }
+    $lines += '【计划任务】'
+    $lines += $(if ($Result.ok) { "  [正常] 已注册：$($Result.taskName)" } else { '  [异常] 未注册，请解决上述问题后重新安装' })
+    if ($Result.forcedAnchor.started) { $lines += '  [注意] 已按 anchorOnApply 配置提交立即锚定请求' }
+    if ($Detailed) {
+        $lines += '【详细信息】'
+        foreach ($issue in @($Result.issues) + @($Result.warnings)) { $lines += "  $(Hide-SensitiveText $issue)" }
+        if ($gate) { $lines += "  $(Hide-SensitiveText (Get-ExecutionProfileGateSummary $gate))" }
+    }
+    return ,$lines
+}
+
+if ($MyInvocation.InvocationName -ne '.') {
+    try { $result = Invoke-KeeperInstall -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile -SkipProbe:$SkipProbe }
+    catch {
+        $result = @{ ok = $false; issues = @((Hide-SensitiveText $_.Exception.Message)); configIssues = @(); warnings = @() }
+    }
+    Get-InstallPreflightLines -Result $result -SkipProbe:$SkipProbe -Detailed:$Detailed | ForEach-Object { $_ | ForEach-Object { Write-Host $_ } }
     exit $(if ($result.ok) { 0 } else { 1 })
 }

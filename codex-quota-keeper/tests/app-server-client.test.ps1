@@ -1,4 +1,4 @@
-# Tests for app-server-client.ps1 (CQK-037): the shared JSON-RPC session layer.
+﻿# Tests for app-server-client.ps1 (CQK-037): the shared JSON-RPC session layer.
 #
 # Two halves:
 #   - Pure projection tests (no process spawn) for the two shapes that decide
@@ -247,13 +247,13 @@ Assert-True ($to.message -match 'timed out') 'timeout message'
 
 $missing = Invoke-CodexModelList -Config (New-TestConfig @{ codex = @{ command = (Join-Path $env:TEMP ('no-such-codex-' + [guid]::NewGuid().ToString('N') + '.exe')) } })
 Assert-False $missing.ok 'missing codex binary fails'
-Assert-Equal 'SETUP_ERR' $missing.errorKind 'SETUP_ERR kind from the shared session layer'
+Assert-Equal 'SETUP_ERROR' $missing.errorKind 'SETUP_ERROR kind from the shared session layer'
 Assert-Equal 0 @($missing.models).Count 'no catalog'
 Assert-Equal 0 $missing.pages 'no pages attempted'
 
 $missingCfg = Invoke-CodexConfigRead -Config (New-TestConfig @{ codex = @{ command = (Join-Path $env:TEMP ('no-such-codex-' + [guid]::NewGuid().ToString('N') + '.exe')) } })
 Assert-False $missingCfg.ok 'missing codex binary fails config/read too'
-Assert-Equal 'SETUP_ERR' $missingCfg.errorKind 'same setup kind for both capabilities - one client, one rule'
+Assert-Equal 'SETUP_ERROR' $missingCfg.errorKind 'same setup kind for both capabilities - one client, one rule'
 
 Start-TestGroup 'privacy: no credential-looking text in any message'
 

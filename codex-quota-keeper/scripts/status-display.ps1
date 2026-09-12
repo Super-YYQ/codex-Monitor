@@ -434,6 +434,8 @@ function Get-StatusDisplayModel {
             liveError = [string](Get-StatusValue -Map $s -Path 'codex.liveError')
         }
         autoAnchor   = @{
+            profile    = Get-StatusValue -Map $s -Path 'executionProfile'
+            stats      = Get-AnchorStatistics -Anchors (Get-StatusValue -Map $st -Path 'anchors') -Today $Now.ToString('yyyy-MM-dd')
             enabled    = [bool](Get-StatusValue -Map $s -Path 'autoAnchor')
             workMode   = $workMode
             slots      = $slots
@@ -605,6 +607,28 @@ function Get-StatusDisplayLines {
         # §16.5: an empty model must never render as an empty value.
         Write-StatusRow $lines -Label '执行模型' -Value $aa.modelText
         Write-StatusRow $lines -Label '思考等级' -Value $aa.effortText
+        Write-StatusRow $lines -Label '成功 / 失败' -Value "$($aa.stats.successCount) / $($aa.stats.failedCount)（仅已确认结果）"
+        if ($aa.stats.lastSuccessAt) { Write-StatusRow $lines -Label '上次成功' -Value (Format-StatusDateTime $aa.stats.lastSuccessAt) }
+        $ep = $aa.profile
+        if (-not $ep -or -not $ep.value) {
+            Write-StatusRow $lines -Label '执行配置校验' -Value '尚无记录；运行 status.cmd -Live 校验' -Severity 'INFO'
+        } else {
+            $pv = $ep.value
+            $origin = if ($ep.source -eq 'live') { '本次实时校验' } else { '缓存；仅代表上次校验' }
+            if ($ep.stale) { $origin += '，已过期或配置已修改' }
+            $verdict = switch ($pv.validation) { 'VALID' { '通过' }; 'INVALID' { '不支持此配置' }; default { '暂时无法校验' } }
+            $sev = if ($pv.validation -eq 'VALID' -and -not $ep.stale) { 'HEALTHY' } elseif ($pv.validation -eq 'INVALID') { 'ERROR' } else { 'WARNING' }
+            Write-StatusRow $lines -Label '执行配置校验' -Value "$verdict（$origin）" -Severity $sev
+            Write-StatusRow $lines -Label '有效模型' -Value $(if ($pv.effectiveModel) { $pv.effectiveModel } else { '未知' })
+            Write-StatusRow $lines -Label '有效思考等级' -Value $(if ($pv.effectiveReasoningEffort) { $pv.effectiveReasoningEffort } else { '沿用 CLI 默认' })
+            Write-StatusRow $lines -Label '配置来源' -Value "$($pv.modelSource) / $($pv.reasoningEffortSource)"
+            Write-StatusRow $lines -Label '模型提供方' -Value $(if ($pv.modelProvider) { $pv.modelProvider } else { 'CLI 默认' })
+            Write-StatusRow $lines -Label '校验时间' -Value (Format-StatusDateTime $pv.validatedAt)
+            if ($ep.source -eq 'live' -and $pv.supportedReasoningEfforts) {
+                Write-StatusRow $lines -Label '支持思考等级' -Value ($pv.supportedReasoningEfforts -join ' / ')
+            }
+            if ($ep.reason) { Write-StatusRow $lines -Label '校验原因' -Value (Hide-SensitiveText $ep.reason) }
+        }
         Write-StatusRow $lines -Label '说明' -Value '该功能会主动调用 Codex 模型并消耗额度'
         $block = $null
         foreach ($code in @('AUTOANCHOR_BLOCKED', 'ANCHOR_CAP_REACHED', 'ANCHOR_GAP_COOLDOWN')) {

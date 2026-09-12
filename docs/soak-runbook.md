@@ -1,5 +1,16 @@
 # 双机 soak + 故障注入操作单（v0.9.0-beta 发布前 DoD）
 
+> **2026-09-12 发布门禁修订（CQK-048）**：以下 mock 故障注入操作保留为离线演练。
+> 演练通过不能替代两台实际主机共享同一个可达远端的连续运行和真实 CLI 协议冒烟。
+> 当前没有本轮真机 soak 证据；不得勾选发布验收或创建 tag/Release。
+> 本地 bare 仓库上的 `git push` 也需要执行者的明确授权；本次审查未运行这些步骤。
+
+正式验收须附相同候选 commit、两台 OS/PowerShell/Codex 版本、起止时间、运行轮数、
+故障与恢复证据、调用唯一性、三处审计一致性、次数迁移、残留进程和日志增长结果。
+持续时间至少满足下文 4 小时演练要求，并覆盖实际配置下的续租、到期、接管和恢复；
+默认 60 分钟轮询若不足以覆盖这些状态，应延长观察。真实模型调用按单独明确的范围执行。
+无法注入的负向分支记录为自动测试覆盖或未验证，不能写成实机已经通过。
+
 设计文档 v2.0 §21 要求：创建 v0.9.0-beta Release **之前**，先做双机 soak test + 故障注入，
 多机连续运行至少覆盖「Leader 正常续租、A/B 异步任务锚点、429、Git 临时断网、恢复、History
 重试」，并通过「AutoAnchor 双机并发、LOCAL_ONLY crash claim、Lease revalidate 故障」测试。
@@ -23,11 +34,8 @@ AutoAnchor 会真正调用模型。**默认 soak 用仓库自带的 mock app-ser
 | 本操作单 §1–§9（全部步骤，含 F1~F7） | **否**（`codex.command` 指向 mock app-server） | **否**（本地裸仓库充当日志仓库） |
 | 你自己追加的真实冒烟（按下方改回 `auto` + 真实 `repoPath`） | **是**（每机各约 1–2 次 `codex exec`） | **是**（真实 Private 仓库） |
 
-真实冒烟**不是本操作单的一部分、也不是 §21 的 DoD 项**：DoD 要覆盖的七类场景
-（续租、锚点、429、断网、恢复、History 重试、并发/crash/revalidate）全部在 mock
-夹具下可判定，且判据比真实环境更硬（`anchor-args.txt` 是模型调用次数的唯一地面真值，
-真实环境无法这样计数）。改成真实 Codex 只是额外验证「协议/凭证在真机上也没变」，
-可在挂机结束后顺手做一轮，代价是每机 1–2 次真实调用。
+mock 可确定性验证故障逻辑和模拟调用次数；真实 CLI 冒烟用于确认当前协议、凭证与
+实际部署是否兼容。两类证据分别记录，不能相互替代。发布验收以本页顶部修订为准。
 
 中途想换真实 Codex 或真实仓库：编辑同一份 soak 配置，把 `"command"` 改回 `"auto"`、
 `repoPath` 换成真实路径即可——**但 `CQK_MOCK_MODE` 等环境变量必须先删掉**（见 §2 的成因说明），
@@ -79,7 +87,7 @@ git init --bare D:\soak\logrepo.git
 2. 每台机器准备 §4 的那份 soak 配置，存为 `<部署目录>\config.json`。
 3. 日志仓库 clone 到两台机器的同一路径 `D:\soak\logrepo`：
    ```powershell
-   git clone D:\soak\logrepo.git D:\soak\logrepo
+   git clone <两机共同可达的同一个远端地址> D:\soak\logrepo
    ```
 4. **每台机器各自绑定一次**（CQK-011：写 marker + `runtime/log-repo.json` 指纹）：
    ```powershell
@@ -129,7 +137,8 @@ git init --bare D:\soak\logrepo.git
 
 B 机只改这两行：`"label": "SOAK-B"`、`"task": { "name": "CQKSoak-B" }`（最后一行自己加，
 放顶层）。其余完全一致，包括 `repoPath`——两台机器各自本地都有 `D:\soak\logrepo` 这个 clone，
-它们通过裸仓库 `D:\soak\logrepo.git` 同步。
+它们必须连接同一个远端。两台机器各有一个同名 `D:\soak\logrepo.git` 并不形成共享存储；
+此本地路径仅适用于单机双目录演练。真机请使用双方可达的共享 bare 地址或专用 Private 远端。
 
 > **`repoPath` 用正斜杠**：值是 JSON 字符串，`"D:\soak\logrepo"` 里的 `\s` 不合法会解析失败。
 > **`command` 用双反斜杠**，同理。

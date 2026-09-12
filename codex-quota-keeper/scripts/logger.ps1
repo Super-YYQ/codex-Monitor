@@ -44,7 +44,7 @@ function Write-KeeperLog {
         mode       = $Mode
         runId      = $RunId
         windows    = $Windows
-        anchor     = $Anchor
+        anchor     = (ConvertTo-AnchorAuditRecord $Anchor)
         error      = $ErrorText
         version    = $script:CQK_VERSION
     }

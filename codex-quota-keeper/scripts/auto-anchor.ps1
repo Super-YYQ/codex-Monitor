@@ -1,4 +1,4 @@
-# Codex Quota Keeper - AutoAnchor (EXPERIMENTAL, default disabled).
+﻿# Codex Quota Keeper - AutoAnchor (EXPERIMENTAL, default disabled).
 # After a quota window reset is observed - or, on the keeper's own idle judgment
 # (never anchored + second observation still shows zero usage), via the
 # keepalive backstop (no anchor within keepaliveIntervalMinutes since the last
@@ -232,11 +232,13 @@ function Get-AnchorProfileGate {
         $out.validation = 'UNAVAILABLE'
         $out.reason = 'codex executable not found'
         $out.event = New-AnchorProfileGateEvent -Validation 'UNAVAILABLE' -Reason $out.reason `
-            -ErrorKind 'SETUP_ERR' -Guard $Guard -LocalOnly $LocalOnly
+            -ErrorKind 'SETUP_ERROR' -Guard $Guard -LocalOnly $LocalOnly
         return $out
     }
 
-    $prof = Resolve-ExecutionProfile -Config $Config -CodexPath $CodexPath
+    $workDir = Join-Path (Get-RuntimeDir $KeeperRoot) 'anchor-work'
+    Ensure-Directory $workDir | Out-Null
+    $prof = Resolve-ExecutionProfile -Config $Config -CodexPath $CodexPath -WorkingDirectory $workDir
     $out.codexPath = $CodexPath
     $out.profile = $prof
     $out.validation = [string]$prof.validation
@@ -317,7 +319,11 @@ function Invoke-AutoAnchorIfNeeded {
         $out.events += ,@($gate.event)
         return $out
     }
-    $profile = $gate.profile
+    $prof = $gate.profile
+    if (-not (Test-AnchorPromptAllowed -Prompt ([string](Get-AutoAnchorConfig $Config).prompt))) {
+        $out.events += ,@{ event = 'ANCHOR_SKIPPED'; reason = 'anchorPrompt not on the safe whitelist' }
+        return $out
+    }
 
     # Durable claim (CQK-013 distributed / CQK-023 local): CLAIMED is written
     # before the model call, by both backings, and any existing claim - whatever
@@ -331,6 +337,9 @@ function Invoke-AutoAnchorIfNeeded {
             -ClaimMinutes ($execWindowMinutes * 2) -LocalOnly $localOnly
         if ($claim.ok) { $claimed += $id }
         else {
+            # A confirmed existing claim is terminal for this trigger. Transport
+            # failures/CAS contention are not proof and remain pending.
+            if ($claim.exists) { Add-ProcessedEvent -State $State -EventId $id }
             $out.events += ,@{ event = 'ANCHOR_ABORTED'; reason = "event $id not claimed: $($claim.reason)"
                               anchor = @{ phase = 'CLAIM'; eventId = $id; reason = $claim.reason } }
         }
@@ -353,24 +362,6 @@ function Invoke-AutoAnchorIfNeeded {
         }
     }
 
-    # Pre-exec skips: nothing was billed, so the claims are released as FAILED and
-    # the events marked processed. Leaving them CLAIMED would block the event id
-    # forever - the idle trigger is one-per-day, so anchoring would stay dead until
-    # the operator cleaned runtime/anchor-claims by hand.
-    if (-not (Test-AnchorPromptAllowed -Prompt ([string](Get-AutoAnchorConfig $Config).prompt))) {
-        foreach ($id in $claimed) {
-            $null = Fail-AnchorClaim -Config $Config -KeeperRoot $KeeperRoot -EventId $id -Machine $Machine `
-                -Result 'skipped before exec: anchorPrompt not on the safe whitelist' -LocalOnly $localOnly
-            Add-ProcessedEvent -State $State -EventId $id
-        }
-        $out.events += ,@{ event = 'ANCHOR_SKIPPED'; reason = 'anchorPrompt not on the safe whitelist' }
-        return $out
-    }
-
-    # The Codex binary was already proven present by Get-AnchorProfileGate - a
-    # missing executable cannot reach this line, which is the point: the gate is
-    # what §8 puts between "should anchor" and "claimed an event".
-
     # ---- ANCHORING: one minimal exec in an empty work dir --------------------
     if ($localOnly) {
         $out.events += ,@{ event = 'ANCHOR_LOCAL'; reason = 'coordination disabled; durable local claim file only' }
@@ -384,15 +375,41 @@ function Invoke-AutoAnchorIfNeeded {
     # what makes §9.1's three-surface identity hold by construction - the value
     # audited, the value validated and the value typed into the process are read off
     # one object, so nothing can drift between the gate and the call.
-    $execPair = Get-ExecutionProfileExecArgs -Profile $profile
+    $execPair = Get-ExecutionProfileExecArgs -Profile $prof
     $execInfo = Get-AnchorExecCommand -CodexPath $CodexPath -Prompt ([string]$anchorCfgExec.prompt) `
         -Model $execPair.model -ReasoningEffort $execPair.reasoningEffort
-    $startedAt = Get-IsoTimestamp
+    $attemptNow = Get-Date
+    $startedAt = $attemptNow.ToString('yyyy-MM-ddTHH:mm:sszzz')
+    # Durable allowance reservation: a crash after launching must not reset it.
+    $previousAnchors = $State.anchors
+    $stats = Get-AnchorStatistics -Anchors $State.anchors -Today $attemptNow.ToString('yyyy-MM-dd')
+    $stats.attemptCount++; $stats.count = $stats.attemptCount
+    $stats.lastAttemptAt = $startedAt; $stats.lastAnchorAt = $startedAt
+    if ($ForceAnchor) { $stats.anchorOnApplyAttempted = $true }
+    $State.anchors = $stats
+    Save-KeeperState -Root $KeeperRoot -State $State
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
     $exec = Invoke-External -FilePath $execInfo.exe -ArgumentList $execInfo.args -RawArguments "$($execInfo.rawArgs)" `
         -TimeoutSeconds ([Math]::Max(60, [int]$Config.codex.queryTimeoutSeconds * 3)) -WorkingDirectory $workDir `
         -Environment (Get-CodexProxyEnvironment $Config)
+    } catch { $exec = @{ ok = $false; exitCode = -1 } }
     $sw.Stop()
+
+    if ($exec.ContainsKey('started') -and -not $exec.started) {
+        # Only a confirmed pre-start failure refunds the reservation. A crash or
+        # unknown result remains charged, preserving the durable daily limit.
+        $State.anchors = $previousAnchors
+        foreach ($id in $claimed) {
+            $null = Fail-AnchorClaim -Config $Config -KeeperRoot $KeeperRoot -EventId $id -Machine $Machine `
+                -Result 'exec process could not start' -ClaimedAt $startedAt -CompletedAt (Get-IsoTimestamp) -LocalOnly $localOnly
+            Add-ProcessedEvent -State $State -EventId $id
+        }
+        Save-KeeperState -Root $KeeperRoot -State $State
+        $out.events += ,@{ event = 'ANCHOR_ABORTED'; reason = 'exec process could not start';
+            anchor = @{ phase = 'EXEC_LAUNCH'; reason = $exec.stderr } }
+        return $out
+    }
 
     # ---- VERIFY: second read; never retry the model call --------------------
     $verify = Invoke-CodexRateLimitsRead -Config $Config -CodexPath $CodexPath
@@ -420,11 +437,14 @@ function Invoke-AutoAnchorIfNeeded {
         reason            = $(if (-not $exec.ok) { "exec failed ($($exec.exitCode))" } elseif (-not $verified) { 'post-anchor verification failed; no retry' } else { $null })
     }
 
-    # Execution consumed quota regardless of verification: count it.
-    $today = $now.ToString('yyyy-MM-dd')
-    $count = [int]$State.anchors.count
-    if ([string]$State.anchors.day -ne $today) { $count = 0 }
-    $State.anchors = @{ day = $today; count = $count + 1; lastAnchorAt = $endedAt }
+    foreach ($k in @('configuredModel', 'configuredReasoningEffort', 'effectiveModel',
+                     'effectiveReasoningEffort', 'modelProvider', 'modelSource',
+                     'reasoningEffortSource', 'validatedAt')) { $anchorInfo[$k] = $prof[$k] }
+    $anchorInfo.profileValidation = $prof.validation
+    if ($verified -and $exec.ok) {
+        $State.anchors.successCount++
+        $State.anchors.lastSuccessAt = $endedAt
+    } else { $State.anchors.failedCount++ }
 
     foreach ($id in $claimed) { Add-ProcessedEvent -State $State -EventId $id }
 

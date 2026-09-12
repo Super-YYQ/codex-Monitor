@@ -599,7 +599,7 @@ Assert-True ($spec.args -contains 'C:\Tools\mock.ps1') 'ps1 script path in args'
 
 $spec = Resolve-ExecutableLaunchSpec -Executable 'C:\Tools\codex.cmd' -ArgumentList @('app-server')
 Assert-True ("$($spec.exe)" -match 'cmd\.exe$') 'cmd wrapped in ComSpec'
-Assert-Equal '/d /s /c ""C:\Tools\codex.cmd" "app-server"""' "$($spec.rawArgs)" 'cmd raw command line double-quoted for /s'
+Assert-Equal '/d /s /c ""C:\Tools\codex.cmd" "app-server""' "$($spec.rawArgs)" 'cmd raw command line has one outer quote pair for /s'
 
 Start-TestGroup 'anchor exec: Get-AnchorExecCommand model/effort passthrough'
 

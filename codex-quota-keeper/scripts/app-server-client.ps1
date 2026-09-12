@@ -1,4 +1,4 @@
-# Codex Quota Keeper - shared `codex app-server` JSON-RPC client layer (CQK-037).
+﻿# Codex Quota Keeper - shared `codex app-server` JSON-RPC client layer (CQK-037).
 #
 # One home for everything that is not quota-specific: process launch, pipe wiring,
 # the initialize/initialized handshake, id-matched request/response reads, the hard
@@ -39,17 +39,22 @@ $script:CQK_MODEL_LIST_MAX_ITEMS = 300
 $script:CQK_MODEL_LIST_INCLUDE_HIDDEN = $true
 
 function Get-CodexAppServerErrorKind {
-    # Single classifier that turns a JSON-RPC error object into the operational
-    # kind upper layers act on. Callers must not re-derive this from message
-    # text (doc v3.0 §12 / CQK-043 keeps the taxonomy in one place).
-    #
-    # Today it distinguishes AUTH_ERROR from everything else, which is exactly
-    # what the quota path has always done; CQK-043 extends the set here rather
-    # than adding a second regex pile in runner.ps1 / install.ps1.
+    # Prefer explicit status codes, then transport causes, then API wording.
+    # The wrapper "fetch rate limits" by itself is never a 429.
     param([string]$Code, [string]$Message)
-    $combined = "$Code $Message"
-    if ($combined -match '(?i)auth|login|unauthor|401|403|not\s+logged') { return 'AUTH_ERROR' }
+    if ($Code -in @('401', '403')) { return 'AUTH_ERROR' }
+    if ($Code -eq '429') { return 'RATE_LIMITED' }
+    if ($Message -match '(?i)\b(401|403)\b|unauthori[sz]ed|\bauth(?:entication|enticated)?\b|not\s+logged|login required') { return 'AUTH_ERROR' }
+    if ($Message -match '(?i)error sending request|connection\s+(refused|reset|closed|aborted)|resolving host|unreachable|no such host|dns|tls|certificate|proxy connect') { return 'NETWORK_ERROR' }
+    if ($Message -match '(?i)timed?\s*out|timeout') { return 'TIMEOUT' }
+    if ($Message -match '(?i)\b429\b|too many requests|usage.?limit|rate.?limit\s+(is\s+)?(exceeded|reached|hit)') { return 'RATE_LIMITED' }
     return 'PROTOCOL_ERROR'
+}
+
+function Complete-CodexResult {
+    param([hashtable]$Result)
+    $Result.retryable = (-not $Result.ok -and (Get-CodexErrorRetryable ([string]$Result.errorKind)))
+    return $Result
 }
 
 function Get-CodexErrorRetryable {
@@ -59,8 +64,7 @@ function Get-CodexErrorRetryable {
     # transport faults are retryable, a rejected credential or a rejected schema
     # is not, and PROFILE_UNAVAILABLE is retryable by default because the usual
     # cause is a transient read failure (Runtime still fails closed on it).
-    # 'SETUP_ERR' is the pre-CQK-043 spelling; CQK-043 renames it to SETUP_ERROR
-    # and both spellings stay non-retryable until then.
+    # Setup, authentication, schema and rate-limit failures are not retried.
     param([string]$ErrorKind)
     switch ($ErrorKind) {
         'NETWORK_ERROR'       { return $true }
@@ -81,10 +85,12 @@ function Get-CodexServerStartInfo {
 function Start-CodexAppServerSession {
     param(
         [hashtable]$StartInfo,
-        [hashtable]$Environment = @{}
+        [hashtable]$Environment = @{},
+        [string]$WorkingDirectory = ''
     )
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $StartInfo.exe
+    if ($WorkingDirectory) { $psi.WorkingDirectory = $WorkingDirectory }
     $psi.UseShellExecute = $false
     $psi.RedirectStandardInput = $true
     $psi.RedirectStandardOutput = $true
@@ -133,6 +139,7 @@ function Start-CodexAppServerSession {
         traceFile      = $traceFile
         lastWritten    = $null
         launchSpec     = $launchSpec
+        cwd            = $WorkingDirectory
         nextId         = $script:CQK_APPSERVER_FIRST_REQUEST_ID
     }
 }
@@ -232,6 +239,8 @@ function Initialize-CodexAppServer {
     if (-not $handshake.ok) {
         return @{ ok = $false; errorKind = $handshake.kind; message = (Hide-SensitiveText $handshake.message) }
     }
+    $checked = Read-CodexAppServerResponse -Response $handshake.response
+    if (-not $checked.ok) { return $checked }
     Send-AppServerMessage -Session $Session -Message @{ jsonrpc = '2.0'; method = 'initialized' }
     return @{ ok = $true; errorKind = $null; message = $null }
 }
@@ -256,7 +265,12 @@ function Invoke-CodexAppServerRequest {
     if (-not $reply.ok) {
         return @{ ok = $false; response = $null; errorKind = $reply.kind; message = (Hide-SensitiveText $reply.message) }
     }
-    $resp = $reply.response
+    return Read-CodexAppServerResponse -Response $reply.response
+}
+
+function Read-CodexAppServerResponse {
+    param($Response)
+    $resp = $Response
     if ($resp -is [hashtable] -and $resp.ContainsKey('error') -and $resp.error) {
         $errText = ''
         $errCode = ''
@@ -266,14 +280,17 @@ function Invoke-CodexAppServerRequest {
         } else {
             $errText = "$($resp.error)"
         }
-        return @{
+        return Complete-CodexResult @{
             ok        = $false
             response  = $resp
             errorKind = (Get-CodexAppServerErrorKind -Code $errCode -Message $errText)
             message   = (Hide-SensitiveText "app-server error ($errCode): $errText")
         }
     }
-    return @{ ok = $true; response = $resp; errorKind = $null; message = $null }
+    if ($resp -isnot [hashtable] -or -not $resp.ContainsKey('result')) {
+        return Complete-CodexResult @{ ok = $false; response = $null; errorKind = 'PROTOCOL_ERROR'; message = 'app-server response has no result' }
+    }
+    return Complete-CodexResult @{ ok = $true; response = $resp; errorKind = $null; message = $null }
 }
 
 function Invoke-CodexAppServerSession {
@@ -298,6 +315,7 @@ function Invoke-CodexAppServerSession {
         [int]$TimeoutSeconds = 0,
         $Environment = $null,
         $Options = $null,
+        [string]$WorkingDirectory = '',
         [scriptblock]$Body
     )
     # $Body is invoked here, and PowerShell scoping is dynamic - a scriptblock
@@ -310,28 +328,27 @@ function Invoke-CodexAppServerSession {
     if ($null -eq $Environment) { $Environment = Get-CodexProxyEnvironment $Config }
     if (-not $CodexPath) { $CodexPath = Resolve-CodexCommand $Config }
     if (-not $CodexPath) {
-        return @{ ok = $false; errorKind = 'SETUP_ERR'; message = 'codex executable not found (set codex.command in config.json)' }
+        return Complete-CodexResult @{ ok = $false; errorKind = 'SETUP_ERROR'; message = 'codex executable not found (set codex.command in config.json)' }
     }
     $startInfo = Get-CodexServerStartInfo $CodexPath
     if (-not $startInfo) {
-        return @{ ok = $false; errorKind = 'SETUP_ERR'; message = 'no PowerShell available to run the configured codex command' }
+        return Complete-CodexResult @{ ok = $false; errorKind = 'SETUP_ERROR'; message = 'no PowerShell available to run the configured codex command' }
     }
 
     $session = $null
     try {
-        $session = Start-CodexAppServerSession $startInfo -Environment $Environment
-        if ($session.proc.HasExited) {
-            return @{ ok = $false; errorKind = 'SETUP_ERR'; message = 'app-server process exited immediately' }
-        }
+        $session = Start-CodexAppServerSession $startInfo -Environment $Environment -WorkingDirectory $WorkingDirectory
         $handshake = Initialize-CodexAppServer -Session $session -TimeoutSeconds $timeout
         if (-not $handshake.ok) {
-            return @{ ok = $false; errorKind = $handshake.errorKind; message = $handshake.message }
+            return Complete-CodexResult @{ ok = $false; errorKind = $handshake.errorKind; message = $handshake.message }
         }
-        return & $Body $session $timeout $Options
+        $result = & $Body $session $timeout $Options
+        return Complete-CodexResult $result
     } catch {
         return @{
             ok        = $false
-            errorKind = 'PROTOCOL_ERROR'
+            errorKind = $(if ($null -eq $session) { 'SETUP_ERROR' } else { 'PROTOCOL_ERROR' })
+            retryable = $false
             message   = (Hide-SensitiveText "app-server client failure: $($_.Exception.Message)")
         }
     } finally {
@@ -370,14 +387,16 @@ function Invoke-CodexConfigReadInSession {
     # SAME session (one child process, one environment - doc v3.0 §6.2), so the
     # schema lives here and the session-opening wrapper below stays trivial.
     param($Session, [int]$TimeoutSeconds = 20)
-    $reply = Invoke-CodexAppServerRequest -Session $Session -Method 'config/read' -Params @{} -TimeoutSeconds $TimeoutSeconds
+    $params = @{}
+    if ($Session.cwd) { $params.cwd = [string]$Session.cwd }
+    $reply = Invoke-CodexAppServerRequest -Session $Session -Method 'config/read' -Params $params -TimeoutSeconds $TimeoutSeconds
     if (-not $reply.ok) {
         return @{ ok = $false; model = $null; modelReasoningEffort = $null; modelProvider = $null;
                   errorKind = $reply.errorKind; message = $reply.message }
     }
     $result = $null
     if ($reply.response -is [hashtable] -and $reply.response.ContainsKey('result')) { $result = $reply.response.result }
-    if ($result -isnot [hashtable]) {
+    if ($result -isnot [hashtable] -or $result.config -isnot [hashtable]) {
         return @{ ok = $false; model = $null; modelReasoningEffort = $null; modelProvider = $null;
                   errorKind = 'SCHEMA_UNKNOWN'; message = 'config/read returned no config object; failing closed' }
     }

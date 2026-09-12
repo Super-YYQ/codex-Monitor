@@ -1,4 +1,4 @@
-# Codex Quota Keeper - shared facilities.
+﻿# Codex Quota Keeper - shared facilities.
 # Dot-source only; every function takes explicit -Root so tests can run in temp dirs.
 
 # Captured while dot-sourcing: $PSCommandPath inside a function would resolve to the caller.
@@ -263,8 +263,9 @@ function Hide-SensitiveText {
 
 # Allowlist for records that reach history/ or remote sync.
 $script:CQK_HISTORY_ALLOWED_KEYS = @(
-    'ts', 'event', 'machineId', 'machineLabel', 'role', 'mode',
-    'windows', 'anchor', 'error', 'summary', 'version'
+    'ts', 'recordedAt', 'eventId', 'event', 'machineId', 'machineLabel',
+    'role', 'mode', 'runId', 'windows', 'anchor', 'errorKind', 'error',
+    'summary', 'schema', 'version'
 )
 
 function Sanitize-Record {
@@ -277,16 +278,63 @@ function Sanitize-Record {
             $out[$key] = $Record[$key]
         }
     }
-    foreach ($key in @('error')) {
+    foreach ($key in @($out.Keys)) {
         if ($out.ContainsKey($key) -and $out[$key] -is [string]) {
             $out[$key] = Hide-SensitiveText $out[$key]
         }
     }
+    if ($out.ContainsKey('anchor')) { $out.anchor = ConvertTo-AnchorAuditRecord $out.anchor }
     return $out
+}
+
+function ConvertTo-AnchorAuditRecord {
+    # The same projection is used by runtime logs, history and the outbox.
+    # Preserve legacy model/effort aliases without accepting arbitrary objects.
+    param($Value)
+    if ($Value -isnot [hashtable]) { return $null }
+        $anchor = @{}
+        foreach ($key in @('phase', 'trigger', 'localOnly', 'anchorInvocationId',
+                'triggerEventIds', 'eventId', 'startedAt', 'endedAt', 'durationSecs',
+                'execExitCode', 'verified', 'configuredModel',
+                'configuredReasoningEffort', 'effectiveModel',
+                'effectiveReasoningEffort', 'modelProvider', 'modelSource',
+                'reasoningEffortSource', 'profileValidation', 'validatedAt',
+                'supportedReasoningEfforts', 'model', 'reasoningEffort', 'reason')) {
+            if (-not $Value.ContainsKey($key)) { continue }
+            $v = $Value[$key]
+            if ($v -is [string]) { $anchor[$key] = Hide-SensitiveText $v }
+            elseif ($null -eq $v -or $v -is [ValueType]) { $anchor[$key] = $v }
+            elseif ($key -in @('triggerEventIds', 'supportedReasoningEfforts') -and $v -is [System.Collections.IEnumerable]) {
+                $anchor[$key] = @($v | Where-Object { $_ -is [string] } | ForEach-Object { Hide-SensitiveText $_ })
+            }
+        }
+    return $anchor
 }
 
 # ---------------------------------------------------------------------------
 # Config accessors (shape-agnostic: v2 nested schema and v1 flat schema both work)
+
+function Get-AnchorStatistics {
+    # Legacy counts describe attempts. Never fabricate a successful outcome.
+    # Aliases remain readable by older status-json clients during upgrades.
+    param($Anchors, [string]$Today = '')
+    if ($Anchors -isnot [hashtable]) { $Anchors = @{} }
+    $attempts = [Math]::Max([int]$Anchors.attemptCount, [int]$Anchors.count)
+    $lastAttempt = $Anchors.lastAttemptAt
+    if (-not $lastAttempt) { $lastAttempt = $Anchors.lastAnchorAt }
+    $out = @{
+        day = $Anchors.day; attemptCount = $attempts
+        successCount = [int]$Anchors.successCount; failedCount = [int]$Anchors.failedCount
+        lastAttemptAt = $lastAttempt; lastSuccessAt = $Anchors.lastSuccessAt
+        anchorOnApplyAttempted = [bool]$Anchors.anchorOnApplyAttempted
+        count = $attempts; lastAnchorAt = $lastAttempt
+    }
+    if ($Today -and [string]$out.day -ne $Today) {
+        $out.day = $Today; $out.attemptCount = 0; $out.count = 0
+        $out.successCount = 0; $out.failedCount = 0; $out.anchorOnApplyAttempted = $false
+    }
+    return $out
+}
 
 function Get-AutoAnchorConfig {
     # v2: codex.autoAnchor = @{ enabled; prompt; maxPerDay; minimumGapMinutes; keepaliveIntervalMinutes; anchorOnApply;
@@ -1032,7 +1080,7 @@ function Exit-RunnerLock {
 # External command execution: argument arrays only, no shell string interpolation.
 
 function Invoke-External {
-    # Returns @{ ok; exitCode; stdout; stderr; timedOut }
+    # started distinguishes a confirmed launch failure from an uncertain outcome.
     param(
         [string]$FilePath,
         [string[]]$ArgumentList = @(),
@@ -1069,8 +1117,10 @@ function Invoke-External {
 
     $proc = New-Object System.Diagnostics.Process
     $proc.StartInfo = $psi
+    $started = $false
     try {
         [void]$proc.Start()
+        $started = $true
         if ($null -ne $StdinText) {
             $proc.StandardInput.Write($StdinText)
             $proc.StandardInput.Close()
@@ -1079,12 +1129,17 @@ function Invoke-External {
         $stderrTask = $proc.StandardError.ReadToEndAsync()
         if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
             try { $proc.Kill($true) } catch { try { $proc.Kill() } catch { } }
-            return @{ ok = $false; exitCode = -1; stdout = ''; stderr = 'process timed out'; timedOut = $true }
+            return @{ ok = $false; started = $true; exitCode = -1; stdout = ''; stderr = 'process timed out'; timedOut = $true }
         }
         $stdout = $stdoutTask.GetAwaiter().GetResult()
         $stderr = $stderrTask.GetAwaiter().GetResult()
-        return @{ ok = ($proc.ExitCode -eq 0); exitCode = $proc.ExitCode; stdout = $stdout; stderr = $stderr; timedOut = $false }
+        return @{ ok = ($proc.ExitCode -eq 0); started = $true; exitCode = $proc.ExitCode; stdout = $stdout; stderr = $stderr; timedOut = $false }
+    } catch {
+        return @{ ok = $false; started = $started; exitCode = -1; stdout = ''; stderr = (Hide-SensitiveText $_.Exception.Message); timedOut = $false }
     } finally {
+        if ($started) {
+            try { if (-not $proc.HasExited) { try { $proc.Kill($true) } catch { $proc.Kill() } } } catch { }
+        }
         $proc.Dispose()
     }
 }
@@ -1133,7 +1188,7 @@ function Resolve-ExecutableLaunchSpec {
             # quote (or three) breaks the launch.
             $raw = '/d /s /c ""' + $Executable + '"'
             foreach ($a in $ArgumentList) { $raw += ' "' + ("$a" -replace '"', '') + '"' }
-            $raw += '""'
+            $raw += '"'
             return @{ exe = $comspec; args = @(); rawArgs = $raw }
         }
         default {

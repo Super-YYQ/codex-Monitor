@@ -1,5 +1,15 @@
 # 场景详解（真实模拟数据）
 
+## 2026-09 执行配置与计数补充
+
+- 一轮检测到两个窗口重置，模型配置无效：记录 `ANCHOR_PROFILE_INVALID`，保存待处理触发，Claim 和调用次数都为零。修正配置后下一轮合并为一次调用，审计保留两个 triggerEventIds。
+- 额度正常但配置目录暂时不可读：记录 `ANCHOR_PROFILE_UNAVAILABLE`，不拿旧缓存当运行期放行依据；Status 的总体状态也提示不可用。
+- 进程确认未启动：记录 `ANCHOR_ABORTED`、`phase=EXEC_LAUNCH`，退还次数预留，不产生调用身份。启动后的失败保留一次 attempt 和失败结果；不重试已有 Claim。
+- 升级前 `count=3` 的状态迁移为 attemptCount=3、successCount=0、failedCount=0，最近成功时间未知；不能从历史尝试次数推断成功。
+- 接管时发现已有该事件的 Claim：终止该事件的待处理重试；存储不可达则保留，不把网络失败当成已有 Claim。
+
+完整验证边界见 [产品就绪审查](production-readiness.md)。下列旧时间线中的 count 是兼容别名，不代表已验证成功次数。
+
 > 本页把 README 里提到的每种仓库处理场景展开：用真实格式的时间、字段和文件内容模拟
 > 一台机器（machineId `a1b2c3d4e5f6…`，标签 Home PC）从安装到运行一周的完整时间线。
 > 所有 JSON 均为实际会写入 runtime/ 或推送到日志仓库的真实格式（字段与代码一一对应）。

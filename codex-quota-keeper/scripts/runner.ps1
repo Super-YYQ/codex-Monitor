@@ -1,4 +1,4 @@
-# Codex Quota Keeper - scheduled runner (doc 03 §5 main flow).
+﻿# Codex Quota Keeper - scheduled runner (doc 03 §5 main flow).
 # Windows Task Scheduler starts this; it runs once and exits. Never resident.
 #
 #   LoadConfig -> local mutex -> preflight -> backoff check -> leader election
@@ -173,20 +173,13 @@ try {
         $state.stale = $true
         $state.consecutiveReadFailures = [int]$state.consecutiveReadFailures + 1
         $state.lastError = [string]$read.message
-        # Transport failures (proxy down, no route, client timeout) must not be
-        # mislabeled as 429: the app-server wrapper text ("failed to fetch codex
-        # rate limits") contains "rate limit", which the old 429 regex matched on
-        # every outage -> 60-min backoff instead of a quick retry.
-        $msg = "$($read.message)"
-        $transportFailure = ($read.errorKind -in @('TIMEOUT', 'EOF')) -or
-            ($msg -match '(?i)error sending request|connection\s+(refused|reset|closed)|resolving host|unreachable')
         if ($read.errorKind -eq 'AUTH_ERROR') {
             Set-Backoff -Root $KeeperRoot -Minutes 120 -Reason 'auth error'
             $null = Set-GlobalBackoff -Config $cfg -KeeperRoot $KeeperRoot -Minutes 120 -Reason 'auth_error' -Machine $machine
-        } elseif ($transportFailure) {
+        } elseif ($read.errorKind -in @('NETWORK_ERROR', 'TIMEOUT', 'EOF')) {
             Set-Backoff -Root $KeeperRoot -Minutes 10 -Reason 'network'
             $null = Set-GlobalBackoff -Config $cfg -KeeperRoot $KeeperRoot -Minutes 10 -Reason 'network_error' -Machine $machine
-        } elseif ($msg -match '(?i)429|too many requests|usage.?limit|rate.?limit\s+(is\s+)?(exceeded|reached|hit)') {
+        } elseif ($read.errorKind -eq 'RATE_LIMITED') {
             Set-Backoff -Root $KeeperRoot -Minutes 60 -Reason '429'
             $null = Set-GlobalBackoff -Config $cfg -KeeperRoot $KeeperRoot -Minutes 60 -Reason '429' -Machine $machine
         }
@@ -210,9 +203,18 @@ try {
     # config (codex.autoAnchor.anchorOnApply).
     $isLeader = ($election.role -eq 'LEADER' -and ($null -ne $election.lease -or [bool]$election.localOnly))
     if (Test-AutoAnchorArmed $cfg) {
+        $pending = @{}
+        foreach ($ev in @($state.pendingAnchorEvents) + @($events)) {
+            if ($ev -and $ev.event -eq 'WINDOW_RESET_OBSERVED' -and $ev.eventId -and
+                @($state.processedEventIds) -notcontains [string]$ev.eventId) {
+                $pending[[string]$ev.eventId] = @{ event = 'WINDOW_RESET_OBSERVED'; eventId = [string]$ev.eventId }
+            }
+        }
+        $state.pendingAnchorEvents = @($pending.Values | Sort-Object eventId | Select-Object -First 100)
+        $anchorEvents = @($events | Where-Object { $_.event -ne 'WINDOW_RESET_OBSERVED' }) + @($state.pendingAnchorEvents)
         if (Get-Command Invoke-AutoAnchorIfNeeded -ErrorAction SilentlyContinue) {
             $anchorOutcome = Invoke-AutoAnchorIfNeeded -Config $cfg -KeeperRoot $KeeperRoot `
-                -State $state -Events $events -IsLeader $isLeader -Machine $machine -Election $election `
+                -State $state -Events $anchorEvents -IsLeader $isLeader -Machine $machine -Election $election `
                 -ForceAnchor:$ForceAnchor
             if ($anchorOutcome -and $anchorOutcome.events) { $events += @($anchorOutcome.events) }
         } else {
@@ -226,12 +228,16 @@ try {
 
     # ---- mark observed reset events processed (idempotency, doc 03 §8) ------
     foreach ($ev in @($events)) {
-        if ($ev -and $ev.event -eq 'WINDOW_RESET_OBSERVED' -and $ev.eventId) {
+        if (-not (Test-AutoAnchorArmed $cfg) -and $ev -and $ev.event -eq 'WINDOW_RESET_OBSERVED' -and $ev.eventId) {
             if (@($state.processedEventIds) -notcontains [string]$ev.eventId) {
                 Add-ProcessedEvent -State $state -EventId ([string]$ev.eventId)
             }
         }
     }
+
+    $state.pendingAnchorEvents = @($state.pendingAnchorEvents | Where-Object {
+        $_ -and @($state.processedEventIds) -notcontains [string]$_.eventId
+    })
 
     # ---- persist local state + logs ------------------------------------------
     $state.role = $election.role
@@ -243,7 +249,7 @@ try {
     foreach ($ev in @($events)) {
         if (-not $ev) { continue }
         $level = 'INFO'
-        if ($ev.event -in @('AUTH_ERROR', 'SCHEMA_UNKNOWN', 'LIMIT_REACHED', 'READ_FAILED')) { $level = 'ERROR' }
+        if ($ev.event -in @('AUTH_ERROR', 'SCHEMA_UNKNOWN', 'LIMIT_REACHED', 'READ_FAILED', 'ANCHOR_PROFILE_INVALID', 'ANCHOR_PROFILE_UNAVAILABLE')) { $level = 'ERROR' }
         # Anchor events come back with `reason` + an `anchor` object instead of
         # `message`; doc v3.0 §9.1 requires the runtime log to carry the Anchor
         # object, so the three audit surfaces cannot drift.

@@ -1,4 +1,4 @@
-# Tests for quota-client.ps1 (CQK-001/002):
+﻿# Tests for quota-client.ps1 (CQK-001/002):
 #   - Protocol contract tests against official v2 schema fixtures (no process spawn)
 #   - End-to-end protocol tests against the mock app-server (no real credentials)
 # Covers: whitelist parsing, optional/null fields, multi-bucket, metadata,
@@ -207,7 +207,7 @@ Assert-False $r.ok 'protocol error not ok'
 Assert-Equal 'PROTOCOL_ERROR' $r.errorKind 'PROTOCOL_ERROR kind'
 $r = Invoke-MockRead 'rate-limit'
 Assert-False $r.ok 'rate limit not ok'
-Assert-Equal 'PROTOCOL_ERROR' $r.errorKind 'transport-level 429 is protocol error'
+Assert-Equal 'RATE_LIMITED' $r.errorKind '429 has a dedicated kind'
 Assert-True ("$($r.message)" -match '429') '429 text preserved for backoff classification'
 
 Start-TestGroup 'errors: rateLimitReachedType surfaced'
@@ -229,7 +229,7 @@ Start-TestGroup 'errors: app-server dying at start reported'
 
 $r = Invoke-MockRead 'start-failure'
 Assert-False $r.ok 'start failure not ok'
-Assert-True ($r.errorKind -in @('EOF', 'SETUP_ERR', 'TIMEOUT')) "start failure kind ($($r.errorKind))"
+Assert-True ($r.errorKind -in @('EOF', 'SETUP_ERROR', 'TIMEOUT')) "start failure kind ($($r.errorKind))"
 
 Start-TestGroup 'launcher: npm-style codex.cmd wrapper works end to end'
 
@@ -302,7 +302,7 @@ $cfg = New-TestConfig @{ codex = @{ command = 'auto'; queryTimeoutSeconds = 5 } 
 $cfg.codex.command = Join-Path $env:TEMP ('no-such-codex-' + [guid]::NewGuid().ToString('N') + '.exe')
 $r = Invoke-CodexRateLimitsRead -Config $cfg
 Assert-False $r.ok 'missing codex binary not ok'
-Assert-Equal 'SETUP_ERR' $r.errorKind 'SETUP_ERR kind'
+Assert-Equal 'SETUP_ERROR' $r.errorKind 'SETUP_ERROR kind'
 
 Start-TestGroup 'sanity: sanitized error text'
 

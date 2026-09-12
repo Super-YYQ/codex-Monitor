@@ -8,7 +8,8 @@ Windows 上按周期读取 Codex（ChatGPT 计划）额度状态、跨多台电�
 
 ## 设计原则
 
-- **官方能力优先**：只调用 Codex 官方 app-server 的 `account/rateLimits/read`，不解析
+- **官方能力优先**：通过 Codex app-server 的 `account/rateLimits/read` 读额度，使用
+  `config/read` 与 `model/list` 校验执行配置，不解析
   `auth.json`、不抓 ChatGPT 网页、不伪造客户端身份。
 - **零常驻 UI**：没有托盘/后台进程。Windows Task Scheduler 到点拉起 `runner.ps1`，跑完退出；
   Task Manager 平时看不到 keeper 进程是正常现象。
@@ -39,6 +40,10 @@ codex-quota-keeper/
 ```
 
 ## 快速开始
+
+状态查询默认使用本地缓存；在终端执行 `status.cmd -Live --no-pause` 可刷新额度与执行模型校验，
+加 `-Detailed` 显示详细诊断。安装诊断的详细入口为 `pwsh -File scripts/install.ps1 -Detailed`。
+无效模型/推理等级在 Claim 前被拒绝，不计入每日调用次数；修改配置后 Apply，再用 Live 核验。
 
 1. 获取工具，两种方式任选：
    - **GitHub Release（推荐）**：从 Releases 页下载 `codex-quota-keeper-v<版本>.zip` 与
@@ -115,7 +120,7 @@ codex-quota-keeper/
 | `codex.proxy` | （空） | codex 出入站代理 URL，如 `http://127.0.0.1:7890`、`socks5://127.0.0.1:7891`（空 = 直连） |
 | `codex.autoAnchor.enabled` | false | 实验功能开关（默认关闭） |
 | `codex.autoAnchor.keepaliveIntervalMinutes` | 300 | 空闲**兜底**间隔（分钟）：存在首次锚定后，距上次锚定超过该值仍未观测到窗口重置即再触发一次（默认 = 一个 5 小时窗口）；`0` = 关闭兜底（空闲判定与重置触发仍生效） |
-| `codex.autoAnchor.anchorOnApply` | false | **立即触发 CLI**：设为 `true` 后，每次运行 `install.cmd` / `apply-config.cmd` 都立刻强制执行一次锚定（不等 300 分钟静默期、不受最小间隔限制；仍受每日上限与 fail-closed 约束，同一分钟内的重复请求只执行一次） |
+| `codex.autoAnchor.anchorOnApply` | false | 安装或应用配置时请求立即锚定；每个本地自然日最多实际尝试一次，仍受每日总上限和运行期校验约束 |
 | `codex.autoAnchor.schedule` | `[]` | **每日定时模式（与周期判断互斥）**：`"HH:mm"` 数组（本地时间、24 小时制、必须补零）。配置任意槽位即切换为纯定时模式——每个时间点后的第一次轮询触发一次 CLI，重置/空闲/兜底判断全部停用；清空数组回到周期判断模式。同一时间点每天最多一次，不受静默期限制（仍受每日上限与 fail-closed 约束） |
 
 ## 前置条件
@@ -192,14 +197,14 @@ RESET_SEEN -> 幂等守卫(eventId) -> ANCHORING -> VERIFY -> ANCHORED
    忽略；也不要求你使用过 Codex。同一时间点每天最多一次。
 
 **立即触发（anchorOnApply）不属于模式，任何模式下都可用**：`codex.autoAnchor.anchorOnApply=true`
-时，每次运行 `install.cmd` / `apply-config.cmd` 后会立刻强制执行一次锚定——"现在就来一次"，
+时，运行 `install.cmd` / `apply-config.cmd` 会请求立即锚定；每个本地自然日最多实际尝试一次，
 不等静默期也不需要重置或你本人使用 Codex。
 
 这是**实验性**行为：
 
 - OpenAI《使用条款》禁止规避任何 rate limits / restrictions；官方未明确批准“quota keepalive/AutoAnchor”这一用途。
 - **单机同样可用**：未配置协调仓库（LOCAL_ONLY）时跳过远端 CAS Claim 与租约重验证，
-  以本地 runner 锁 + state 去重承担 at-most-once；配置了多机协调后自动回到分布式 Claim。
+  以本地 runner 锁、持久 Claim 和 state 去重承担 at-most-once；配置了多机协调后使用分布式 Claim。
 - 本项目**不保证零风控**。首次开启会显示醒目警告；默认关闭，安装器不会自动开启。
 - 开启前必须满足的清单见 `docs/design/04`（单 Leader、幂等锁、每日上限、最小间隔、fail-closed 等已内置）。
 - 遇到 429、usage-limit、认证异常、未知 schema 时立即 fail closed，不调用模型。

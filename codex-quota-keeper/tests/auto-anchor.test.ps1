@@ -1,4 +1,4 @@
-# AutoAnchor tests (experimental feature): default-off guarantees, prompt whitelist,
+﻿# AutoAnchor tests (experimental feature): default-off guarantees, prompt whitelist,
 # exec + verification flow, idempotency incl. the remote second-layer event lock,
 # daily cap. All through the mock codex (exec + app-server); no real credentials.
 
@@ -490,7 +490,7 @@ try {
     $slotAt9 = if ($slotBase9.Date -ne (Get-Date).Date) { (Get-Date).Date } else { $slotBase9 }
     $cfgModel = New-TestConfig @{
         mode   = 'AutoAnchor'
-        codex  = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 300; keepaliveIntervalMinutes = 0; schedule = @($slotAt9.ToString('HH:mm')); model = 'gpt-5-codex'; reasoningEffort = 'low' } }
+        codex  = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 300; keepaliveIntervalMinutes = 0; schedule = @($slotAt9.ToString('HH:mm')); model = 'mock-model-alpha'; reasoningEffort = 'low' } }
         github = @{ coordination = @{ enabled = $false }; historySync = @{ enabled = $false } }
     }
     $null = Write-TestConfigFile $cfgFile9 $cfgModel
@@ -506,14 +506,14 @@ try {
     if (Test-Path -LiteralPath $execArgsFile9) {
         $argLine9 = [System.IO.File]::ReadAllText($execArgsFile9)
         Assert-True ("$argLine9" -match '(^|\s)-m(\s|$)' -or "$argLine9" -match '^-m ') 'CLI received the -m flag'
-        Assert-True ("$argLine9" -match 'gpt-5-codex') 'CLI received the configured model name'
+        Assert-True ("$argLine9" -match 'mock-model-alpha') 'CLI received the configured model name'
         Assert-True ("$argLine9" -match 'model_reasoning_effort=low') 'CLI received the configured reasoning effort'
     }
     # History audit: the anchor record must carry what was actually used.
     $histMdlItem = Get-ChildItem -LiteralPath (Join-Path $keeperRoot9 'history') -Filter 'events-*.jsonl' -File -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($histMdlItem) {
         $histMdlText = [System.IO.File]::ReadAllText($histMdlItem.FullName)
-        Assert-True ("$histMdlText" -match '"model":"gpt-5-codex"') 'history records the model used'
+        Assert-True ("$histMdlText" -match '"model":"mock-model-alpha"') 'history records the model used'
         Assert-True ("$histMdlText" -match '"reasoningEffort":"low"') 'history records the reasoning effort used'
     } else {
         Assert-True $false 'model-passthrough anchor history event file written'

@@ -148,23 +148,23 @@ codex-quota-keeper/
       enabled=false 仅警告；UNAVAILABLE fail closed；Apply 失败不得改动既有计划任务。
       （`Get-ExecutionProfileGate` / `Get-ExecutionProfileGateSummary` @ install.ps1；
       issues vs warnings 双列表；UNAVAILABLE 不写 cache；apply-config 在两次 Register 之前门禁。）
-- [ ] CQK-040 运行期 Claim **之前**做 live Profile 复验：INVALID/UNAVAILABLE → 不 claim、不 exec、下一轮再试。
+- [x] CQK-040 运行期 Claim **之前**做 live Profile 复验：INVALID/UNAVAILABLE → 不 claim、不 exec、下一轮再试。
 
 ## 阶段 G：审计与计数（CQK-041 + 042）
-- [ ] CQK-041 审计记录 configured* / effective* / provider / source / validation 三处一致
+- [x] CQK-041 审计记录 configured* / effective* / provider / source / validation 三处一致
       （runtime log、local history、remote history）。
-- [ ] CQK-042 锚定计数 attemptCount/successCount/failedCount/lastAttemptAt/lastSuccessAt；
+- [x] CQK-042 锚定计数 attemptCount/successCount/failedCount/lastAttemptAt/lastSuccessAt；
       Profile 校验失败**不计数**；每日上限仍走 attemptCount；§24 旧 `count` 迁移，不伪造 successCount。
 
 ## 阶段 H：错误分类与重试（CQK-043 + 044 + 045）
-- [ ] CQK-043 统一 errorKind + retryable（由底层客户端产出）；runner 正则判定改为读字段。
-- [ ] CQK-044 Install probe 有界重试：最多 2 Rounds（每 Round = proxy + direct），
+- [x] CQK-043 统一 errorKind + retryable（由底层客户端产出）；runner 正则判定改为读字段。
+- [x] CQK-044 Install probe 有界重试：最多 2 Rounds（每 Round = proxy + direct），
       低层尝试 ≤4，绝不第 5 次；Round 间隔 2s；仅 NETWORK_ERROR/TIMEOUT/EOF 重试。
-- [ ] CQK-045 中文分级 Install Preflight（【配置文件】/【Codex CLI】/【AutoAnchor 执行配置】/
+- [x] CQK-045 中文分级 Install Preflight（【配置文件】/【Codex CLI】/【AutoAnchor 执行配置】/
       【额度接口】/【计划任务】+ [正常]/[注意]/[异常]）；app-server 原始错误降级到 Detailed/日志。
 
 ## 阶段 I：Status 可见性（CQK-046）
-- [ ] CQK-046 Status「AutoAnchor 自动锚定」区扩充 Execution Profile + `runtime/execution-profile.json`
+- [x] CQK-046 Status「AutoAnchor 自动锚定」区扩充 Execution Profile + `runtime/execution-profile.json`
       缓存（只含白名单字段）；默认 status.cmd **不发** live catalog 网络请求；`status -Live` 才刷新。
 
 ## 阶段 J：测试矩阵（CQK-047）

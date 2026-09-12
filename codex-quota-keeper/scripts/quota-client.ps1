@@ -1,4 +1,4 @@
-# Codex Quota Keeper - official app-server quota client.
+﻿# Codex Quota Keeper - official app-server quota client.
 # Speaks newline-delimited JSON-RPC to `codex app-server`:
 #   initialize -> initialized -> account/rateLimits/read
 # Never reads auth.json, never touches the ChatGPT web UI. Fresh process per read
@@ -295,12 +295,13 @@ function Invoke-CodexRateLimitsRead {
     $envMap = Get-CodexProxyEnvironment $Config
     $out = Invoke-CodexRateLimitsAttempt -Config $Config -CodexPath $CodexPath `
         -TimeoutSeconds $TimeoutSeconds -Environment $envMap
+    $out = Complete-CodexResult $out
     if (@($envMap.Keys).Count -eq 0) {
         $out.proxy = 'off'
         $out.attempts = 1
         return $out
     }
-    if ($out.ok) {
+    if ($out.ok -or -not $out.retryable) {
         $out.proxy = 'used'
         $out.attempts = 1
         return $out
@@ -308,6 +309,7 @@ function Invoke-CodexRateLimitsRead {
     # Proxy path failed: exactly one fallback attempt without the keeper-set
     # proxy env vars. (System-level proxy vars, if any, stay inherited.)
     $direct = Invoke-CodexRateLimitsAttempt -Config $Config -CodexPath $CodexPath -TimeoutSeconds $TimeoutSeconds
+    $direct = Complete-CodexResult $direct
     $direct.proxy = 'fallback'
     $direct.attempts = 2
     if ($direct.ok) { return $direct }

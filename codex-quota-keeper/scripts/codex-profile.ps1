@@ -1,4 +1,4 @@
-# Codex Quota Keeper - Execution Profile resolver (CQK-038, design doc v3.0 §6).
+﻿# Codex Quota Keeper - Execution Profile resolver (CQK-038, design doc v3.0 §6).
 #
 # Answers the one question an unattended AutoAnchor must not guess: which model
 # and which reasoning effort would a `codex exec` started RIGHT NOW actually use,
@@ -35,10 +35,8 @@ if (-not (Get-Command Invoke-CodexAppServerSession -ErrorAction SilentlyContinue
 
 function New-ExecutionProfile {
     # The §6.1 shape, constructed in exactly one place. Every field is present even
-    # when unknown, so no caller has to null-check a partial object and the audit
-    # record (§9) has a stable key set. Strings normalize to '' rather than $null
-    # because the cache round-trip would otherwise change meaning: ConvertTo-Json
-    # on Windows PowerShell 5.1 writes $null as "" and reads it back as "".
+    # when unknown, so callers have a stable key set. Optional identity strings
+    # use '' consistently across the config, live result and cache APIs.
     return @{
         configuredModel           = ''
         configuredReasoningEffort = ''
@@ -189,7 +187,8 @@ function Resolve-ExecutionProfile {
     param(
         [hashtable]$Config,
         [string]$CodexPath = '',
-        [int]$TimeoutSeconds = 0
+        [int]$TimeoutSeconds = 0,
+        [string]$WorkingDirectory = ''
     )
     $prof = New-ExecutionProfile
     $aa = Get-AutoAnchorConfig $Config
@@ -199,7 +198,7 @@ function Resolve-ExecutionProfile {
     }
 
     $res = Invoke-CodexAppServerSession -Config $Config -CodexPath $CodexPath `
-        -TimeoutSeconds $TimeoutSeconds -Body {
+        -TimeoutSeconds $TimeoutSeconds -WorkingDirectory $WorkingDirectory -Body {
         param($Session, $Timeout)
         # Both reads share one session: one child process, one environment, one
         # answer to "what would exec use?".
@@ -300,7 +299,7 @@ function Get-ExecutionProfileCacheFields {
     }
     if ($Profile -isnot [hashtable]) { return $out }
     foreach ($k in @($out.Keys)) {
-        if ($Profile.ContainsKey($k) -and $null -ne $Profile[$k]) { $out[$k] = [string]$Profile[$k] }
+        if ($Profile.ContainsKey($k) -and $null -ne $Profile[$k]) { $out[$k] = Hide-SensitiveText ([string]$Profile[$k]) }
     }
     return $out
 }
