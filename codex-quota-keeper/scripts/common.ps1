@@ -383,8 +383,8 @@ function Get-CodexAttemptBudgetSeconds {
     # extraction changed who owns the pipes, not how many round trips happen. The
     # Execution Profile path is different in kind because `model/list` paginates
     # (handshake + config/read + 1..N pages), so a wait-count would be a lie there:
-    # CQK-038 gave it its own ceiling in Get-CodexProfileBudgetSeconds, and CQK-040
-    # adds that ceiling to the tick when the tick starts paying for it.
+    # it has its own ceiling in Get-CodexProfileBudgetSeconds, which is a separate
+    # line of the tick budget below rather than folded into this number.
     # Returns @{ seconds; waitsPerAttempt; attempts; proxyConfigured }.
     param([hashtable]$Config)
     $timeout = 20
@@ -410,9 +410,11 @@ function Get-CodexProfileBudgetSeconds {
     # use, and a direct attempt after a failed proxy one would describe a
     # different environment (doc v3.0 §6.2). Process spawn/teardown sits on top.
     #
-    # Not folded into Get-CodexTickBudgetSeconds yet: the runtime gate that makes
-    # the tick pay for this lands with CQK-040, and inflating the task limit for
-    # work the tick does not do would be a lie in the other direction.
+    # The tick pays for this in full: CQK-040 revalidates the profile LIVE before
+    # every Claim, so an armed config has one more app-server session per poll. That
+    # is why the ceiling is a ceiling (MAX_PAGES + handshake + config/read) rather
+    # than a wait count - a catalog that paginates to the cap is a legal answer, and
+    # the task time limit has to survive it.
     # Returns @{ seconds; waitsCeiling }.
     param([hashtable]$Config)
     $timeout = 20
@@ -438,14 +440,20 @@ function Get-AnchorExecBudgetSeconds {
 
 function Get-CodexTickBudgetSeconds {
     # Worst-case wall clock of one runner tick, in seconds, for the pieces CQK
-    # itself bounds: the poll read, plus (AutoAnchor only) the exec and the
-    # post-anchor verify read, plus the git operations a remote-syncing config can
-    # issue. Deliberately pessimistic - this feeds the task time limit, and a limit
-    # that kills a run mid-flight is worse than one that is generous.
+    # itself bounds: the poll read, plus (AutoAnchor only) the LIVE execution-profile
+    # revalidation, the exec and the post-anchor verify read, plus the git operations
+    # a remote-syncing config can issue. Deliberately pessimistic - this feeds the
+    # task time limit, and a limit that kills a run mid-flight is worse than one that
+    # is generous.
+    #
+    # The profile term is inside the armed branch because CQK-040 put it there: an
+    # armed config revalidates the profile before every Claim, so every armed tick
+    # can spend one app-server session on a read that MonitorOnly never makes.
     param([hashtable]$Config)
     $read = Get-CodexAttemptBudgetSeconds $Config
     $seconds = $read.seconds
     if (Test-AutoAnchorArmed $Config) {
+        $seconds += (Get-CodexProfileBudgetSeconds $Config).seconds
         $seconds += (Get-AnchorExecBudgetSeconds $Config) + $read.seconds
     }
     $coord = Get-CoordinationConfig $Config

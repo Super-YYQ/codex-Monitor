@@ -754,4 +754,75 @@ waits-per-attempt 调大。于是 6 处钉死的数字（40 / 80 / 140 / 720 / 9
   不 exec、下一轮可复验；同时把 `Get-CodexProfileBudgetSeconds` 正式接入
   `Get-CodexTickBudgetSeconds`，并重新核对 6 个钉死的预算数字。
 
+---
+
+## 阶段 F 续：CQK-040 运行期 Claim 前 Live 复验（2026-09-12，进行中）
+
+### 本次提交（WIP）包含什么
+`auto-anchor.ps1` 的门禁主体已落地并接到 Claim 之前：新增
+`New-AnchorProfileGateEvent`（事件名 `ANCHOR_PROFILE_INVALID` / `ANCHOR_PROFILE_UNAVAILABLE`，
+`anchor.phase='PROFILE_VALIDATION'`，逐字段复制画像身份，**不含** `anchorInvocationId`、
+不含 `windows`——§4.1 的调用审计只挂在真实 exec 上）与 `Get-AnchorProfileGate`
+（`Resolve-ExecutionProfile` + 缓存写入策略：VALID/INVALID 写缓存、UNAVAILABLE 不写）。
+**不动任何计数**（T10）。`Invoke-AutoAnchorIfNeeded` 里 `$execWindowMinutes` / `$localOnly`
+提到门禁之前计算，门禁紧随 `$guard.should` 之后；Claim 之后那段
+「codex executable not found」skip 已删除（被门吸收，reason 文案原样保留）。
+exec 参数改由 `Get-ExecutionProfileExecArgs -Profile $gate.profile` 提供（只传 configured 值）。
+
+### 已知未完成 / 提交时状态非绿（诚实记录）
+- 计划六步里只做了 1、2 的门禁部分与 3 的一部分：**runner.ps1 的 ERROR 名单未加新事件名**、
+  `$significant` 有意不加（决定见下）、**`auto-anchor.test.ps1:493` 夹具仍是真实模型名
+  `gpt-5-codex`**（新门禁下 Runtime 会判 INVALID → 该组断言必然失败）、T06/T10 新测试组未写。
+- 本次提交**未跑过 `tests/run-all.ps1`**，只做了三脚本的 AST 语法解析（通过）。
+  也就是说：这是一个进行中的检查点提交，不是可发布的 CQK-040 完成态。
+
+### 已落地的四块（均未提交，工作区 dirty）
+1. `scripts/common.ps1` — `Get-CodexTickBudgetSeconds` 的 armed 分支正式加入
+   `(Get-CodexProfileBudgetSeconds).seconds`：armed 配置每次 tick 在 Claim 前多一个 app-server
+   会话，任务时间上限必须为它付费。三处注释同步（attempt budget 不再预告「CQK-040 会加进来」、
+   profile budget 从「尚未接入」改为「已接入并解释为何是 ceiling 而非 wait count」）。
+2. `tests/common.test.ps1` — 重钉两个预算数字：armed timeout=20 → **140→300**；
+   armed timeout=100 + 双 sync → **940→1740**（200 read + 800 profile + 300 exec + 200 verify + 240 git）。
+   逐条复核其余断言：MonitorOnly / 未 armed = 40 不变；poll-fit 边界 13/12/11/10 与 `aaTight`
+   （timeout 100 + poll 15 仍拒）不受影响；`install-status.test.ps1:117` 的 260 不变（MonitorOnly 无 profile 项）。
+   **扫过全部测试夹具：没有任何 poll 值需要改**（`auto-anchor.test.ps1` 基座 timeout 15 + 双 sync
+   → 480 s → 8 min → 10 min 下限，poll-fit 走默认 60）。
+3. `scripts/codex-profile.ps1` — 新增 `Get-ExecutionProfileExecArgs -Profile`：exec 只拿
+   **config.json 显式配置**的 `configuredModel` / `configuredReasoningEffort`，绝不拿
+   effective 值改写调用。理由写进注释：画像的职责是**证明**这次调用安全，不是重写它——
+   否则「验证过一个模型、执行另一个」会让本工单的复验形同虚设。
+4. `scripts/auto-anchor.ps1` — 补上缺失的 `codex-profile.ps1` 带守卫 dot-source
+   （:30-32）。此前 runner 进程根本没加载画像模块，`Resolve-ExecutionProfile` 在
+   `auto-anchor.ps1` 里不可见——这是接线缺口，不补上后面的门禁会直接 CommandNotFound。
+
+### 还剩的六步（顺序即实现顺序）
+1. `Get-AnchorProfileGateState` 门禁辅助（auto-anchor.ps1 内）：
+   `-Attempted=$false` ⇒ 只发事件不改任何计数（T10）；`$true` ⇒ bump count + Fail-AnchorClaim + Add-ProcessedEvent。
+2. 把 `Test-AnchorPromptAllowed` 与 `Resolve-CodexCommand` 两个 pre-exec skip **提到 Claim 之前**，
+   与 Live 复验合并成同一道门；事件名用 `ANCHOR_PROFILE_INVALID` / `ANCHOR_PROFILE_UNAVAILABLE`
+   （绝不复用 `ANCHOR_SKIPPED`），带 `errorKind` 与完整 `anchor` 对象（phase=`PROFILE_VALIDATION`）。
+   三个既有 try 块（prompt 白名单 :214-222、codex 路径 :224-233、Claim 后 lease 复验）语义不变。
+3. `Test-ShouldAnchor` 的 Force 分支加 `State.anchors.anchorOnApplyAttempted` 日级幂等标志
+   （过了门才置位；门失败则下一分钟仍可重试）。
+4. `runner.ps1:246` ERROR 事件名单加入两个新名字；**刻意不加入 `$significant`**（:258）——
+   门禁失败没有任何状态变化，进远程 history 会变成每轮一条噪声。这是 §9.1 的一处有意解释，需记入 findings.md。
+5. 夹具重指：`auto-anchor.test.ps1:493` `model='gpt-5-codex'` → `mock-model-alpha` + `reasoningEffort='low'`
+   （alpha 是唯一 effective effort 与 `config/read` 的 `high` 不同的条目，仍能证明 `explicit` 来源），
+   历史断言正则同步；真实模型名不得进仓库（§22）。
+6. 新测试组：T06/T10（Runtime INVALID；claim 文件 0、exec 文件 0、`$State.anchors` 不变、
+   且**下一轮仍能走到门** ⇒ 无锁死）、UNAVAILABLE（`catalog-error`）变体、T04/T16 画像身份三表面。
+
+### 已核实的两个安全性质（写码前用只读检查确认）
+- **不会锁死**：`Test-ShouldAnchor` 的开放错误扫描只匹配 `LIMIT_REACHED`/`AUTH_ERROR`/`SCHEMA_UNKNOWN`
+  (+`READ_FAILED`)；reset/schedule 的 eventId 由快照稳定字段推导，只要不写 `Add-ProcessedEvent`，
+  下一轮同一事件必然重新可选——这正是门禁必须位于 Claim 之前的全部理由（§8 关键顺序）。
+- **Status 面板**：新事件名不会触发任何新 finding code（`Read-StatusLogTail` 按
+  `RUNNER_OK`/`RUNNER_ERROR` 重置判定）；唯一影响是 `status.ps1:177-179` 的 `lastError`
+  会显示它，且 §10 在判定新鲜时降级为 INFO。级别仍取 ERROR：armed 却锚不动是运维必须看见的状态。
+
+### 待跑的回归（提交前门禁）
+`tests/run-all.ps1` PS7 全量 + WinPS 5.1 全量 + PSScriptAnalyzer（`codex-profile.ps1` 行数已变，
+:264/:287 两条既有 `PSAvoidAssignmentToAutomaticVariable` 基线位置需重新定位）+ `tests/secret-scan.ps1`。
+
+
 

@@ -27,6 +27,9 @@ if (-not (Get-Command Push-RepoBlobs -ErrorAction SilentlyContinue)) {
 if (-not (Get-Command Claim-AnchorClaim -ErrorAction SilentlyContinue)) {
     . (Join-Path $script:CqkAutoAnchorDir 'anchor-claim.ps1')
 }
+if (-not (Get-Command Resolve-ExecutionProfile -ErrorAction SilentlyContinue)) {
+    . (Join-Path $script:CqkAutoAnchorDir 'codex-profile.ps1')
+}
 
 function Test-AnchorPromptAllowed {
     # Prompt whitelist (doc 03 §15): short, printable, no control characters,
@@ -132,7 +135,138 @@ function Test-LeaseRevalidation {
     return @{ ok = $true; reason = $null }
 }
 
+function New-AnchorProfileGateEvent {
+    # The audit record for a pre-Claim refusal (doc v3.0 §8). Deliberately its own
+    # event name rather than ANCHOR_SKIPPED: a guard denial says "not now", this
+    # says "armed, and the call cannot be proven safe" - the operator has to be able
+    # to tell the two apart in the log, and only the second one is a release blocker.
+    #
+    # No anchorInvocationId and no `windows`: §4.1 keys an invocation audit on a
+    # PHYSICAL exec, and there was none. The trigger event ids ride along as
+    # triggerEventIds to show what is still pending - unclaimed, so the next poll
+    # can still anchor (that is the whole point of validating before the Claim).
+    #
+    # The profile identity is copied field by field, never as a Profile dump:
+    # validationReason and errorKind carry CLI text, so they go out through the
+    # event's `reason`/`errorKind` (which both log paths run through
+    # Hide-SensitiveText) instead of nesting under `anchor`.
+    param(
+        [string]$Validation,
+        [string]$Reason,
+        [string]$ErrorKind,
+        $Profile,
+        $Guard,
+        [bool]$LocalOnly
+    )
+    $name = 'ANCHOR_PROFILE_UNAVAILABLE'
+    if ($Validation -eq 'INVALID') { $name = 'ANCHOR_PROFILE_INVALID' }
+    $anchor = @{
+        phase             = 'PROFILE_VALIDATION'
+        trigger           = $(if ($Guard) { [string]$Guard.triggerKind } else { '' })
+        localOnly         = $LocalOnly
+        profileValidation = $Validation
+        triggerEventIds   = $(if ($Guard) { @($Guard.eventIds) } else { @() })
+        execExitCode      = $null
+        verified          = $false
+    }
+    if ($Profile -is [hashtable]) {
+        foreach ($k in @('configuredModel', 'configuredReasoningEffort', 'effectiveModel',
+                         'effectiveReasoningEffort', 'modelProvider', 'modelSource',
+                         'reasoningEffortSource', 'validatedAt')) {
+            $anchor[$k] = [string]$Profile[$k]
+        }
+        $supported = @($Profile.supportedReasoningEfforts)
+        if ($supported.Count -gt 0) { $anchor.supportedReasoningEfforts = $supported }
+    }
+    return @{ event = $name; reason = $Reason; errorKind = $ErrorKind; anchor = $anchor }
+}
+
+function Get-AnchorProfileGate {
+    # doc v3.0 §8: what was legal at Install time is not proven legal now. A CLI
+    # upgrade can retire the model, an account or provider switch can make it
+    # unservable, the reasoning tiers can change, the catalog can be temporarily
+    # unreadable. So every armed anchor attempt revalidates the Execution Profile
+    # LIVE - one app-server session, config/read + the paginated model/list, in the
+    # same Codex environment `codex exec` is about to run in (§6.2) - and it does so
+    # BEFORE the Claim, which is the ordering §8 calls out by name:
+    #
+    #   Test-ShouldAnchor -> Resolve Execution Profile (LIVE) -> VALID ?
+    #       no  -> ANCHOR_PROFILE_INVALID / UNAVAILABLE, no Claim, no exec, retried
+    #       yes -> Claim event(s) -> Lease Revalidate -> codex exec
+    #
+    # Claiming first would consume a deterministic reset/schedule event for a model
+    # call that never happened, and that event could lose its one chance to be
+    # handled. Refusing before the Claim leaves every claim untouched, so the next
+    # poll re-resolves and can still anchor.
+    #
+    # This is the runtime twin of install.ps1's Get-ExecutionProfileGate, and the
+    # reason it is not that function: Install turns a verdict into issues/warnings
+    # for a human standing at a console, here the verdict is an audit event plus a
+    # go/no-go for an unattended tick. What they share is the resolution itself.
+    #
+    # Returns @{ allowed; codexPath; profile; validation; reason; event }.
+    # No counter is ever touched here (§21 / §19 T10: a validation failure is not
+    # an attempt, so it must not move the daily cap).
+    param(
+        [hashtable]$Config,
+        [string]$KeeperRoot,
+        [string]$CodexPath,
+        $Guard,
+        [bool]$LocalOnly = $false
+    )
+    $out = @{
+        allowed    = $false
+        codexPath  = $CodexPath
+        profile    = $null
+        validation = ''
+        reason     = $null
+        event      = $null
+    }
+
+    if (-not $CodexPath) { $CodexPath = Resolve-CodexCommand $Config }
+    if (-not $CodexPath) {
+        # No binary means no environment to resolve against and no exec to run.
+        # UNAVAILABLE rather than a fourth verdict: it is exactly as unverifiable as
+        # a catalog that will not answer, and the operator fixes it the same way.
+        # The historical reason text is kept word for word.
+        $out.validation = 'UNAVAILABLE'
+        $out.reason = 'codex executable not found'
+        $out.event = New-AnchorProfileGateEvent -Validation 'UNAVAILABLE' -Reason $out.reason `
+            -ErrorKind 'SETUP_ERR' -Guard $Guard -LocalOnly $LocalOnly
+        return $out
+    }
+
+    $prof = Resolve-ExecutionProfile -Config $Config -CodexPath $CodexPath
+    $out.codexPath = $CodexPath
+    $out.profile = $prof
+    $out.validation = [string]$prof.validation
+
+    if ($prof.validation -eq 'VALID') {
+        # Mirror Install: the cache is the offline status panel's only source
+        # (§14.1), and this is now the freshest verified profile anyone has taken.
+        $null = Write-ExecutionProfileCache -KeeperRoot $KeeperRoot -Profile $prof
+        $out.allowed = $true
+        return $out
+    }
+    $out.reason = [string]$prof.validationReason
+    if ($prof.validation -eq 'INVALID') {
+        # Record the rejection: the panel should show the model that was proven bad,
+        # not yesterday's proof that it was good.
+        $null = Write-ExecutionProfileCache -KeeperRoot $KeeperRoot -Profile $prof
+    }
+    # Anything else is UNAVAILABLE, which deliberately does NOT touch the cache: a
+    # read failure says nothing about the profile, and overwriting the last real
+    # verdict would make the offline panel lie about a profile that was fine.
+    if (-not $out.reason) {
+        $out.reason = "execution profile could not be verified ($($prof.errorKind))"
+    }
+    $out.event = New-AnchorProfileGateEvent -Validation $out.validation -Reason $out.reason `
+        -ErrorKind ([string]$prof.errorKind) -Profile $prof -Guard $Guard -LocalOnly $LocalOnly
+    return $out
+}
+
 function Invoke-AutoAnchorIfNeeded {
+
     # Called by runner when mode=AutoAnchor and codex.autoAnchor=true.
     # Returns @{ anchored; events }.
     #
@@ -168,14 +302,29 @@ function Invoke-AutoAnchorIfNeeded {
         return $out
     }
 
+    $execWindowMinutes = [Math]::Max(2, [int][Math]::Ceiling([int]$Config.codex.queryTimeoutSeconds * 3 / 60.0) + 1)
+    $localOnly = ($null -ne $Election -and [bool]$Election.localOnly)
+
+    # ---- CQK-040 (§8): prove the Execution Profile BEFORE the Claim ----------
+    # What was legal at Install time is not proven legal now, and the order is the
+    # point: resolving after the Claim would burn a deterministic reset/schedule
+    # event on a model call that never happens. A refusal here claims nothing, so
+    # the next poll re-resolves and can still anchor.
+    $gate = Get-AnchorProfileGate -Config $Config -KeeperRoot $KeeperRoot -CodexPath $CodexPath `
+        -Guard $guard -LocalOnly $localOnly
+    $CodexPath = $gate.codexPath
+    if (-not $gate.allowed) {
+        $out.events += ,@($gate.event)
+        return $out
+    }
+    $profile = $gate.profile
+
     # Durable claim (CQK-013 distributed / CQK-023 local): CLAIMED is written
     # before the model call, by both backings, and any existing claim - whatever
     # its state - blocks execution. The runner lock and state.processedEventIds
     # are fast paths only: both are written AFTER the call returns, so a crash
     # between exec and persist would otherwise pay for the same model call twice.
     # Lease revalidation stays distributed-only: localOnly election has no lease.
-    $execWindowMinutes = [Math]::Max(2, [int][Math]::Ceiling([int]$Config.codex.queryTimeoutSeconds * 3 / 60.0) + 1)
-    $localOnly = ($null -ne $Election -and [bool]$Election.localOnly)
     $claimed = @()
     foreach ($id in @($guard.eventIds)) {
         $claim = Claim-AnchorClaim -Config $Config -KeeperRoot $KeeperRoot -EventId $id -Machine $Machine `
@@ -218,16 +367,9 @@ function Invoke-AutoAnchorIfNeeded {
         return $out
     }
 
-    if (-not $CodexPath) { $CodexPath = Resolve-CodexCommand $Config }
-    if (-not $CodexPath) {
-        foreach ($id in $claimed) {
-            $null = Fail-AnchorClaim -Config $Config -KeeperRoot $KeeperRoot -EventId $id -Machine $Machine `
-                -Result 'skipped before exec: codex executable not found' -LocalOnly $localOnly
-            Add-ProcessedEvent -State $State -EventId $id
-        }
-        $out.events += ,@{ event = 'ANCHOR_SKIPPED'; reason = 'codex executable not found' }
-        return $out
-    }
+    # The Codex binary was already proven present by Get-AnchorProfileGate - a
+    # missing executable cannot reach this line, which is the point: the gate is
+    # what §8 puts between "should anchor" and "claimed an event".
 
     # ---- ANCHORING: one minimal exec in an empty work dir --------------------
     if ($localOnly) {
@@ -236,8 +378,15 @@ function Invoke-AutoAnchorIfNeeded {
     $workDir = Join-Path (Get-RuntimeDir $KeeperRoot) 'anchor-work'
     Ensure-Directory $workDir | Out-Null
     $anchorCfgExec = Get-AutoAnchorConfig $Config
+    # The exec pair comes from the VALIDATED Profile, not from a fresh config read:
+    # Get-ExecutionProfileExecArgs passes only what config.json configured (the
+    # Profile proves the call, it never rewrites it), but taking it from $profile is
+    # what makes §9.1's three-surface identity hold by construction - the value
+    # audited, the value validated and the value typed into the process are read off
+    # one object, so nothing can drift between the gate and the call.
+    $execPair = Get-ExecutionProfileExecArgs -Profile $profile
     $execInfo = Get-AnchorExecCommand -CodexPath $CodexPath -Prompt ([string]$anchorCfgExec.prompt) `
-        -Model ([string]$anchorCfgExec.model) -ReasoningEffort ([string]$anchorCfgExec.reasoningEffort)
+        -Model $execPair.model -ReasoningEffort $execPair.reasoningEffort
     $startedAt = Get-IsoTimestamp
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $exec = Invoke-External -FilePath $execInfo.exe -ArgumentList $execInfo.args -RawArguments "$($execInfo.rawArgs)" `

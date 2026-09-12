@@ -248,6 +248,33 @@ function Resolve-ExecutionProfile {
     return $prof
 }
 
+function Get-ExecutionProfileExecArgs {
+    # How a validated Profile turns into `codex exec` arguments: pass ONLY what
+    # config.json explicitly configured, exactly as it was configured, and let the
+    # CLI resolve the rest itself (§6.2 priority). Handing exec the
+    # effectiveModel / effectiveReasoningEffort instead would create a second
+    # source of truth for the call - and would silently defeat the runtime
+    # revalidation this ticket is about: if the model was retired between the
+    # profile read and the exec, exec must fail against the configured value the
+    # audit shows, not succeed on a rewritten one.
+    #
+    # So the Profile's job is to PROVE the call is safe, never to rewrite it. The
+    # two things are kept separate but equal by Get-ExecutionProfileSelection,
+    # which resolves the configured value itself against L2/L3 (an explicit model
+    # is checked as-is, not swapped for a default).
+    #
+    # Returns @{ model; reasoningEffort } - both '' when the Profile configures
+    # nothing, which is a legitimate VALID answer meaning "use the CLI defaults".
+    param($Profile)
+    $configuredModel = ''
+    $configuredEffort = ''
+    if ($Profile -is [hashtable]) {
+        if ($Profile.configuredModel) { $configuredModel = [string]$Profile.configuredModel }
+        if ($Profile.configuredReasoningEffort) { $configuredEffort = [string]$Profile.configuredReasoningEffort }
+    }
+    return @{ model = $configuredModel; reasoningEffort = $configuredEffort }
+}
+
 function Get-ExecutionProfileCacheFields {
     # §14.1 + §23: the cache is a whitelist, not a Profile dump. Model, effort,
     # provider, the two sources, the verdict and when it was taken - nothing else.
