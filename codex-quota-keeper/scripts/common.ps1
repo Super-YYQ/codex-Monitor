@@ -1079,6 +1079,42 @@ function Exit-RunnerLock {
 # ---------------------------------------------------------------------------
 # External command execution: argument arrays only, no shell string interpolation.
 
+function Stop-ProcessTree {
+    # .NET Framework (Windows PowerShell 5.1) only exposes Process.Kill(), which
+    # terminates a cmd/npm wrapper but leaves its Codex child alive. Prefer the
+    # native tree overload where available; taskkill /T is the Windows fallback.
+    param(
+        [System.Diagnostics.Process]$Process,
+        [int]$WaitMilliseconds = 5000
+    )
+    if ($null -eq $Process) { return $true }
+    try { if ($Process.HasExited) { return $true } } catch { return $true }
+
+    try {
+        $Process.Kill($true)
+    } catch {
+        $taskkill = Join-Path ([Environment]::GetFolderPath('System')) 'taskkill.exe'
+        if (Test-Path -LiteralPath $taskkill) {
+            $killer = New-Object System.Diagnostics.Process
+            $killer.StartInfo = New-Object System.Diagnostics.ProcessStartInfo
+            $killer.StartInfo.FileName = $taskkill
+            $killer.StartInfo.Arguments = "/PID $([int]$Process.Id) /T /F"
+            $killer.StartInfo.UseShellExecute = $false
+            $killer.StartInfo.CreateNoWindow = $true
+            $killer.StartInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+            try {
+                [void]$killer.Start()
+                [void]$killer.WaitForExit($WaitMilliseconds)
+            } catch { } finally { $killer.Dispose() }
+        }
+    }
+    try {
+        if (-not $Process.HasExited) { $Process.Kill() }
+        [void]$Process.WaitForExit($WaitMilliseconds)
+        return [bool]$Process.HasExited
+    } catch { return $false }
+}
+
 function Invoke-External {
     # started distinguishes a confirmed launch failure from an uncertain outcome.
     param(
@@ -1128,7 +1164,7 @@ function Invoke-External {
         $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
         $stderrTask = $proc.StandardError.ReadToEndAsync()
         if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
-            try { $proc.Kill($true) } catch { try { $proc.Kill() } catch { } }
+            $null = Stop-ProcessTree -Process $proc
             return @{ ok = $false; started = $true; exitCode = -1; stdout = ''; stderr = 'process timed out'; timedOut = $true }
         }
         $stdout = $stdoutTask.GetAwaiter().GetResult()
@@ -1138,7 +1174,7 @@ function Invoke-External {
         return @{ ok = $false; started = $started; exitCode = -1; stdout = ''; stderr = (Hide-SensitiveText $_.Exception.Message); timedOut = $false }
     } finally {
         if ($started) {
-            try { if (-not $proc.HasExited) { try { $proc.Kill($true) } catch { $proc.Kill() } } } catch { }
+            try { if (-not $proc.HasExited) { $null = Stop-ProcessTree -Process $proc } } catch { }
         }
         $proc.Dispose()
     }

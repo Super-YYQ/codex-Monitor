@@ -9,6 +9,7 @@
 - 客户端统一错误类型和 retryable；安装额度探测最多两轮、四次传输尝试，提供中文分级诊断。
 - Status 默认离线读取执行配置缓存，`status.cmd -Live` 刷新；校验无效、不可用、过期纳入总体状态。
 - 修复 `.cmd` 启动器尾部多余引号，批处理使用 Git 原始 CRLF 字节保证源码和 ZIP 入口一致。
+- 修复 Windows PowerShell 5.1 超时只终止 `.cmd` 包装器、遗留 Codex 子进程的问题；共享进程树终止同时覆盖 app-server 和 `codex exec`。
 - 新增边界与入口回归；`tests/run-all.ps1 -ExcludeGitPush` 明示跳过本地 Git push 套件，不能替代完整发布验收。
 - 发布限制与验证证据见 `docs/production-readiness.md`；未执行真实模型调用、双机 soak、tag 或 Release。
 

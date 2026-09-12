@@ -151,7 +151,7 @@ function Stop-CodexAppServerSession {
     $proc = $Session.proc
     if (-not $proc.HasExited) {
         if (-not $proc.WaitForExit(2000)) {
-            try { $proc.Kill($true) } catch { try { $proc.Kill() } catch { } }
+            $null = Stop-ProcessTree -Process $proc
         }
     }
     try { $proc.Dispose() } catch { }

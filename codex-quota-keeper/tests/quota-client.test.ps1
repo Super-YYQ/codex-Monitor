@@ -244,6 +244,33 @@ try {
     Remove-Item Env:\CQK_MOCK_MODE -ErrorAction SilentlyContinue
 }
 
+Start-TestGroup 'launcher: timeout kills the whole cmd wrapper process tree'
+
+$treeWs = New-TestWorkspace
+$treeChildren = @()
+try {
+    $treeScript = Join-Path $treeWs 'tree-timeout-appserver.ps1'
+    $treeCmd = Join-Path $treeWs 'tree-timeout-codex.cmd'
+    Copy-Item -LiteralPath $mockPath -Destination $treeScript
+    $treeCmdBody = "@echo off`r`npwsh -NoProfile -ExecutionPolicy Bypass -File `"%~dp0tree-timeout-appserver.ps1`" %*`r`n"
+    [IO.File]::WriteAllText($treeCmd, $treeCmdBody, [Text.Encoding]::ASCII)
+    $env:CQK_MOCK_MODE = 'timeout'
+    $treeCfg = New-TestConfig @{ codex = @{ command = $treeCmd; queryTimeoutSeconds = 2 } }
+    $treeResult = Invoke-CodexRateLimitsRead -Config $treeCfg
+    Assert-Equal 'TIMEOUT' $treeResult.errorKind 'cmd-wrapped timeout is surfaced'
+    Start-Sleep -Milliseconds 300
+    $treeChildren = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.CommandLine -and $_.CommandLine.IndexOf($treeScript, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    })
+    Assert-Equal 0 $treeChildren.Count 'cmd timeout leaves no app-server child process'
+} finally {
+    Remove-Item Env:\CQK_MOCK_MODE -ErrorAction SilentlyContinue
+    foreach ($child in @($treeChildren)) {
+        Stop-Process -Id ([int]$child.ProcessId) -Force -ErrorAction SilentlyContinue
+    }
+    Remove-TestWorkspace $treeWs
+}
+
 Start-TestGroup 'proxy: off by default -> exactly one attempt'
 
 $r = Invoke-MockRead 'normal'
