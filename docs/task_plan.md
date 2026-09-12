@@ -126,8 +126,8 @@ codex-quota-keeper/
 
 # 第四轮：P0 修复优化设计 v3.0（2026-09-10）CQK-036~048
 
-2026-09-12 接续状态：CQK-040~046 实现已完成；已选 16 套测试在 PS7/PS5.1 均有通过证据，
-但 7 套使用临时本地 Git push 的集成测试受本次授权限制未执行，CQK-047/048 继续保持未完成。
+2026-09-13 接续状态：CQK-040~046 实现已完成；默认全量 23 套测试在 PS7/PS5.1 均通过、0 跳过，
+7 套使用临时本地 Git push 的集成测试已在明确授权后执行，CQK-047 完成；CQK-048 继续保持未完成。
 本地候选 d95887d、分析器/凭据扫描/重复打包证据详见 [产品就绪审查](production-readiness.md)。
 
 依据 `C:\Users\Administrator\Desktop\codex-Monitor_P0级修复优化设计_v3.0.docx`
@@ -172,7 +172,7 @@ codex-quota-keeper/
       缓存（只含白名单字段）；默认 status.cmd **不发** live catalog 网络请求；`status -Live` 才刷新。
 
 ## 阶段 J：测试矩阵（CQK-047）
-- [ ] CQK-047 T01~T20 测试矩阵；T19 PS7 + T20 WinPS 5.1 全绿。
+- [x] CQK-047 T01~T20 测试矩阵；T19 PS7 + T20 WinPS 5.1 全绿。
       夹具 `tests/fixtures/mock-appserver.ps1` 必须新增 `config/read` / `model/list`（含分页）响应
       ——现有 `default { }` 会静默吞掉新方法，导致超时而非明确失败。
 

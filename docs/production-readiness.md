@@ -6,7 +6,7 @@
 
 - 审查基线：`origin/main` 的 `cdca944`；遗留修复分支：`origin/feat/p0-hardening-cqk-036` 的 `6b626e1`。
 - 本地原 main `019ef80` 与历史重写后的 `85ee79b` 文件树完全一致；保留原 main，在 `codex/production-readiness` 接续遗留工作，避免按分支距离误判为内容冲突。
-- CQK-036~039 已有实现，CQK-040 原为未回归的 WIP；本次补齐 CQK-040~046 及审查发现，CQK-047 全量验收和 CQK-048 真机验收仍有门禁。
+- CQK-036~039 已有实现，CQK-040 原为未回归的 WIP；本次补齐 CQK-040~046 及审查发现，CQK-047 双运行时全量矩阵已通过，CQK-048 真机验收仍有门禁。
 - 未执行任何 `git push`，未修改实际部署的产品计划任务，未发起真实模型调用。
 
 ## 双轴审查与修复
@@ -43,11 +43,11 @@
 ## 验证入口与证据
 
 ```powershell
-pwsh -NoProfile -File codex-quota-keeper/tests/run-all.ps1 -ExcludeGitPush
-powershell -NoProfile -ExecutionPolicy Bypass -File codex-quota-keeper/tests/run-all.ps1 -ExcludeGitPush
+pwsh -NoProfile -File codex-quota-keeper/tests/run-all.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File codex-quota-keeper/tests/run-all.ps1
 ```
 
-`-ExcludeGitPush` 显式跳过 7 套使用本地 bare 仓库 push 的集成测试：anchor-claim、auto-anchor、concurrency、github-sync、global-backoff、leader-lease、runner。默认 run-all 和 CI 仍运行全部；此选项不是安全沙箱，也不代表整套发布门禁通过。
+经明确授权，默认 run-all 已完整执行。7 套 Git 集成测试只向各自创建的临时本地 bare 仓库 push：anchor-claim、auto-anchor、concurrency、github-sync、global-backoff、leader-lease、runner；没有访问或推送项目远端。`-ExcludeGitPush` 仍可用于不允许 fixture push 的受限环境，但不能替代发布矩阵。
 
 新增 readiness 39 项、outbox-readiness 12 项、status-entry 5 项检查已通过定向验证；install-retry 11 项检查已通过。覆盖模型修正后的 reset 重试、无启动退款、失败计数、强制调用限制、旧状态迁移、三处审计脱敏、损坏 outbox 保留、真实 cmd 参数和退出码。
 
@@ -55,9 +55,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File codex-quota-keeper/tests/run
 
 | 验证 | 实际结果 |
 |---|---|
-| PowerShell 7，16 套选定测试 | 首轮 15 通过；common 只因旧引号快照失败，修正后定向重跑通过 |
-| Windows PowerShell 5.1，同样 16 套 | 首轮 15 通过；同一 common 快照修正后定向重跑通过 |
-| 最终测试范围 | 16 套均有通过证据；7 套含 push 的集成测试未执行；未声称默认 run-all 全绿 |
+| PowerShell 7 默认全量 | `RESULT: 23 test file(s) passed; 0 skipped.` |
+| Windows PowerShell 5.1 默认全量 | `RESULT: 23 test file(s) passed; 0 skipped.` |
+| Git 集成范围 | 临时本地 bare 仓库的 Claim/CAS/并发/历史/退避/租约/Runner 路径全部执行通过；项目远端未 push |
 | 静态分析 PSScriptAnalyzer 1.25.0 | 0 Error，66 条非 Error findings；未把此结果称为零告警 |
 | 仓库凭据扫描 | 93 文件、无路径排除，未发现凭据模式；构建门禁再次通过 |
 | Git 差异检查 | 暂存 diff --check 通过；CRLF 按批处理属性处理 |
@@ -67,12 +67,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File codex-quota-keeper/tests/run
 
 候选 ZIP：`codex-quota-keeper/tools/dist/readiness-a/codex-quota-keeper-v0.9.0-beta.zip`，
 SHA-256：`f7fb11f5cb67a83201d83d986383fbdddba3dc84afeeb0e83de7c5fc39d24d48`。
-产物为本地候选、已被 Git 忽略，没有上传。完整首次运行及 common 最终重跑日志保存在本机
-`$env:TEMP/cqk-readiness-20260912/`；首次 run-all 返回失败已如实保留，不能只读取其中的 RESULT 当作最终回归结论。
+产物为本地候选、已被 Git 忽略，没有上传。完整 PS7 日志保存在
+`$env:TEMP/cqk-readiness-20260912-full/ps7-full.txt`，完整 PS5.1 日志保存在
+`$env:TEMP/cqk-readiness-20260913-full/ps51-full.txt`。
 
 ## 尚未关闭的发布门禁
 
-- 本次禁止 push 的约束涵盖临时本地 bare 仓库。需要明确授权后执行未运行的 7 套集成测试，再在 PS7/PS5.1 跑默认全量；不能以旧分支全绿替代本次改动的验证。
 - 在两台实际 Windows 主机、相同候选 commit 上，执行共享远端的 soak 与故障注入；同时记录 CLI/OS/PowerShell 版本、触发时间、调用唯一性和资源残留。单机两目录及 mock 故障注入只能提供部分证据。
 - 真实 CLI 的 config/read、目录分页及一次受控 exec 冒烟需要部署账号环境和明确调用范围。未运行的部分保持未勾选，不能以“没有报错”替代。
 - 对大范围使用，先以 MonitorOnly 分批部署，观察读取成功率、调度延迟、残留进程、日志增长和恢复，再扩大；AutoAnchor 单独按显式开启人群验收。仓库没有中央服务容量问题，但不能外推账号限流或大量终端同时轮询的可靠性。
