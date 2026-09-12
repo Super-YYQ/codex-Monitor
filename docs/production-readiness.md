@@ -51,7 +51,24 @@ powershell -NoProfile -ExecutionPolicy Bypass -File codex-quota-keeper/tests/run
 
 新增 readiness 39 项、outbox-readiness 12 项、status-entry 5 项检查已通过定向验证；install-retry 11 项检查已通过。覆盖模型修正后的 reset 重试、无启动退款、失败计数、强制调用限制、旧状态迁移、三处审计脱敏、损坏 outbox 保留、真实 cmd 参数和退出码。
 
-双运行时最终套件、分析器与候选 ZIP 的结果将在本文件末尾记录。测试只涉及临时工作区、模拟 CLI，install-status 使用独立临时任务名。
+双运行时最终套件、分析器与候选 ZIP 的结果见下表。测试只涉及临时工作区、模拟 CLI，install-status 使用独立临时任务名。
+
+| 验证 | 实际结果 |
+|---|---|
+| PowerShell 7，16 套选定测试 | 首轮 15 通过；common 只因旧引号快照失败，修正后定向重跑通过 |
+| Windows PowerShell 5.1，同样 16 套 | 首轮 15 通过；同一 common 快照修正后定向重跑通过 |
+| 最终测试范围 | 16 套均有通过证据；7 套含 push 的集成测试未执行；未声称默认 run-all 全绿 |
+| 静态分析 PSScriptAnalyzer 1.25.0 | 0 Error，66 条非 Error findings；未把此结果称为零告警 |
+| 仓库凭据扫描 | 93 文件、无路径排除，未发现凭据模式；构建门禁再次通过 |
+| Git 差异检查 | 暂存 diff --check 通过；CRLF 按批处理属性处理 |
+| 候选源提交 | `d95887dbc89e8d28c197fe24ebd1a9022f960f05` |
+| 重复构建 | 两次 ZIP 均为 78 文件，同一 SHA-256（如下） |
+| 解压验证 | 5 个 cmd 均为 CRLF；解压后状态入口回归在 PS7/PS5.1 各 5 项通过 |
+
+候选 ZIP：`codex-quota-keeper/tools/dist/readiness-a/codex-quota-keeper-v0.9.0-beta.zip`，
+SHA-256：`f7fb11f5cb67a83201d83d986383fbdddba3dc84afeeb0e83de7c5fc39d24d48`。
+产物为本地候选、已被 Git 忽略，没有上传。完整首次运行及 common 最终重跑日志保存在本机
+`$env:TEMP/cqk-readiness-20260912/`；首次 run-all 返回失败已如实保留，不能只读取其中的 RESULT 当作最终回归结论。
 
 ## 尚未关闭的发布门禁
 

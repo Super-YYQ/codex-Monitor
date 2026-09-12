@@ -126,6 +126,10 @@ codex-quota-keeper/
 
 # 第四轮：P0 修复优化设计 v3.0（2026-09-10）CQK-036~048
 
+2026-09-12 接续状态：CQK-040~046 实现已完成；已选 16 套测试在 PS7/PS5.1 均有通过证据，
+但 7 套使用临时本地 Git push 的集成测试受本次授权限制未执行，CQK-047/048 继续保持未完成。
+本地候选 d95887d、分析器/凭据扫描/重复打包证据详见 [产品就绪审查](production-readiness.md)。
+
 依据 `C:\Users\Administrator\Desktop\codex-Monitor_P0级修复优化设计_v3.0.docx`
 （提取文本 469 行，见 findings.md「v3.0 文档要点」）。基线 `cdca944`。实施顺序按文档 §18。
 目标：8 个 P0 问题全部关闭，13 张工单 CQK-036~048。
