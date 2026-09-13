@@ -201,7 +201,7 @@ function Claim-LocalAnchorEvent {
     $existing = Read-LocalAnchorClaim -KeeperRoot $KeeperRoot -EventId $EventId
     if (-not $existing.reachable) { return @{ ok = $false; reason = 'claim store unreadable; fail closed' } }
     if ($existing.exists) {
-        return @{ ok = $false; reason = "event already $([string]$existing.record.state) (by $([string]$existing.record.ownerId)); no retry" }
+        return @{ ok = $false; exists = $true; reason = "event already $([string]$existing.record.state) (by $([string]$existing.record.ownerId)); no retry" }
     }
     $path = Get-AnchorClaimPath -Root $KeeperRoot -EventId $EventId
     $record = New-AnchorClaimRecord -EventId $EventId -State 'CLAIMED' `
@@ -226,7 +226,7 @@ function Claim-LocalAnchorEvent {
         # existence check and the create: the other writer holds the claim.
         $after = Read-LocalAnchorClaim -KeeperRoot $KeeperRoot -EventId $EventId
         if ($after.exists) {
-            return @{ ok = $false; reason = "event already $([string]$after.record.state) (by $([string]$after.record.ownerId)); no retry" }
+            return @{ ok = $false; exists = $true; reason = "event already $([string]$after.record.state) (by $([string]$after.record.ownerId)); no retry" }
         }
         return @{ ok = $false; reason = "claim create failed: $($_.Exception.Message)" }
     } catch {
@@ -358,12 +358,12 @@ function Claim-DistributedAnchorEvent {
     if (-not $state.reachable) { return @{ ok = $false; reason = "remote unavailable ($($state.reason)); fail closed" } }
     if ($state.exists) {
         $st = [string]$state.record.state
-        return @{ ok = $false; reason = "event already $st (by $($state.record.ownerId)); no retry" }
+        return @{ ok = $false; exists = $true; reason = "event already $st (by $($state.record.ownerId)); no retry" }
     }
     $record = New-AnchorClaimRecord -EventId $EventId -State 'CLAIMED' `
         -OwnerId ([string]$Machine.machineId) -ClaimMinutes $ClaimMinutes
     $push = Push-DistributedAnchorEventState -Config $Config -KeeperRoot $KeeperRoot -EventId $EventId -Record $record -Machine $Machine
-    if (-not $push.ok) { return @{ ok = $false; reason = "claim push rejected ($($push.reason)); another machine claimed first" } }
+    if (-not $push.ok) { return @{ ok = $false; reason = "claim push rejected ($($push.reason)); claim outcome not confirmed" } }
     return @{ ok = $true; reason = $null }
 }
 

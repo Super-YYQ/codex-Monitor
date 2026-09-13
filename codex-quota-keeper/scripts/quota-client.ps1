@@ -1,158 +1,20 @@
-# Codex Quota Keeper - official app-server quota client.
+﻿# Codex Quota Keeper - official app-server quota client.
 # Speaks newline-delimited JSON-RPC to `codex app-server`:
 #   initialize -> initialized -> account/rateLimits/read
 # Never reads auth.json, never touches the ChatGPT web UI. Fresh process per read
 # so nothing stays resident between polls.
+#
+# The transport itself (launch, pipes, handshake, id matching, timeout, proxy env,
+# error classification, teardown) lives in app-server-client.ps1 - the single
+# shared session layer the Execution Profile resolver uses too (doc v3.0 §15:
+# one client, not three copies). This file is only the quota *schema* on top of it.
 
 $script:CqkQuotaClientDir = Split-Path -Parent $PSCommandPath
 if (-not (Get-Command Get-KeeperRoot -ErrorAction SilentlyContinue)) {
     . (Join-Path $script:CqkQuotaClientDir 'common.ps1')
 }
-
-function Get-CodexServerStartInfo {
-    # Launches any codex shape (native exe, npm codex.cmd, or a mock .ps1) through
-    # the unified launcher (CQK-004).
-    param([string]$CodexPath)
-    return (Resolve-ExecutableLaunchSpec -Executable $CodexPath -ArgumentList @('app-server'))
-}
-
-function Start-AppServerSession {
-    param(
-        [hashtable]$StartInfo,
-        [hashtable]$Environment = @{}
-    )
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $StartInfo.exe
-    $psi.UseShellExecute = $false
-    $psi.RedirectStandardInput = $true
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.CreateNoWindow = $true
-    $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
-    $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
-    if ($psi.PSObject.Properties['StandardInputEncoding']) {
-        # UTF8Encoding($false): [Encoding]::UTF8 emits a BOM preamble on first write,
-        # which corrupts the JSON-RPC line protocol (JSON must start with '{').
-        $psi.StandardInputEncoding = New-Object System.Text.UTF8Encoding($false)
-    }
-    if ($StartInfo.ContainsKey('rawArgs') -and $StartInfo.rawArgs) {
-        $psi.Arguments = [string]$StartInfo.rawArgs
-    }
-    elseif ($psi.PSObject.Properties['ArgumentList']) {
-        foreach ($a in $StartInfo.args) { [void]$psi.ArgumentList.Add([string]$a) }
-    } else {
-        $psi.Arguments = ($StartInfo.args | ForEach-Object { '"' + ("$_" -replace '"', '\"') + '"' }) -join ' '
-    }
-    # Must be set before Start(); the child inherits the parent's environment
-    # first, and these keys override/append it (proxy config, CQK-020).
-    if ($Environment) {
-        foreach ($k in $Environment.Keys) { $psi.EnvironmentVariables[[string]$k] = [string]$Environment[$k] }
-    }
-    $proc = New-Object System.Diagnostics.Process
-    $proc.StartInfo = $psi
-    [void]$proc.Start()
-    $stderrTask = $proc.StandardError.ReadToEndAsync()
-    # Pipe encodings + mock trace path are captured here so a TIMEOUT can report
-    # exactly how the child was wired (5.1 and 7 take different code paths).
-    $traceFile = $null
-    if ($env:TEMP) { $traceFile = Join-Path (Join-Path $env:TEMP 'cqk-mock-trace') ('cqk-mock-{0}.trace' -f $proc.Id) }
-    $launchSpec = if ($StartInfo.ContainsKey('rawArgs') -and $StartInfo.rawArgs) {
-        ('"{0}" {1}' -f $StartInfo.exe, [string]$StartInfo.rawArgs)
-    } else {
-        ('"{0}" {1}' -f $StartInfo.exe, (($StartInfo.args | ForEach-Object { '"' + $_ + '"' }) -join ' '))
-    }
-    return @{
-        proc           = $proc
-        stdin          = $proc.StandardInput
-        stdout         = $proc.StandardOutput
-        stderrTask     = $stderrTask
-        stdinEncoding  = [string]$proc.StandardInput.Encoding.WebName
-        stdoutEncoding = [string]$proc.StandardOutput.Encoding.WebName
-        traceFile      = $traceFile
-        lastWritten    = $null
-        launchSpec     = $launchSpec
-    }
-}
-
-function Stop-AppServerSession {
-    param($Session)
-    if (-not $Session) { return }
-    try { $Session.stdin.Close() } catch { }
-    $proc = $Session.proc
-    if (-not $proc.HasExited) {
-        if (-not $proc.WaitForExit(2000)) {
-            try { $proc.Kill($true) } catch { try { $proc.Kill() } catch { } }
-        }
-    }
-    try { $proc.Dispose() } catch { }
-}
-
-function Send-AppServerMessage {
-    param($Session, $Message)
-    $json = ConvertTo-Json -InputObject $Message -Depth 10 -Compress
-    $Session.stdin.WriteLine($json)
-    $Session.stdin.Flush()
-    $Session.lastWritten = $json
-}
-
-function Get-AppServerFailureDetail {
-    # One-line diagnostics for TIMEOUT/EOF failures: pipe encodings, what was
-    # last written, the child's own trace (mock fixtures only), and stderr state.
-    # Surfaces which pipe boundary broke without a debugger.
-    param($Session, [int]$Id)
-    $parts = @('id=' + $Id)
-    if ($null -ne $Session) {
-        if ($Session.launchSpec) { $parts += ('launch=' + $Session.launchSpec) }
-        if ($Session.stdinEncoding)  { $parts += ('stdin=' + $Session.stdinEncoding) }
-        if ($Session.stdoutEncoding) { $parts += ('stdout=' + $Session.stdoutEncoding) }
-        if ($Session.lastWritten) {
-            $parts += ('wrote=' + $Session.lastWritten.Substring(0, [Math]::Min(48, $Session.lastWritten.Length)))
-        }
-        if ($Session.traceFile -and (Test-Path -LiteralPath $Session.traceFile)) {
-            $tail = @(Get-Content -LiteralPath $Session.traceFile -Tail 6 -ErrorAction SilentlyContinue)
-            if (@($tail).Count -gt 0) { $parts += ('mockTrace=' + ($tail -join ' | ')) }
-        } else {
-            $parts += 'mockTrace=<none>'
-        }
-        if ($Session.proc) {
-            if ($Session.proc.HasExited) {
-                $parts += ('procExited=True exitCode=' + $Session.proc.ExitCode)
-            } else {
-                $parts += 'procExited=False'
-                if ($Session.stderrTask.IsCompleted) { $parts += 'stderr=<closed>' } else { $parts += 'stderr=<open>' }
-            }
-        }
-    }
-    return ($parts -join '; ')
-}
-
-function Wait-AppServerResponse {
-    # Reads stdout lines until the response with the wanted id arrives.
-    # Notifications and unrelated messages are skipped. Honors a hard deadline.
-    param($Session, [int]$Id, [int]$TimeoutSeconds)
-    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    while ($true) {
-        if ([DateTime]::UtcNow -gt $deadline) {
-            return @{ ok = $false; kind = 'TIMEOUT'; message = ("timed out after {0}s waiting for response id {1} [{2}]" -f $TimeoutSeconds, $Id, (Get-AppServerFailureDetail $Session $Id)) }
-        }
-        $task = $Session.stdout.ReadLineAsync()
-        while (-not $task.IsCompleted) {
-            if ([DateTime]::UtcNow -gt $deadline) {
-                return @{ ok = $false; kind = 'TIMEOUT'; message = ("timed out after {0}s waiting for response id {1} [{2}]" -f $TimeoutSeconds, $Id, (Get-AppServerFailureDetail $Session $Id)) }
-            }
-            Start-Sleep -Milliseconds 20
-        }
-        $line = $task.GetAwaiter().GetResult()
-        if ($null -eq $line) {
-            return @{ ok = $false; kind = 'EOF'; message = ("app-server closed stdout before responding [{0}]" -f (Get-AppServerFailureDetail $Session $Id)) }
-        }
-        # Defensive: strip a UTF-8 BOM if the child emits one.
-        $line = $line.TrimStart([char]0xFEFF)
-        $msg = ConvertFrom-JsonSafe $line
-        if ($null -eq $msg) { continue }
-        if ("$($msg.id)" -ne "$Id") { continue }
-        return @{ ok = $true; response = $msg }
-    }
+if (-not (Get-Command Invoke-CodexAppServerSession -ErrorAction SilentlyContinue)) {
+    . (Join-Path $script:CqkQuotaClientDir 'app-server-client.ps1')
 }
 
 function Test-NumericValue {
@@ -379,12 +241,9 @@ function ConvertFrom-RateLimitsResponse {
         } else {
             $errText = "$($Response.error)"
         }
-        $combined = "$errCode $errText"
-        $kind = 'PROTOCOL_ERROR'
-        if ($combined -match '(?i)auth|login|unauthor|401|403|not\s+logged') { $kind = 'AUTH_ERROR' }
         return @{ ok = $false; buckets = @(); windows = @(); sourceSchemaVersion = $null; accountPlanType = $null;
                   rateLimitReachedType = $null; credits = $null; spendControlReached = $null; rawMetadata = @{};
-                  schemaUnknown = $false; errorKind = $kind;
+                  schemaUnknown = $false; errorKind = (Get-CodexAppServerErrorKind -Code $errCode -Message $errText);
                   message = (Hide-SensitiveText "app-server error ($errCode): $errText") }
     }
 
@@ -396,6 +255,8 @@ function ConvertFrom-RateLimitsResponse {
 function Invoke-CodexRateLimitsAttempt {
     # One read-only quota probe against the official app-server protocol with the
     # given child environment. Never retries; callers own the retry policy.
+    # Transport, handshake, timeout and teardown all come from the shared session
+    # layer; this function only maps the answer onto the QuotaSnapshot model.
     # Returns @{ ok; windows; rateLimitReachedType; schemaUnknown; errorKind; message }
     param(
         [hashtable]$Config,
@@ -403,64 +264,20 @@ function Invoke-CodexRateLimitsAttempt {
         [int]$TimeoutSeconds = 0,
         [hashtable]$Environment = @{}
     )
-    $empty = { @{ ok = $false; buckets = @(); windows = @(); sourceSchemaVersion = $null; accountPlanType = $null;
-                  rateLimitReachedType = $null; credits = $null; spendControlReached = $null; rawMetadata = @{};
-                  schemaUnknown = $false; errorKind = $null; message = $null } }
-    $out = & $empty
-
-    if (-not $TimeoutSeconds -or $TimeoutSeconds -le 0) { $TimeoutSeconds = [int]$Config.codex.queryTimeoutSeconds }
-    if (-not $CodexPath) { $CodexPath = Resolve-CodexCommand $Config }
-    if (-not $CodexPath) {
-        $out.errorKind = 'SETUP_ERR'
-        $out.message = 'codex executable not found (set codex.command in config.json)'
-        return $out
-    }
-    $startInfo = Get-CodexServerStartInfo $CodexPath
-    if (-not $startInfo) {
-        $out.errorKind = 'SETUP_ERR'
-        $out.message = 'no PowerShell available to run the configured codex command'
-        return $out
-    }
-
-    $session = $null
-    try {
-        $session = Start-AppServerSession $startInfo -Environment $Environment
-        if ($session.proc.HasExited) {
-            $out.errorKind = 'SETUP_ERR'
-            $out.message = 'app-server process exited immediately'
-            return $out
-        }
-
-        Send-AppServerMessage -Session $session -Message @{
-            jsonrpc = '2.0'; id = 1; method = 'initialize'
-            params  = @{ clientInfo = @{ name = 'codex-quota-keeper'; title = 'Codex Quota Keeper'; version = $script:CQK_VERSION } }
-        }
-        $handshake = Wait-AppServerResponse $session -Id 1 -TimeoutSeconds $TimeoutSeconds
-        if (-not $handshake.ok) {
-            $out.errorKind = $handshake.kind
-            $out.message = (Hide-SensitiveText $handshake.message)
-            return $out
-        }
-
-        Send-AppServerMessage -Session $session -Message @{ jsonrpc = '2.0'; method = 'initialized' }
-
-        Send-AppServerMessage -Session $session -Message @{
-            jsonrpc = '2.0'; id = 7; method = 'account/rateLimits/read'; params = @{}
-        }
-        $reply = Wait-AppServerResponse $session -Id 7 -TimeoutSeconds $TimeoutSeconds
+    return (Invoke-CodexAppServerSession -Config $Config -CodexPath $CodexPath `
+        -TimeoutSeconds $TimeoutSeconds -Environment $Environment -Body {
+        param($Session, $Timeout)
+        $reply = Invoke-CodexAppServerRequest -Session $Session -Method 'account/rateLimits/read' -Params @{} -TimeoutSeconds $Timeout
         if (-not $reply.ok) {
-            $out.errorKind = $reply.kind
-            $out.message = (Hide-SensitiveText $reply.message)
-            return $out
+            # Launch/handshake failures and JSON-RPC error replies both surface as a
+            # failed snapshot with the same empty-but-well-shaped fields the parser
+            # emits, so no caller has to null-check a partial object.
+            return @{ ok = $false; buckets = @(); windows = @(); sourceSchemaVersion = $null; accountPlanType = $null;
+                      rateLimitReachedType = $null; credits = $null; spendControlReached = $null; rawMetadata = @{};
+                      schemaUnknown = $false; errorKind = $reply.errorKind; message = $reply.message }
         }
         return ConvertFrom-RateLimitsResponse $reply.response
-    } catch {
-        $out.errorKind = 'PROTOCOL_ERROR'
-        $out.message = (Hide-SensitiveText "app-server client failure: $($_.Exception.Message)")
-        return $out
-    } finally {
-        Stop-AppServerSession $session
-    }
+    })
 }
 
 function Invoke-CodexRateLimitsRead {
@@ -478,12 +295,13 @@ function Invoke-CodexRateLimitsRead {
     $envMap = Get-CodexProxyEnvironment $Config
     $out = Invoke-CodexRateLimitsAttempt -Config $Config -CodexPath $CodexPath `
         -TimeoutSeconds $TimeoutSeconds -Environment $envMap
+    $out = Complete-CodexResult $out
     if (@($envMap.Keys).Count -eq 0) {
         $out.proxy = 'off'
         $out.attempts = 1
         return $out
     }
-    if ($out.ok) {
+    if ($out.ok -or -not $out.retryable) {
         $out.proxy = 'used'
         $out.attempts = 1
         return $out
@@ -491,6 +309,7 @@ function Invoke-CodexRateLimitsRead {
     # Proxy path failed: exactly one fallback attempt without the keeper-set
     # proxy env vars. (System-level proxy vars, if any, stay inherited.)
     $direct = Invoke-CodexRateLimitsAttempt -Config $Config -CodexPath $CodexPath -TimeoutSeconds $TimeoutSeconds
+    $direct = Complete-CodexResult $direct
     $direct.proxy = 'fallback'
     $direct.attempts = 2
     if ($direct.ok) { return $direct }

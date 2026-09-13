@@ -1,4 +1,4 @@
-# Codex Quota Keeper - status (doc 02 §4 / doc 03 §13, design v2.0 §11/§14).
+﻿# Codex Quota Keeper - status (doc 02 §4 / doc 03 §13, design v2.0 §11/§14).
 # READ-ONLY: never claims the lease, never starts the keeper, never pushes.
 # Get-KeeperStatus collects the data; the display layer renders it. -Live adds a
 # read-only auth probe. Default output is the Chinese panel (§11); -Language en-US
@@ -31,6 +31,10 @@ if (-not (Get-Command Load-KeeperState -ErrorAction SilentlyContinue)) {
 }
 if (-not (Get-Command Get-StatusDisplayLines -ErrorAction SilentlyContinue)) {
     . (Join-Path $script:CqkStatusDir 'status-display.ps1')
+}
+
+if (-not (Get-Command Read-ExecutionProfileCache -ErrorAction SilentlyContinue)) {
+    . (Join-Path $script:CqkStatusDir 'codex-profile.ps1')
 }
 
 function Get-TaskIntervalMinutes {
@@ -90,10 +94,10 @@ function Get-KeeperStatus {
     $cfg = $loaded.config
     $status.configOk = (@($loaded.issues).Count -eq 0)
     $status.mode = [string]$cfg.mode
-    $status.autoAnchor = Test-AutoAnchorEnabled $cfg
+    $status.autoAnchor = Test-AutoAnchorArmed $cfg
     $status.pollIntervalMinutes = (Get-PollConfig $cfg).intervalMinutes
 
-    $machine = Get-MachineIdentity -Root $KeeperRoot -Label ([string]$cfg.leader.label)
+    $machine = Read-JsonFile (Get-MachinePath $KeeperRoot)
     $status.machineId = [string]$machine.machineId
     $status.machineLabel = [string]$machine.label
 
@@ -124,6 +128,26 @@ function Get-KeeperStatus {
         if (-not $probe.ok) { $status.codex.liveError = $probe.message }
     }
 
+    # Offline status reads only the whitelist cache; -Live may refresh it.
+    $cache = Read-ExecutionProfileCache -KeeperRoot $KeeperRoot
+    $ep = @{ source = 'none'; value = $null; stale = $true; errorKind = $null; reason = $null }
+    if ($cache.ok) {
+        $ep.source = 'cache'; $ep.value = $cache.value
+        $validated = [DateTimeOffset]::MinValue
+        if ([DateTimeOffset]::TryParse([string]$cache.value.validatedAt, [ref]$validated)) {
+            $configChanged = (Get-Item -LiteralPath $ConfigFile).LastWriteTimeUtc -ge $validated.UtcDateTime.AddSeconds(1)
+            $ep.stale = $configChanged -or (([DateTimeOffset]::Now - $validated).TotalMinutes -gt $status.pollIntervalMinutes * 2)
+        }
+    }
+    if ($Live -and $codexPath -and $status.configOk) {
+        $workDir = Join-Path (Get-RuntimeDir $KeeperRoot) 'anchor-work'
+        Ensure-Directory $workDir | Out-Null
+        $prof = Resolve-ExecutionProfile -Config $cfg -CodexPath $codexPath -WorkingDirectory $workDir
+        $ep = @{ source = 'live'; value = $prof; stale = $false; errorKind = $prof.errorKind; reason = $prof.validationReason }
+        if ($prof.validation -in @('VALID', 'INVALID')) { $null = Write-ExecutionProfileCache -KeeperRoot $KeeperRoot -Profile $prof }
+    }
+    $status.executionProfile = $ep
+
     # ---- local runner process (right now) --------------------------------------
     $lockPath = Join-Path (Get-LockDir $KeeperRoot) 'runner.lock'
     if (Test-Path -LiteralPath $lockPath) {
@@ -140,6 +164,7 @@ function Get-KeeperStatus {
     # ---- role + lease ----------------------------------------------------------
     $state = Load-KeeperState $KeeperRoot
     $aaCfg = Get-AutoAnchorConfig $cfg
+    $status.anchorStats = Get-AnchorStatistics -Anchors $state.anchors -Today (Get-Date).ToString('yyyy-MM-dd')
     $status.anchorKeepalive = @{ intervalMinutes = [int]$aaCfg.keepaliveIntervalMinutes; lastAnchorAt = [string]$state.anchors.lastAnchorAt }
     $status.anchorSchedule = @{ slots = @($aaCfg.schedule) }
     $status.anchorExec = @{ model = [string]$aaCfg.model; reasoningEffort = [string]$aaCfg.reasoningEffort }

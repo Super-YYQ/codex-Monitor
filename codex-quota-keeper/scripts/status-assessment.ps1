@@ -74,6 +74,9 @@ $script:CqkStatusFindingCatalog = @{
     # ---- INFO: how it is running, not whether it is broken ---------------------
     LOCAL_ONLY                  = @{ severity = 'INFO'; title = '单机模式'; action = '单台电脑使用正常；多台电脑同时运行需启用 Git 协调'; titleEn = 'single-machine mode (LOCAL_ONLY)'; actionEn = 'normal for one machine; enable Git coordination for several' }
     AUTOANCHOR_ENABLED          = @{ severity = 'INFO'; title = '自动锚定已开启（实验功能）'; action = '该功能会主动调用 Codex 模型并消耗额度'; titleEn = 'auto-anchoring is ON (experimental)'; actionEn = 'this calls the Codex model on its own and consumes quota' }
+    PROFILE_INVALID            = @{ severity = 'ERROR'; title = '执行模型配置校验失败'; action = '修正模型或推理强度后运行 Status -Live'; titleEn = 'execution profile is invalid'; actionEn = 'correct model or reasoning effort, then run Status -Live' }
+    PROFILE_UNAVAILABLE        = @{ severity = 'WARNING'; title = '执行模型暂时无法校验'; action = '检查 Codex 登录和网络，再运行 Status -Live'; titleEn = 'execution profile is unavailable'; actionEn = 'check Codex login and network, then run Status -Live' }
+    PROFILE_STALE              = @{ severity = 'WARNING'; title = '执行模型校验结果已过期或尚不存在'; action = '运行 Status -Live 获取当前校验结果'; titleEn = 'execution profile is stale or missing'; actionEn = 'run Status -Live to validate the current profile' }
     AUTOANCHOR_OFF              = @{ severity = 'INFO'; title = '自动锚定未开启'; action = '当前只读取额度，不会自动调用模型'; titleEn = 'auto-anchoring is OFF'; actionEn = 'quota is read only; no model call is made' }
     ANCHOR_JUDGMENT_SUPPRESSED  = @{ severity = 'INFO'; title = '周期判断已停用（定时模式）'; action = '当前仅按定时槽位触发；如需恢复判断触发，清空 codex.autoAnchor.schedule'; titleEn = 'judgment triggers disabled (schedule mode)'; actionEn = 'only schedule slots fire now; clear codex.autoAnchor.schedule to restore judgment' }
     KEEPALIVE_OFF               = @{ severity = 'INFO'; title = '空闲兜底（Keepalive）已关闭'; action = '仅按窗口重置与空闲判定触发；如需兜底把 keepaliveIntervalMinutes 设为大于 0'; titleEn = 'idle backstop (keepalive) is off'; actionEn = 'reset/idle triggers only; set keepaliveIntervalMinutes > 0 for the backstop' }
@@ -245,7 +248,7 @@ function Get-StatusAnchorToday {
     param($State, [string]$Today)
     $st = ConvertTo-StatusHashtable $State
     if ([string](Get-StatusValue -Map $st -Path 'anchors.day') -ne $Today) { return 0 }
-    return [int](Get-StatusValue -Map $st -Path 'anchors.count')
+    return (Get-AnchorStatistics (Get-StatusValue -Map $st -Path 'anchors')).attemptCount
 }
 
 # ---------------------------------------------------------------------------
@@ -265,9 +268,9 @@ function Read-StatusLogTail {
     # ERROR without ever looking for a verdict.
     param([string]$Root, [int]$MaxAgeDays = 3, [int]$Take = 200)
     $out = New-Object System.Collections.ArrayList
-    if (-not $Root) { return ,@() }
+    if (-not $Root) { return @() }
     $logsDir = Get-LogsDir $Root
-    if (-not (Test-Path -LiteralPath $logsDir)) { return ,@() }
+    if (-not (Test-Path -LiteralPath $logsDir)) { return @() }
     $cutoff = (Get-Date).AddDays(-1 * $MaxAgeDays)
     $files = @(Get-ChildItem -LiteralPath $logsDir -Filter 'keeper-*.jsonl' -File -ErrorAction SilentlyContinue |
         Sort-Object Name -Descending)
@@ -288,10 +291,10 @@ function Read-StatusLogTail {
                 event = [string]$entry.event
                 error = [string]$entry.error
             })
-            if ($out.Count -ge $Take) { return ,@($out.ToArray()) }
+            if ($out.Count -ge $Take) { return @($out.ToArray()) }
         }
     }
-    return ,@($out.ToArray())
+    return @($out.ToArray())
 }
 
 function Get-StatusVerdictFreshness {
@@ -317,7 +320,7 @@ function Get-StatusVerdictFreshness {
     )
     $poll = [Math]::Max(1, $PollMinutes)
     $threshold = [Math]::Max(60, [Math]::Min(720, 2 * $poll + $script:CQK_STATUS_GRACE_FALLBACK_MINUTES + $script:CQK_SCHEDULING_JITTER_MINUTES))
-    $entries = if ($null -ne $Tail) { @($Tail) } elseif ($Root) { @(Read-StatusLogTail -Root $Root -MaxAgeDays 3 -Take 200) } else { @() }
+    $entries = @(if ($null -ne $Tail) { $Tail } elseif ($Root) { Read-StatusLogTail -Root $Root -MaxAgeDays 3 -Take 200 })
     if ($entries.Count -eq 0) {
         return @{ fresh = $true; ageMinutes = $null; thresholdMinutes = $threshold; reason = 'no-logs'; event = '' }
     }
@@ -665,6 +668,29 @@ function Get-StatusAssessment {
         # The banner itself never changes overall: severity pinned at INFO (§16.5).
         Add-StatusFinding -Assessment $a -Code 'AUTOANCHOR_ENABLED' -Severity 'INFO' `
             -Detail "daily cap $([int]$anchorCfg.maxPerDay); today $anchorToday" -Now $Now
+        $ep = & $gv 'executionProfile'
+        if ($null -ne $ep) {
+            $validation = [string](Get-StatusValue -Map $ep -Path 'value.validation')
+            $profileCode = ''
+            if ([bool]$ep.stale) { $profileCode = 'PROFILE_STALE' }
+            elseif ($validation -in @('INVALID', 'UNAVAILABLE')) { $profileCode = "PROFILE_$validation" }
+            # A failed runtime probe does not overwrite the usable profile cache.
+            # A later RUNNER_OK only proves quota polling, not profile recovery.
+            if ($ep.source -ne 'live') {
+                $cacheAt = ConvertTo-StatusDateTime (Get-StatusValue -Map $ep -Path 'value.validatedAt')
+                foreach ($entry in @(Read-StatusLogTail -Root $KeeperRoot -Take 200)) {
+                    if ($entry.event -eq 'ANCHOR_EXECUTED') { break }
+                    if ($entry.event -notin @('ANCHOR_PROFILE_INVALID', 'ANCHOR_PROFILE_UNAVAILABLE')) { continue }
+                    $failureAt = ConvertTo-StatusDateTime $entry.ts
+                    if ($null -ne $failureAt -and ($Now - $failureAt).TotalMinutes -le (2 * $poll) -and
+                        ($null -eq $cacheAt -or $failureAt -ge $cacheAt)) {
+                        $profileCode = $entry.event -replace '^ANCHOR_', ''
+                    }
+                    break
+                }
+            }
+            if ($profileCode) { Add-StatusFinding -Assessment $a -Code $profileCode -Detail ([string]$ep.reason) -Now $Now }
+        }
         $nonEmptySlots = @($slots | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
         if ($nonEmptySlots.Count -gt 0) {
             # §11.3: the user must not be left thinking a window reset would fire.

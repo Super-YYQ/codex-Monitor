@@ -1,4 +1,4 @@
-# Tests for quota-client.ps1 (CQK-001/002):
+﻿# Tests for quota-client.ps1 (CQK-001/002):
 #   - Protocol contract tests against official v2 schema fixtures (no process spawn)
 #   - End-to-end protocol tests against the mock app-server (no real credentials)
 # Covers: whitelist parsing, optional/null fields, multi-bucket, metadata,
@@ -207,7 +207,7 @@ Assert-False $r.ok 'protocol error not ok'
 Assert-Equal 'PROTOCOL_ERROR' $r.errorKind 'PROTOCOL_ERROR kind'
 $r = Invoke-MockRead 'rate-limit'
 Assert-False $r.ok 'rate limit not ok'
-Assert-Equal 'PROTOCOL_ERROR' $r.errorKind 'transport-level 429 is protocol error'
+Assert-Equal 'RATE_LIMITED' $r.errorKind '429 has a dedicated kind'
 Assert-True ("$($r.message)" -match '429') '429 text preserved for backoff classification'
 
 Start-TestGroup 'errors: rateLimitReachedType surfaced'
@@ -229,7 +229,7 @@ Start-TestGroup 'errors: app-server dying at start reported'
 
 $r = Invoke-MockRead 'start-failure'
 Assert-False $r.ok 'start failure not ok'
-Assert-True ($r.errorKind -in @('EOF', 'SETUP_ERR', 'TIMEOUT')) "start failure kind ($($r.errorKind))"
+Assert-True ($r.errorKind -in @('EOF', 'SETUP_ERROR', 'TIMEOUT')) "start failure kind ($($r.errorKind))"
 
 Start-TestGroup 'launcher: npm-style codex.cmd wrapper works end to end'
 
@@ -242,6 +242,33 @@ try {
     Assert-Equal 2 @($rcmd.windows).Count 'cmd-wrapped read returns windows'
 } finally {
     Remove-Item Env:\CQK_MOCK_MODE -ErrorAction SilentlyContinue
+}
+
+Start-TestGroup 'launcher: timeout kills the whole cmd wrapper process tree'
+
+$treeWs = New-TestWorkspace
+$treeChildren = @()
+try {
+    $treeScript = Join-Path $treeWs 'tree-timeout-appserver.ps1'
+    $treeCmd = Join-Path $treeWs 'tree-timeout-codex.cmd'
+    Copy-Item -LiteralPath $mockPath -Destination $treeScript
+    $treeCmdBody = "@echo off`r`npwsh -NoProfile -ExecutionPolicy Bypass -File `"%~dp0tree-timeout-appserver.ps1`" %*`r`n"
+    [IO.File]::WriteAllText($treeCmd, $treeCmdBody, [Text.Encoding]::ASCII)
+    $env:CQK_MOCK_MODE = 'timeout'
+    $treeCfg = New-TestConfig @{ codex = @{ command = $treeCmd; queryTimeoutSeconds = 2 } }
+    $treeResult = Invoke-CodexRateLimitsRead -Config $treeCfg
+    Assert-Equal 'TIMEOUT' $treeResult.errorKind 'cmd-wrapped timeout is surfaced'
+    Start-Sleep -Milliseconds 300
+    $treeChildren = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.CommandLine -and $_.CommandLine.IndexOf($treeScript, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    })
+    Assert-Equal 0 $treeChildren.Count 'cmd timeout leaves no app-server child process'
+} finally {
+    Remove-Item Env:\CQK_MOCK_MODE -ErrorAction SilentlyContinue
+    foreach ($child in @($treeChildren)) {
+        Stop-Process -Id ([int]$child.ProcessId) -Force -ErrorAction SilentlyContinue
+    }
+    Remove-TestWorkspace $treeWs
 }
 
 Start-TestGroup 'proxy: off by default -> exactly one attempt'
@@ -302,7 +329,7 @@ $cfg = New-TestConfig @{ codex = @{ command = 'auto'; queryTimeoutSeconds = 5 } 
 $cfg.codex.command = Join-Path $env:TEMP ('no-such-codex-' + [guid]::NewGuid().ToString('N') + '.exe')
 $r = Invoke-CodexRateLimitsRead -Config $cfg
 Assert-False $r.ok 'missing codex binary not ok'
-Assert-Equal 'SETUP_ERR' $r.errorKind 'SETUP_ERR kind'
+Assert-Equal 'SETUP_ERROR' $r.errorKind 'SETUP_ERROR kind'
 
 Start-TestGroup 'sanity: sanitized error text'
 

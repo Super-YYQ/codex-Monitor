@@ -121,3 +121,68 @@ codex-quota-keeper/
 - CQK-034 Ruleset 创建属 GitHub 平台配置变更，需用户决定；开发侧仅准备/检查。
 - CQK-031：预算/上限校验只写在 Test-ConfigShape（硬失败），推导函数只 clamp + 报 cappedByPoll；
   这样只读 Status 面板永远不会被校验规则挡住（面板正是配置出问题时要用的手段）。
+
+---
+
+# 第四轮：P0 修复优化设计 v3.0（2026-09-10）CQK-036~048
+
+2026-09-13 接续状态：CQK-040~046 实现已完成；默认全量 23 套测试在 PS7/PS5.1 均通过、0 跳过，
+7 套使用临时本地 Git push 的集成测试已在明确授权后执行，CQK-047 完成；CQK-048 继续保持未完成。
+本地候选程序提交 ab8f6a7、分析器/凭据扫描/重复打包证据详见 [产品就绪审查](production-readiness.md)。
+
+依据 `C:\Users\Administrator\Desktop\codex-Monitor_P0级修复优化设计_v3.0.docx`
+（提取文本 469 行，见 findings.md「v3.0 文档要点」）。基线 `cdca944`。实施顺序按文档 §18。
+目标：8 个 P0 问题全部关闭，13 张工单 CQK-036~048。
+
+## 阶段 D：审计唯一性（CQK-036）
+- [x] CQK-036 Anchor Audit 双写消除 → Single Writer（Runner 是唯一 Event Persistence Owner）
+  - auto-anchor.ps1 不再调用 Write-OutboxEvent / Write-HistoryEvent；
+  - 新增 `anchorInvocationId`；多个 trigger claim 可映射同一 invocation，但 invocation audit 只有一条；
+  - Runner 侧持久化 anchor 事件时携带完整 anchorInfo（含全部 eventIds，修掉 `$claimed[0]` 丢触发）。
+
+## 阶段 E：执行配置语义校验（CQK-037 + 038）
+- [x] CQK-037 抽出共享 JSON-RPC 会话层（app-server-client.ps1）：Start/Initialize/Invoke/Stop
+      + Invoke-CodexRateLimitsRead / Invoke-CodexConfigRead / Invoke-CodexModelList；禁止复制三份客户端；
+      `model/list` 必须处理 nextCursor 分页 + 严格页/条上限（§15.1）。
+- [x] CQK-038 Execution Profile Resolver 三层语义校验：L1 形态 → L2 本机 CLI 模型目录 → L3 思考等级；
+      来源永远是本机 Codex CLI 自身，**仓库内不写任何静态模型白名单**。
+
+## 阶段 F：安装/运行期门禁（CQK-039 + 040）
+- [x] CQK-039 Install/Apply armed gate：mode=AutoAnchor + enabled=true 硬阻断；MonitorOnly 或
+      enabled=false 仅警告；UNAVAILABLE fail closed；Apply 失败不得改动既有计划任务。
+      （`Get-ExecutionProfileGate` / `Get-ExecutionProfileGateSummary` @ install.ps1；
+      issues vs warnings 双列表；UNAVAILABLE 不写 cache；apply-config 在两次 Register 之前门禁。）
+- [x] CQK-040 运行期 Claim **之前**做 live Profile 复验：INVALID/UNAVAILABLE → 不 claim、不 exec、下一轮再试。
+
+## 阶段 G：审计与计数（CQK-041 + 042）
+- [x] CQK-041 审计记录 configured* / effective* / provider / source / validation 三处一致
+      （runtime log、local history、remote history）。
+- [x] CQK-042 锚定计数 attemptCount/successCount/failedCount/lastAttemptAt/lastSuccessAt；
+      Profile 校验失败**不计数**；每日上限仍走 attemptCount；§24 旧 `count` 迁移，不伪造 successCount。
+
+## 阶段 H：错误分类与重试（CQK-043 + 044 + 045）
+- [x] CQK-043 统一 errorKind + retryable（由底层客户端产出）；runner 正则判定改为读字段。
+- [x] CQK-044 Install probe 有界重试：最多 2 Rounds（每 Round = proxy + direct），
+      低层尝试 ≤4，绝不第 5 次；Round 间隔 2s；仅 NETWORK_ERROR/TIMEOUT/EOF 重试。
+- [x] CQK-045 中文分级 Install Preflight（【配置文件】/【Codex CLI】/【AutoAnchor 执行配置】/
+      【额度接口】/【计划任务】+ [正常]/[注意]/[异常]）；app-server 原始错误降级到 Detailed/日志。
+
+## 阶段 I：Status 可见性（CQK-046）
+- [x] CQK-046 Status「AutoAnchor 自动锚定」区扩充 Execution Profile + `runtime/execution-profile.json`
+      缓存（只含白名单字段）；默认 status.cmd **不发** live catalog 网络请求；`status -Live` 才刷新。
+
+## 阶段 J：测试矩阵（CQK-047）
+- [x] CQK-047 T01~T20 测试矩阵；T19 PS7 + T20 WinPS 5.1 全绿。
+      夹具 `tests/fixtures/mock-appserver.ps1` 必须新增 `config/read` / `model/list`（含分页）响应
+      ——现有 `default { }` 会静默吞掉新方法，导致超时而非明确失败。
+- [x] Windows PowerShell 5.1 `.cmd` 超时进程树回归：先复现遗留子进程，再验证共享终止逻辑；
+      源码与解压候选在 PS7/PS5.1 均通过，残留测试进程为 0。
+
+## 阶段 K：发布门禁（CQK-048）
+- [ ] CQK-048 双机真机 soak + 故障注入 = Release Gate —— **由用户排期执行**；
+      完成前不打 tag / 不建 Release。文档与 `docs/soak-runbook.md` 同步新增判据。
+
+## 收尾
+- [x] run-all.ps1 PS7 + WinPS 5.1 双运行时全绿；PSScriptAnalyzer ERRORS=0；secret-scan 通过
+- [ ] golden 面板按新输出重生成；README / config.example.jsonc / CHANGELOG / docs/scenarios.md 同步
+- [ ] 落 main：feature branch → PR → CI 绿 → merge（禁直接 push main，GH013 实测）

@@ -292,6 +292,7 @@ function Write-OutboxEvent {
         [switch]$IncludeMachineLabel,
         [DateTime]$When = (Get-Date)
     )
+    $record = @{} + $Record
     $record.event = [string]$Record.event
     $record.schema = 1
     $record.recordedAt = $When.ToString('yyyy-MM-ddTHH:mm:sszzz')
@@ -304,7 +305,8 @@ function Write-OutboxEvent {
         $id = $When.ToLocalTime().ToString('yyyyMMddTHHmmss') + '_' + $RunId + '_' + [guid]::NewGuid().ToString('N').Substring(0, 6)
     }
     $path = Join-Path (Get-OutboxDir $Root) ($id + '.json')
-    Write-JsonFileAtomic $path $record
+    $clean = Sanitize-Record $record -IncludeMachineLabel:$IncludeMachineLabel
+    Write-JsonFileAtomic $path $clean
     return @{ id = $id; path = $path; when = $When }
 }
 
@@ -342,18 +344,22 @@ function Sync-OutboxToGitHub {
 
     $machineId = [string]$Machine.machineId
     $blobs = @{}
+    $included = @()
     foreach ($file in $pending) {
         $rec = ConvertFrom-JsonSafe ([System.IO.File]::ReadAllText($file.FullName))
         if ($rec -isnot [hashtable]) { continue }
-        $when = [DateTime]::Now
+        $when = $file.LastWriteTime
         if ($rec.recordedAt) {
             $parsed = [DateTime]::MinValue
-            if ([DateTime]::TryParse([string]$rec.recordedAt, [ref]$parsed)) { $when = $parsed }
+            if ([DateTime]::TryParse((ConvertTo-IsoString $rec.recordedAt), [ref]$parsed)) { $when = $parsed }
         }
         $stamp = $when.ToLocalTime().ToString('yyyyMMddTHHmmss')
         $date = $when.ToLocalTime().ToString('yyyy-MM-dd')
         $remotePath = 'history/' + $date + '/' + $machineId + '/' + $stamp + '_' + $rec.event + '_' + $file.BaseName + '.json'
-        $blobs[$remotePath] = [System.IO.File]::ReadAllText($file.FullName)
+        # Re-apply the privacy boundary to pending records written by old versions.
+        $clean = Sanitize-Record $rec -IncludeMachineLabel:([bool](Get-LoggingConfig $Config).includeMachineLabel)
+        $blobs[$remotePath] = ConvertTo-Json -InputObject $clean -Depth 20 -Compress
+        $included += $file
     }
     foreach ($summaryFile in $SummaryFiles) {
         if (-not (Test-Path -LiteralPath $summaryFile)) { continue }
@@ -383,13 +389,15 @@ function Sync-OutboxToGitHub {
     $state.lastSyncAt = Get-IsoTimestamp
     $state.sentCount = [int]$state.sentCount + $blobs.Count
     $recent = @($state.sent)
-    foreach ($file in $pending) {
+    foreach ($file in $included) {
         $recent += ,@{ id = $file.BaseName; sentAt = $state.lastSyncAt; path = 'outbox/' + $file.Name }
-        Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
     }
     if ($recent.Count -gt 100) { $recent = @($recent | Select-Object -Last 100) }
     $state.sent = $recent
     Write-JsonFileAtomic (Get-SyncStatePath $KeeperRoot) $state
+    # Delete only records actually included in the successful write. A malformed
+    # record must stay available for diagnosis, never disappear with a good batch.
+    foreach ($file in $included) { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue }
 
     $result.ok = $true; $result.reason = 'pushed'; $result.pushed = $blobs.Count
     return $result

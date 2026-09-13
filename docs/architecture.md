@@ -12,7 +12,9 @@ Windows Task Scheduler (CodexQuotaKeeper.Check, 仅当前用户)
         |-- preflight.ps1        配置校验 + codex/git/仓库绑定/runtime 可写
         |-- leader-lease.ps1     cqk/coordination 分支租约 (Git push 冲突 = CAS)
         |-- global-backoff.ps1   coordination/backoff.json 集群级退避
-        |-- quota-client.ps1     codex app-server JSON-RPC: initialize -> account/rateLimits/read
+        |-- app-server-client.ps1 codex app-server JSON-RPC 共享会话层: 启动/管道/握手/按 id 匹配/超时/代理环境/错误分类/收尾
+        |-- quota-client.ps1      额度 schema: initialize -> account/rateLimits/read -> QuotaSnapshot (会话层复用上一条)
+        |-- codex-profile.ps1     执行画像: 同一会话内 config/read + model/list(分页) -> effectiveModel/effort + L1/L2/L3 三层校验结论 (无静态模型白名单)
         |-- state-machine.ps1    bucket/window 快照差异 -> 事件; eventId = SHA-256(bucketId|windowType|duration|prevResetsAt|reset)
         |-- auto-anchor.ps1      实验: 分布式 CAS Claim -> codex exec -> 二次验证 (默认关)
         |-- logger.ps1           runtime JSONL(EventRecord) + history JSONL + 每日 summary + 保留期
@@ -32,6 +34,11 @@ Windows Task Scheduler (CodexQuotaKeeper.Check, 仅当前用户)
 - **不可变 history**：`history/<date>/<machineId>/<stamp>_<EVENT>_<id>.json`，
   多机并存不覆盖；durable outbox 保证推送失败不丢事件。
 - **外部命令**：统一 `Resolve-ExecutableLaunchSpec`（exe/ps1/cmd/bat），npm codex.cmd 可用。
+- **执行画像（v3.0 §5~§6）**：仓库内零静态模型白名单；唯一权威是「本机当前 CLI + 当前账号 +
+  当前 Provider 实际返回的模型目录」。config/read 与 model/list 必须在**同一次会话、同一环境**
+  中读取（与真正 `codex exec` 一致），因此画像解析**不做代理直连回退**——回退会替另一个环境作答。
+  L1 静态格式在配置层（`Test-ConfigShape`），L2 模型存在性 / L3 思考等级支持性在画像层，
+  结论只有 `VALID` / `INVALID` / `UNAVAILABLE` 三态，上层只看 `errorKind` + `retryable`。
 
 ## 状态机
 

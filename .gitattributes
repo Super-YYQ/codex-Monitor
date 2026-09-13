@@ -7,8 +7,10 @@
 # machine happens to have configured.
 #
 # Deliberately narrow: no `* text=auto` and no blanket rules, so adding this
-# file cannot renormalize existing content. .cmd/.ps1 keep following the user's
-# core.autocrlf (a .cmd with LF endings is a real regression risk on Windows).
+# file cannot renormalize unrelated content. PowerShell follows core.autocrlf.
+# Batch files are committed with literal CRLF bytes: git archive uses blobs,
+# so eol=crlf alone would still ship LF in the downloadable ZIP.
+*.cmd -text whitespace=cr-at-eol
 
 # §17.2 golden Status panels - tests/status-display.test.ps1 diffs them line by
 # line and asserts they contain no CR.

@@ -102,8 +102,8 @@ try {
     Assert-Equal 60 (Get-AnchorExecBudgetSeconds (New-TestConfig @{ codex = @{ queryTimeoutSeconds = 20 } })) 'anchor exec floor 60 s'
     Assert-Equal 300 (Get-AnchorExecBudgetSeconds (New-TestConfig @{ codex = @{ queryTimeoutSeconds = 100 } })) 'anchor exec scales with the timeout'
 
-    # Tick budget composition: read, plus exec + verify when anchoring is armed,
-    # plus the git budget only when a remote is configured.
+    # Tick budget composition: read, plus (armed AutoAnchor) the LIVE profile
+    # revalidation + exec + verify, plus the git budget only when a remote is configured.
     $tickMonitor = Get-CodexTickBudgetSeconds (New-TestConfig @{ mode = 'MonitorOnly'; github = $noCoordCqk; codex = @{ queryTimeoutSeconds = 20 } })
     Assert-Equal 40 $tickMonitor 'MonitorOnly local-only: the poll read alone'
     $tickAa = Get-CodexTickBudgetSeconds (New-TestConfig @{
@@ -111,7 +111,7 @@ try {
         github = $noCoordCqk
         codex  = @{ queryTimeoutSeconds = 20; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; keepaliveIntervalMinutes = 0 } }
     })
-    Assert-Equal 140 $tickAa 'armed AutoAnchor: read + exec + verify read'
+    Assert-Equal 300 $tickAa 'armed AutoAnchor: read + profile (20x8) + exec + verify read'
     $tickAaOff = Get-CodexTickBudgetSeconds (New-TestConfig @{
         mode   = 'AutoAnchor'
         github = $noCoordCqk
@@ -173,7 +173,7 @@ try {
         codex  = @{ queryTimeoutSeconds = 100; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; keepaliveIntervalMinutes = 0 } }
     }
     Assert-Equal 0 @(Test-ConfigShape $aaOk).Count 'the same config with a 60-minute poll is valid'
-    Assert-Equal 940 (Get-CodexTickBudgetSeconds $aaOk) 'anchored + synced worst case: 200 read + 300 exec + 200 verify + 240 git'
+    Assert-Equal 1740 (Get-CodexTickBudgetSeconds $aaOk) 'anchored + synced worst case: 200 read + 800 profile + 300 exec + 200 verify + 240 git'
 
     Start-TestGroup 'config: autoAnchor.enabled=true requires mode=AutoAnchor'
 
@@ -599,7 +599,7 @@ Assert-True ($spec.args -contains 'C:\Tools\mock.ps1') 'ps1 script path in args'
 
 $spec = Resolve-ExecutableLaunchSpec -Executable 'C:\Tools\codex.cmd' -ArgumentList @('app-server')
 Assert-True ("$($spec.exe)" -match 'cmd\.exe$') 'cmd wrapped in ComSpec'
-Assert-Equal '/d /s /c ""C:\Tools\codex.cmd" "app-server"""' "$($spec.rawArgs)" 'cmd raw command line double-quoted for /s'
+Assert-Equal '/d /s /c ""C:\Tools\codex.cmd" "app-server""' "$($spec.rawArgs)" 'cmd raw command line has one outer quote pair for /s'
 
 Start-TestGroup 'anchor exec: Get-AnchorExecCommand model/effort passthrough'
 

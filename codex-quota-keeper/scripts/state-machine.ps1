@@ -1,4 +1,4 @@
-# Codex Quota Keeper - state machine.
+﻿# Codex Quota Keeper - state machine.
 # Compares the previous quota snapshot with the current one, emits the events
 # defined in the design doc (03 §7) and the audit plan v1.0 (§13):
 #   - window key = bucketId + windowType (CQK-003)
@@ -37,7 +37,8 @@ function New-KeeperState {
         lastError            = $null
         consecutiveReadFailures = 0
         processedEventIds    = @()
-        anchors              = @{ day = $null; count = 0; lastAnchorAt = $null }
+        anchors              = (Get-AnchorStatistics)
+        pendingAnchorEvents  = @()
         leader               = @{ ownerId = $null; ownerLabel = $null; expiresAt = $null }
         heartbeat            = @{ ts = $null; role = $null }
         updatedAt            = $null
@@ -78,6 +79,7 @@ function Load-KeeperState {
     if ($null -eq $loaded -or $loaded -isnot [hashtable]) { return New-KeeperState }
     $state = Merge-ConfigDefaults (New-KeeperState) $loaded
     $state.buckets = ConvertTo-StateBuckets $loaded
+    $state.anchors = Get-AnchorStatistics $loaded.anchors
     $state.schema = $script:CQK_STATE_SCHEMA
     $state.windows = $null   # legacy key, no longer written
     return $state
@@ -321,9 +323,11 @@ function Test-ShouldAnchor {
         return & $deny "remote coordination unreachable ($RemoteUnreachable); fail closed"
     }
 
+    if ($State.stale) { return & $deny 'quota snapshot is stale; anchor fails closed' }
     # No open errors: 429 / auth / schema unknown / usage limit block anchoring.
     foreach ($ev in @($Events)) {
         if ($null -eq $ev) { continue }
+        if ($ev.event -eq 'READ_FAILED') { return & $deny 'quota read failed this cycle; anchor fails closed' }
         if ($ev.event -in @($script:CQK_EV_LIMIT_REACHED, $script:CQK_EV_AUTH_ERROR, $script:CQK_EV_SCHEMA_UNKNOWN)) {
             return & $deny "open error present: $($ev.event)"
         }
@@ -335,9 +339,8 @@ function Test-ShouldAnchor {
     # (bypassed only by an explicit force or a due daily schedule slot).
     $anchorCfg = Get-AutoAnchorConfig $Config
     $today = $Now.ToString('yyyy-MM-dd')
-    $day = [string]$State.anchors.day
-    $count = [int]$State.anchors.count
-    if ($day -ne $today) { $count = 0 }
+    $stats = Get-AnchorStatistics -Anchors $State.anchors -Today $today
+    $count = $stats.attemptCount
     if ($count -ge [int]$anchorCfg.maxPerDay) {
         return & $deny "daily anchor cap reached ($count/$($anchorCfg.maxPerDay))"
     }
@@ -389,6 +392,7 @@ function Test-ShouldAnchor {
     $triggerKind = $null
     $pending = @()
     if ($Force) {
+        if ($stats.anchorOnApplyAttempted) { return & $deny 'anchorOnApply already attempted today' }
         $forceId = Get-ForceAnchorEventId -Now $Now
         if (@($State.processedEventIds) -contains $forceId) {
             return & $deny 'forced anchor already executed this minute'

@@ -1,5 +1,7 @@
 # Codex Monitor
 
+当前开发分支的修复、验证范围和未关闭的发布门禁见 [产品就绪审查](docs/production-readiness.md)。
+
 用户级 Codex（ChatGPT 套餐）额度监控与多机互斥工具。按固定周期通过官方 `codex app-server` 读取额度状态，用专用 Private Git 仓库实现跨机器单 Leader 协调，并把净化后的额度/事件日志写入本地 JSONL + 可选的远程不可变 history 用于审计。
 
 [![PowerShell 7 unit + integration tests](https://github.com/Super-YYQ/codex-Monitor/actions/workflows/test-windows.yml/badge.svg)](https://github.com/Super-YYQ/codex-Monitor/actions/workflows/test-windows.yml)
@@ -137,7 +139,7 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
 | `codex.autoAnchor.maxPerDay` | `6` | 每日最大执行次数 |
 | `codex.autoAnchor.minimumGapMinutes` | `300` | 「静默期」：两次锚定的最小间隔（分钟）；一次 CLI 调用后至少等这么久才会再触发（anchorOnApply 强制触发除外） |
 | `codex.autoAnchor.keepaliveIntervalMinutes` | `300` | 空闲**兜底**触发间隔（分钟）：存在首次锚定后，距上次锚定超过该值仍未观测到窗口重置即由 keeper 再触发一次（默认 = 一个 5 小时窗口）；`0` = 关闭兜底（空闲判定与重置触发仍生效） |
-| `codex.autoAnchor.anchorOnApply` | `false` | **立即触发 CLI**：设为 `true` 后，每次运行 `install.cmd` / `apply-config.cmd` 都立刻强制执行一次锚定（不等 300 分钟静默期、不受最小间隔限制；仍受每日上限与 fail-closed 约束，同一分钟内的重复请求只执行一次） |
+| `codex.autoAnchor.anchorOnApply` | `false` | 安装或应用配置时请求立即锚定；每日本地最多实际尝试一次，不等静默期，仍受每日总上限与运行期校验约束 |
 | `codex.autoAnchor.schedule` | `[]` | **每日定时模式（与周期判断互斥）**：`"HH:mm"` 数组（本地时间、24 小时制、必须补零）。配置任意槽位即切换为纯定时模式——每个时间点后的第一次轮询触发一次 CLI，不做重置/空闲/兜底判断，重置事件被忽略；清空数组回到周期判断模式（重置/空闲/兜底生效）。同一时间点每天最多一次，不受静默期限制（仍受每日上限与 fail-closed 约束） |
 | `codex.autoAnchor.model` | `""` | **锚定执行的模型**：配置后传 `codex exec -m <model>`（如 `gpt-5-codex`）；留空 = 不传，沿用本机 `~/.codex/config.toml` 默认。仅允许字母/数字/`.`/`_`/`-`，1–100 字符 |
 | `codex.autoAnchor.reasoningEffort` | `""` | **锚定执行的思考等级**：配置后传 `-c model_reasoning_effort=<值>` 覆盖（如 `low`）；留空 = 不覆盖，沿用 CLI 默认。小写字母开头，仅小写字母/数字/`-`，1–30 字符；合法档位随 CLI/模型演进，填错在执行时按 fail-closed 记 ABORTED |
@@ -191,14 +193,14 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
    停用、重置事件被忽略；也不需要你使用过 Codex。同一时间点每天最多一次。
 
 **立即触发（anchorOnApply）不属于模式，任何模式下都可用**：`codex.autoAnchor.anchorOnApply=true`
-时，每次运行 `install.cmd` / `apply-config.cmd` 后会立刻强制执行一次锚定——"现在就来一次"，
+时，运行 `install.cmd` / `apply-config.cmd` 会请求立即锚定；每个本地自然日最多实际尝试一次，
 不等静默期、不需要重置、也不需要你本人使用 Codex。
 
 - **官方未明确背书该用途**；OpenAI《使用条款》对"规避限制"存在解释风险，本项目不承诺零风控。
 - 默认 `codex.autoAnchor.enabled=false`，安装器不会自动开启。
 - 开启后仍有完整约束：每日上限、最小间隔、429/认证/未知 schema/远程不可达一律 fail-closed；
   多机（配置了协调仓库）另有分布式 CAS Claim（同一事件全局最多一次副作用）与执行前租约重验证；
-  **单机（未配置协调仓库）同样可用**——本地 runner 锁 + state 去重保证至少一次副作用语义。
+  **单机（未配置协调仓库）同样可用**——本地 runner 锁、持久 Claim 和 state 去重共同限制同一事件最多一次调用；结果不确定时不重试。
 - 每次执行的 before/after 额度快照写入 history，便于审计。
 
 ---

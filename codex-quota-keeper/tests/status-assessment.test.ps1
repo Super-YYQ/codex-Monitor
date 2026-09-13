@@ -703,6 +703,30 @@ try {
     Add-StatusFinding -Assessment $ao -Code 'QUOTA_NEVER_READ' -Severity 'INFO' -Now $Now
     Assert-Equal 'INFO' "$(@($ao.findings)[0].severity)" 'explicit severity wins over the catalog'
 
+    Start-TestGroup 'execution profile contributes to overall health'
+    $profileWs = New-TestWorkspace
+    try {
+        Ensure-Directory (Get-LogsDir $profileWs) | Out-Null
+        $pc = New-StubConfig -Coordination $false -AutoAnchor $true
+        $ps = New-StubStatus @{ autoAnchor = $true; executionProfile = @{ source = 'live'; stale = $false; value = @{ validation = 'INVALID' } } } -LocalOnly
+        $pa = Get-StatusAssessment -Status $ps -Config $pc -KeeperRoot $profileWs -Now $Now
+        Assert-True (Test-HasCode $pa 'PROFILE_INVALID') 'invalid live profile has structured finding'
+        Assert-Equal 'ERROR' $pa.overall 'invalid profile cannot be healthy'
+        $ps.executionProfile = @{ source = 'cache'; stale = $false; value = @{ validation = 'VALID'; validatedAt = (ConvertTo-IsoString $Now.AddMinutes(-5)) } }
+        Write-VerdictLog -Root $profileWs -Ts $Now.AddMinutes(-1) -Level 'ERROR' -Event 'ANCHOR_PROFILE_UNAVAILABLE'
+        Write-VerdictLog -Root $profileWs -Ts $Now -Level 'INFO' -Event 'RUNNER_OK'
+        $pa = Get-StatusAssessment -Status $ps -Config $pc -KeeperRoot $profileWs -Now $Now
+        Assert-True (Test-HasCode $pa 'PROFILE_UNAVAILABLE') 'runner OK does not erase newer profile failure'
+        Assert-Equal 'WARNING' $pa.overall 'unavailable profile cannot be healthy'
+        $ps.executionProfile.source = 'live'
+        $pa = Get-StatusAssessment -Status $ps -Config $pc -KeeperRoot $profileWs -Now $Now
+        Assert-False (Test-HasCode $pa 'PROFILE_UNAVAILABLE') 'live validation supersedes historical profile error'
+        $ps.executionProfile.stale = $true
+        $pa = Get-StatusAssessment -Status $ps -Config $pc -KeeperRoot $profileWs -Now $Now
+        Assert-True (Test-HasCode $pa 'PROFILE_STALE') 'stale profile is explicitly reported'
+        Assert-Equal 'WARNING' $pa.overall 'stale profile cannot be healthy'
+    } finally { Remove-TestWorkspace $profileWs }
+
     # ---- sensitive text never reaches the panel ---------------------------
     $sw2 = New-TestWorkspace
     try {

@@ -1,4 +1,4 @@
-# Codex Quota Keeper - shared facilities.
+﻿# Codex Quota Keeper - shared facilities.
 # Dot-source only; every function takes explicit -Root so tests can run in temp dirs.
 
 # Captured while dot-sourcing: $PSCommandPath inside a function would resolve to the caller.
@@ -24,6 +24,16 @@ $script:CQK_MAX_QUERY_TIMEOUT_SECONDS = 180
 # JSON-RPC waits one quota attempt performs: `initialize` (id 1) and
 # `account/rateLimits/read` (id 7), each bounded by queryTimeoutSeconds.
 $script:CQK_JSONRPC_WAITS_PER_ATTEMPT = 2
+# CQK-038: JSON-RPC waits one Execution Profile resolution can perform, on the
+# single session the resolver opens: `initialize` (1) + `config/read` (1) + the
+# model/list pages (1..CQK_MODEL_LIST_MAX_PAGES). The page count is the reason a
+# wait count could not simply be reused from the quota path, and the ceiling is
+# what keeps a paginating catalog from turning into an unbounded task. Pinned
+# against CQK_MODEL_LIST_MAX_PAGES by codex-profile.test.ps1 so the two cannot
+# drift. No proxy fallback is added: the profile must be read in the SAME
+# environment `codex exec` will run in (doc v3.0 §6.2), so a second attempt
+# without the proxy would answer a different question.
+$script:CQK_PROFILE_WAITS_CEILING = 8
 # Worst-case wall clock of the git operations one tick can issue (fetch 60 +
 # ls-remote 20 + show 15 + push 90 + a few 15 s index calls, rounded up). Folded
 # into the task time limit only when a remote repo is configured at all.
@@ -63,6 +73,10 @@ function Get-AnchorClaimPath {
     param([string]$Root, [string]$EventId)
     return Join-Path (Get-AnchorClaimsDir $Root) ($EventId + '.json')
 }
+# CQK-038/046: last safely-cached Execution Profile (runtime/execution-profile.json).
+# Whitelist fields only - never a token, an account detail or the raw config blob
+# (doc v3.0 §23). The default status panel reads this file instead of going online.
+function Get-ExecutionProfilePath { param([string]$Root) Join-Path (Get-RuntimeDir $Root) 'execution-profile.json' }
 
 function Ensure-Directory {
     param([string]$Path)
@@ -249,8 +263,9 @@ function Hide-SensitiveText {
 
 # Allowlist for records that reach history/ or remote sync.
 $script:CQK_HISTORY_ALLOWED_KEYS = @(
-    'ts', 'event', 'machineId', 'machineLabel', 'role', 'mode',
-    'windows', 'anchor', 'error', 'summary', 'version'
+    'ts', 'recordedAt', 'eventId', 'event', 'machineId', 'machineLabel',
+    'role', 'mode', 'runId', 'windows', 'anchor', 'errorKind', 'error',
+    'summary', 'schema', 'version'
 )
 
 function Sanitize-Record {
@@ -263,16 +278,63 @@ function Sanitize-Record {
             $out[$key] = $Record[$key]
         }
     }
-    foreach ($key in @('error')) {
+    foreach ($key in @($out.Keys)) {
         if ($out.ContainsKey($key) -and $out[$key] -is [string]) {
             $out[$key] = Hide-SensitiveText $out[$key]
         }
     }
+    if ($out.ContainsKey('anchor')) { $out.anchor = ConvertTo-AnchorAuditRecord $out.anchor }
     return $out
+}
+
+function ConvertTo-AnchorAuditRecord {
+    # The same projection is used by runtime logs, history and the outbox.
+    # Preserve legacy model/effort aliases without accepting arbitrary objects.
+    param($Value)
+    if ($Value -isnot [hashtable]) { return $null }
+        $anchor = @{}
+        foreach ($key in @('phase', 'trigger', 'localOnly', 'anchorInvocationId',
+                'triggerEventIds', 'eventId', 'startedAt', 'endedAt', 'durationSecs',
+                'execExitCode', 'verified', 'configuredModel',
+                'configuredReasoningEffort', 'effectiveModel',
+                'effectiveReasoningEffort', 'modelProvider', 'modelSource',
+                'reasoningEffortSource', 'profileValidation', 'validatedAt',
+                'supportedReasoningEfforts', 'model', 'reasoningEffort', 'reason')) {
+            if (-not $Value.ContainsKey($key)) { continue }
+            $v = $Value[$key]
+            if ($v -is [string]) { $anchor[$key] = Hide-SensitiveText $v }
+            elseif ($null -eq $v -or $v -is [ValueType]) { $anchor[$key] = $v }
+            elseif ($key -in @('triggerEventIds', 'supportedReasoningEfforts') -and $v -is [System.Collections.IEnumerable]) {
+                $anchor[$key] = @($v | Where-Object { $_ -is [string] } | ForEach-Object { Hide-SensitiveText $_ })
+            }
+        }
+    return $anchor
 }
 
 # ---------------------------------------------------------------------------
 # Config accessors (shape-agnostic: v2 nested schema and v1 flat schema both work)
+
+function Get-AnchorStatistics {
+    # Legacy counts describe attempts. Never fabricate a successful outcome.
+    # Aliases remain readable by older status-json clients during upgrades.
+    param($Anchors, [string]$Today = '')
+    if ($Anchors -isnot [hashtable]) { $Anchors = @{} }
+    $attempts = [Math]::Max([int]$Anchors.attemptCount, [int]$Anchors.count)
+    $lastAttempt = $Anchors.lastAttemptAt
+    if (-not $lastAttempt) { $lastAttempt = $Anchors.lastAnchorAt }
+    $out = @{
+        day = $Anchors.day; attemptCount = $attempts
+        successCount = [int]$Anchors.successCount; failedCount = [int]$Anchors.failedCount
+        lastAttemptAt = $lastAttempt; lastSuccessAt = $Anchors.lastSuccessAt
+        anchorOnApplyAttempted = [bool]$Anchors.anchorOnApplyAttempted
+        count = $attempts; lastAnchorAt = $lastAttempt
+    }
+    if ($Today -and [string]$out.day -ne $Today) {
+        $out.day = $Today; $out.attemptCount = 0; $out.count = 0
+        $out.successCount = 0; $out.failedCount = 0; $out.anchorOnApplyAttempted = $false
+    }
+    return $out
+}
 
 function Get-AutoAnchorConfig {
     # v2: codex.autoAnchor = @{ enabled; prompt; maxPerDay; minimumGapMinutes; keepaliveIntervalMinutes; anchorOnApply;
@@ -315,6 +377,19 @@ function Test-AutoAnchorEnabled {
     return (Get-AutoAnchorConfig $Config).enabled
 }
 
+function Test-AutoAnchorArmed {
+    # "Would this config actually make the keeper call a model?" - mode alone is
+    # not enough and enabled alone is not enough; the runner needs both. Doc v3.0
+    # §7 makes this exact conjunction the switch between "a bad execution profile
+    # is a warning" and "a bad execution profile blocks the install", so it is
+    # spelled once here. Every place that hand-wrote the conjunction now calls
+    # this, because a gate that drifts from the predicate it guards is a gate that
+    # silently stops firing.
+    param([hashtable]$Config)
+    if ($null -eq $Config) { return $false }
+    return ([string]$Config.mode -eq 'AutoAnchor') -and (Test-AutoAnchorEnabled $Config)
+}
+
 function Get-ProxyConfig {
     # codex.proxy = '' (off) or an http/https/socks5 proxy URL handed to the codex
     # child process as HTTP_PROXY/HTTPS_PROXY/ALL_PROXY (CQK-020 proxy support).
@@ -350,6 +425,14 @@ function Get-CodexAttemptBudgetSeconds {
     #     path gets exactly one direct fallback (CQK-020: never a third try).
     # So: 2 waits x timeout, x2 attempts with a proxy. Process spawn/teardown and
     # the codex binary's own work sit on top of this; callers add slack.
+    #
+    # Scope note (CQK-037): this counts the QUOTA read path only, and that is still
+    # exactly two waits after the transport moved into app-server-client.ps1 - the
+    # extraction changed who owns the pipes, not how many round trips happen. The
+    # Execution Profile path is different in kind because `model/list` paginates
+    # (handshake + config/read + 1..N pages), so a wait-count would be a lie there:
+    # it has its own ceiling in Get-CodexProfileBudgetSeconds, which is a separate
+    # line of the tick budget below rather than folded into this number.
     # Returns @{ seconds; waitsPerAttempt; attempts; proxyConfigured }.
     param([hashtable]$Config)
     $timeout = 20
@@ -363,6 +446,31 @@ function Get-CodexAttemptBudgetSeconds {
         waitsPerAttempt = $waits
         attempts        = $attempts
         proxyConfigured = ($attempts -eq 2)
+    }
+}
+
+function Get-CodexProfileBudgetSeconds {
+    # CQK-038: worst-case wall clock of ONE Resolve-ExecutionProfile
+    # (codex-profile.ps1). Same model as the quota read - each wait is bounded by
+    # queryTimeoutSeconds - but the wait COUNT differs, because one resolution is
+    # one session (initialize + config/read) plus 1..N model/list pages. There is
+    # no proxy fallback: the profile is read in the environment `codex exec` will
+    # use, and a direct attempt after a failed proxy one would describe a
+    # different environment (doc v3.0 §6.2). Process spawn/teardown sits on top.
+    #
+    # The tick pays for this in full: CQK-040 revalidates the profile LIVE before
+    # every Claim, so an armed config has one more app-server session per poll. That
+    # is why the ceiling is a ceiling (MAX_PAGES + handshake + config/read) rather
+    # than a wait count - a catalog that paginates to the cap is a legal answer, and
+    # the task time limit has to survive it.
+    # Returns @{ seconds; waitsCeiling }.
+    param([hashtable]$Config)
+    $timeout = 20
+    if ($null -ne $Config -and $null -ne $Config.codex) { $timeout = [int]$Config.codex.queryTimeoutSeconds }
+    if ($timeout -le 0) { $timeout = 20 }
+    return @{
+        seconds      = $timeout * $script:CQK_PROFILE_WAITS_CEILING
+        waitsCeiling = $script:CQK_PROFILE_WAITS_CEILING
     }
 }
 
@@ -380,15 +488,20 @@ function Get-AnchorExecBudgetSeconds {
 
 function Get-CodexTickBudgetSeconds {
     # Worst-case wall clock of one runner tick, in seconds, for the pieces CQK
-    # itself bounds: the poll read, plus (AutoAnchor only) the exec and the
-    # post-anchor verify read, plus the git operations a remote-syncing config can
-    # issue. Deliberately pessimistic - this feeds the task time limit, and a limit
-    # that kills a run mid-flight is worse than one that is generous.
+    # itself bounds: the poll read, plus (AutoAnchor only) the LIVE execution-profile
+    # revalidation, the exec and the post-anchor verify read, plus the git operations
+    # a remote-syncing config can issue. Deliberately pessimistic - this feeds the
+    # task time limit, and a limit that kills a run mid-flight is worse than one that
+    # is generous.
+    #
+    # The profile term is inside the armed branch because CQK-040 put it there: an
+    # armed config revalidates the profile before every Claim, so every armed tick
+    # can spend one app-server session on a read that MonitorOnly never makes.
     param([hashtable]$Config)
     $read = Get-CodexAttemptBudgetSeconds $Config
     $seconds = $read.seconds
-    $aa = Get-AutoAnchorConfig $Config
-    if ($Config -and [string]$Config.mode -eq 'AutoAnchor' -and $aa.enabled) {
+    if (Test-AutoAnchorArmed $Config) {
+        $seconds += (Get-CodexProfileBudgetSeconds $Config).seconds
         $seconds += (Get-AnchorExecBudgetSeconds $Config) + $read.seconds
     }
     $coord = Get-CoordinationConfig $Config
@@ -719,10 +832,14 @@ function Test-ConfigShape {
             $issues += ("codex.autoAnchor.schedule has {0} slot(s) but maxPerDay is {1}; the daily cap would block later slots" -f @($aa.schedule).Count, [int]$aa.maxPerDay)
         }
         # Model / reasoning effort passthrough (codex exec -m / -c model_reasoning_effort=).
-        # Deliberately NOT a semantic whitelist: valid values (e.g. reasoning tiers)
-        # evolve with CLI/model versions, so only the safe shape is enforced. A
-        # typo'd value surfaces at exec time through the existing fail-closed
-        # ANCHOR_ABORTED path - after the config check would have had its chance.
+        # Only the safe SHAPE is enforced here - deliberately no static whitelist,
+        # because valid values evolve with CLI/model versions and this layer has no
+        # idea what the local Codex serves (doc v3.0 §5 设计原则: the catalog is the
+        # authority, and it is only reachable live). The semantic half of the check
+        # is CQK-038's resolver, which Install/Apply run against the real CLI before
+        # registering anything (§7), and the runner revalidates before every Claim
+        # (§8). A typo'd value therefore fails closed at install time when anchoring
+        # is armed, and at anchor time afterwards, instead of at exec time.
         if (-not [string]::IsNullOrWhiteSpace([string]$aa.model)) {
             if ([string]$aa.model -cnotmatch '^[A-Za-z0-9._-]{1,100}$') {
                 $issues += ("codex.autoAnchor.model must be 1-100 chars of letters/digits/dot/underscore/dash (got '{0}')" -f [string]$aa.model)
@@ -962,8 +1079,44 @@ function Exit-RunnerLock {
 # ---------------------------------------------------------------------------
 # External command execution: argument arrays only, no shell string interpolation.
 
+function Stop-ProcessTree {
+    # .NET Framework (Windows PowerShell 5.1) only exposes Process.Kill(), which
+    # terminates a cmd/npm wrapper but leaves its Codex child alive. Prefer the
+    # native tree overload where available; taskkill /T is the Windows fallback.
+    param(
+        [System.Diagnostics.Process]$Process,
+        [int]$WaitMilliseconds = 5000
+    )
+    if ($null -eq $Process) { return $true }
+    try { if ($Process.HasExited) { return $true } } catch { return $true }
+
+    try {
+        $Process.Kill($true)
+    } catch {
+        $taskkill = Join-Path ([Environment]::GetFolderPath('System')) 'taskkill.exe'
+        if (Test-Path -LiteralPath $taskkill) {
+            $killer = New-Object System.Diagnostics.Process
+            $killer.StartInfo = New-Object System.Diagnostics.ProcessStartInfo
+            $killer.StartInfo.FileName = $taskkill
+            $killer.StartInfo.Arguments = "/PID $([int]$Process.Id) /T /F"
+            $killer.StartInfo.UseShellExecute = $false
+            $killer.StartInfo.CreateNoWindow = $true
+            $killer.StartInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+            try {
+                [void]$killer.Start()
+                [void]$killer.WaitForExit($WaitMilliseconds)
+            } catch { } finally { $killer.Dispose() }
+        }
+    }
+    try {
+        if (-not $Process.HasExited) { $Process.Kill() }
+        [void]$Process.WaitForExit($WaitMilliseconds)
+        return [bool]$Process.HasExited
+    } catch { return $false }
+}
+
 function Invoke-External {
-    # Returns @{ ok; exitCode; stdout; stderr; timedOut }
+    # started distinguishes a confirmed launch failure from an uncertain outcome.
     param(
         [string]$FilePath,
         [string[]]$ArgumentList = @(),
@@ -1000,8 +1153,10 @@ function Invoke-External {
 
     $proc = New-Object System.Diagnostics.Process
     $proc.StartInfo = $psi
+    $started = $false
     try {
         [void]$proc.Start()
+        $started = $true
         if ($null -ne $StdinText) {
             $proc.StandardInput.Write($StdinText)
             $proc.StandardInput.Close()
@@ -1009,13 +1164,18 @@ function Invoke-External {
         $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
         $stderrTask = $proc.StandardError.ReadToEndAsync()
         if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
-            try { $proc.Kill($true) } catch { try { $proc.Kill() } catch { } }
-            return @{ ok = $false; exitCode = -1; stdout = ''; stderr = 'process timed out'; timedOut = $true }
+            $null = Stop-ProcessTree -Process $proc
+            return @{ ok = $false; started = $true; exitCode = -1; stdout = ''; stderr = 'process timed out'; timedOut = $true }
         }
         $stdout = $stdoutTask.GetAwaiter().GetResult()
         $stderr = $stderrTask.GetAwaiter().GetResult()
-        return @{ ok = ($proc.ExitCode -eq 0); exitCode = $proc.ExitCode; stdout = $stdout; stderr = $stderr; timedOut = $false }
+        return @{ ok = ($proc.ExitCode -eq 0); started = $true; exitCode = $proc.ExitCode; stdout = $stdout; stderr = $stderr; timedOut = $false }
+    } catch {
+        return @{ ok = $false; started = $started; exitCode = -1; stdout = ''; stderr = (Hide-SensitiveText $_.Exception.Message); timedOut = $false }
     } finally {
+        if ($started) {
+            try { if (-not $proc.HasExited) { $null = Stop-ProcessTree -Process $proc } } catch { }
+        }
         $proc.Dispose()
     }
 }
@@ -1064,7 +1224,7 @@ function Resolve-ExecutableLaunchSpec {
             # quote (or three) breaks the launch.
             $raw = '/d /s /c ""' + $Executable + '"'
             foreach ($a in $ArgumentList) { $raw += ' "' + ("$a" -replace '"', '') + '"' }
-            $raw += '""'
+            $raw += '"'
             return @{ exe = $comspec; args = @(); rawArgs = $raw }
         }
         default {

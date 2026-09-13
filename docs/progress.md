@@ -536,4 +536,293 @@ R19. `267073e` + 本次 docs commit **CQK-034/035 发布工程 + 收尾（README
   加 `.gitattributes` 属仓库级行为变更，留给用户定夺。
 - github MCP 本会话全程 400 连接失败，需用户检查其凭证配置（本轮所有平台查询改走 `gh api`）。
 
+---
+
+## 第四轮 v3.0 — 阶段 D：CQK-036 Anchor Audit 双写消除（2026-09-11 完成）
+
+基线 `cdca944`（= 文档 §「v3.0 基线」）。改动 4 个源文件 + 2 个规划文件。
+
+- **`auto-anchor.ps1` 改为纯业务模块**：删除全部 `Write-OutboxEvent` / `Write-HistoryEvent`
+  调用（原文档 P0-01 证据 :266-284 的双写点）。模块现在只**返回事件**，Runner 是唯一的
+  Event Persistence Owner（doc v3.0 §4）。
+- **新增 `New-AnchorInvocationId`**（:90-111）：一次物理 `codex exec` 一个 `anchorInvocationId`，
+  形如 `anchor-<yyyyMMddTHHmmss>-<6hex>`（与文档示例同形状）。摘要覆盖**全部**已 claim 的
+  trigger eventId（排序后拼接）+ startedAt + machineId + runId —— 修掉旧代码
+  `$anchorRecord.eventId = [string]$claimed[0]` 丢掉合并触发其余 id 的缺陷（§4.1：
+  trigger eventId 永远不能复用为模型调用 id）。
+- **`ANCHOR_EXECUTED` / `ANCHOR_ABORTED` 事件自带 `eventId = anchorInvocationId`**，并同时把
+  `anchorInvocationId` + 完整 `triggerEventIds` 嵌进 `anchor` 对象（`Sanitize-Record` 只保留
+  `anchor.*`，见 `common.ps1:249-272`，嵌套是唯一能落到本地 history 的路径），并携带
+  post-anchor 复验读到的 `windows`。Runner 不再需要第二遍就能按 invocation 键化审计。
+- **`runner.ps1`**：事件→日志循环与 significant→Outbox/History 写入逻辑保持单一路径，
+  只是补上 anchor 对象的传递（§9.1 要求 runtime log 必须携带 Anchor 对象，三处审计面不可漂移）。
+- **新增测试 T07 / T08**（doc v3.0 §19，`tests/auto-anchor.test.ps1` 两个新组）：
+  - **T07**（1 个 trigger → 1 exec = 1 Anchor Audit = 1 Outbox = 1 History）：读 schedule 到期槽
+    触发单次锚定，断言三处表面各恰好 1 条 `ANCHOR_EXECUTED`、0 条 `ANCHOR_ABORTED`、
+    exec 调用 1 次（`CQK_MOCK_EXEC_ARGS_FILE` 非空行数）、本地 history 无 `ANCHOR_LOCAL`、
+    claim 文件 1 条且 COMPLETED、invocation id 形状匹配 `^anchor-\d{8}T\d{6}-[0-9a-f]{6}$`、
+    同一 id 贯穿 history/outbox、outbox 记录带 `eventId` 且文件名（`BaseName`）即该 id、
+    trigger 数 1、claim 文件仍按 trigger eventId 键化、且 invocation id ≠ trigger id。
+  - **T08**（2 个 reset 同轮 → 2 Claim + 1 exec + 1 Invocation Audit）：用新夹具模式
+    `multi-reset-baseline` → `multi-reset`（两个 bucket 都带 primary 窗口，只有 resetsAt 前进，
+    普通 `multi-bucket` 模式做不到，已在 mock 注释里写明）触发同轮 2 个 reset，断言
+    2 claim / 1 exec / 三处表面各 1 条 invocation 审计、history 里 0 条 `ANCHOR_ABORTED`、
+    `triggerEventIds` 恰为 2 个且等于硬编码 SHA-256 输入（`bucket-a|primary|300|1788062400|reset`、
+    `bucket-b|primary|300|1788063000|reset`）、两个 claim 均 COMPLETED、每个 claim 都能映射到
+    已记录的 trigger，以及**第三滴答仍然安静**（1 次 exec、1 条 ANCHOR_EXECUTED，不重复审计）。
+- 顺带修正测试文件里三处断言缺陷：`ANCHOR_ABORTED` 期望值写反（1→0）；一条「trigger id 与
+  invocation id 不同」的断言实际是拿 claim 的 `eventId` 自比（恒真）→ 拆成真实的键化断言 +
+  `$inv -ne $claim.eventId`；以及使用了 `test-helper.ps1` 里**不存在**的 `Assert-NotEqual`
+  → 改 `Assert-True ($a -ne $b)`。
+- **回归**：`tests/run-all.ps1` PS7 17/17 文件通过；WinPS 5.1 全量跑 `16 passed, 1 failed`，
+  唯一失败是 `secret-scan.test.ps1` 报 `tmp-runall51.log` **正由另一进程使用**（后台跑全量时
+  它自己写的那个临时日志），删除日志后单跑 `powershell tests/secret-scan.test.ps1` → 0 失败。
+  属于自引用假阳性，非代码问题；`auto-anchor.test.ps1` 在 5.1 下 15 组全绿。
+
+### 下一步
+- 阶段 E：**CQK-037** 抽共享 JSON-RPC 会话层 `scripts/app-server-client.ps1`（把
+  `quota-client.ps1:12-156` 的 Start/Stop/Send/Wait/FailureDetail/ServerStartInfo 提出来，
+  由 `quota-client.ps1` dot-source ⇒ 5 个脚本 + 4 个测试的消费点零改动），新增
+  `Invoke-CodexConfigRead` / `Invoke-CodexModelList`（`nextCursor` 分页 + 严格页/条上限），
+  **同一 commit 扩 mock 的 `config/read` / `model/list` 处理器**（`default { }` 会静默吞新方法）。
+  注意 `Get-CodexAttemptBudgetSeconds` 的 `$script:CQK_JSONRPC_WAITS_PER_ATTEMPT = 2` 含义会随
+  同一会话追加 RPC 而改变，须与 CQK-031 的计划任务时限推导一起核算。
+
+## 会话：第四轮 阶段 E —— CQK-037 共享 JSON-RPC 会话层（完成）
+
+### 交付
+- **新增 `scripts/app-server-client.ps1`（~505 行）**：文档 §15「一份客户端，不是三份复制」的落点。
+  底层原语 `Start-CodexAppServerSession` / `Initialize-CodexAppServer` /
+  `Invoke-CodexAppServerRequest` / `Stop-CodexAppServerSession`，加上会话编排器
+  `Invoke-CodexAppServerSession -Body { param($Session,$Timeout,$Options) ... }`：启动、管道、
+  握手、**按 id 匹配响应**（服务端会插通知，绝不能「读下一行」）、超时、代理环境、脱敏、收尾
+  集中一处。高层能力 `Invoke-CodexRateLimitsRead`（仍在 quota-client）、`Invoke-CodexConfigRead`、
+  `Invoke-CodexModelList`。
+- **`Invoke-CodexModelList` 分页**：`CQK_MODEL_LIST_PAGE_SIZE=50` / `MAX_PAGES=6` / `MAX_ITEMS=300`
+  三重硬上限；`nextCursor` 逐页取，**取满或越界即 fail closed**（`ok=false` + `SCHEMA_UNKNOWN` +
+  「not fully read」），绝不把半份目录交给调用方去判「模型不存在」⇒ 直接封死 T05 的跨页误判。
+  空目录同样 fail closed。默认 `includeHidden=true`：宽目录只会让校验更宽松，窄目录会**误拒**
+  已武装的 AutoAnchor，代价不对称；hidden 条目只参与校验、永不执行。
+- **`Get-CodexAppServerConfigValue`（§23 白名单）**：`config/read` 返回体极大且含
+  `notify:[exe 绝对路径]`、`shell_environment_policy.set.*SHA256S`、`permissions`、
+  `instructions`、`cwd` 等；只投影 `model` / `model_reasoning_effort` / `model_provider` 三个键，
+  永不 `ConvertTo-Json` 整坨。`account/read` 带邮箱 PII ⇒ 不在 Profile 路径上。
+- **`scripts/quota-client.ps1`** 缩为「额度 schema」：`Invoke-CodexRateLimitsAttempt` 变成一层薄
+  `-Body` 回调；传输/握手/超时/收尾全部复用会话层。错误分类改走
+  `Get-CodexAppServerErrorKind -Code -Message`（CQK-043 的唯一扩展点）。
+- **`tests/fixtures/mock-appserver.ps1`** 同 commit 扩 `config/read` / `model/list` 处理器（否则
+  `default { }` 静默吞方法 ⇒ 测试挂到 TIMEOUT）。模式：`(default)` / `config-empty` /
+  `config-error` / `catalog-paged` / `catalog-cap` / `catalog-error` / `catalog-timeout` /
+  `catalog-badschema` / `catalog-hidden`；7 条合成条目，`mock-model-zeta` 专供「第 2 页命中」。
+- **新增 `tests/app-server-client.test.ps1`（118 checks / 11 组）**：纯投影测试（allowlist 三键 +
+  JSON 文本泄漏扫描；catalog 条目 6 键投影、`{reasoningEffort,description}` 对象数组必须投影成
+  字符串、噪声字段不落盘）+ e2e（单页 / T05 分页 4 页 7 条 / cap 停在第 6 页并 fail closed /
+  badschema / AUTH / 空目录 / includeHidden 双向 / 2 秒超时受约束 / SETUP_ERR / 消息无凭据形状）。
+- **`docs/architecture.md:15`** 模块树补上 `app-server-client.ps1`。
+
+### 预算耦合决策（本 ticket 只记录，不重构）
+`common.ps1:26` 的 `$script:CQK_JSONRPC_WAITS_PER_ATTEMPT = 2` 一路喂给
+`Get-CodexTickBudgetSeconds` → `Get-KeeperTaskExecutionTimeLimit`（CQK-031）。本次抽层**没有改变
+额度路径的往返次数**（变的只是谁持有管道），因此在 `Get-CodexAttemptBudgetSeconds` 里补一段
+「Scope note (CQK-037)」：该常量**只计额度读路径**；Profile 路径会分页（握手 + config/read + 1..N
+页），等 CQK-038/040 把它真正放进 tick 时，必须作为**自己的有界上限**加入，而不是把
+waits-per-attempt 调大。于是 6 处钉死的数字（40 / 80 / 140 / 720 / 940 / 260，以及 12 分钟合法 vs
+11 分钟被拒的边界）全部保持不动，留到那个 commit 里一起有意识地改。
+
+### 回归
+- `tests/run-all.ps1`：**PS7 18/18 通过**；**WinPS 5.1 18/18 通过**（含新文件，无 5.1 语法事故）。
+- PSScriptAnalyzer：**ERRORS=0**。本次只对新增/改动的 5 个文件跑（40 项，全为 Warning/Info）；
+  仓库级基线仍是上一轮的 ERRORS=0 / TOTAL=63，未因本次改动上升。
+  （CI 本身不跑 analyzer —— `.github/workflows/test-windows.yml` 只有 PS7、WinPS 5.1 两个
+  全量 run 加一个 quota-client 单跑，所以 analyzer 是本地门禁。）
+- `secret-scan` 作为测试文件本身在 CI 里跑；工作树内无临时日志文件。
+
+### 下一步
+- 阶段 E 续：**CQK-038** 新建 `scripts/codex-profile.ps1`（§6.1 结构 + §6.2 优先级 +
+  「必须与真正 codex exec 同一 Codex 环境」+ L1/L2/L3 三层语义校验，仓库内零静态模型白名单），
+  并在 `common.ps1` 加 `Get-ExecutionProfilePath`；一并决定 Profile 解析进 tick 的预算上限。
+
+## 会话：第四轮 阶段 E —— CQK-038 Execution Profile Resolver（完成）
+
+### 交付
+- **新增 `scripts/codex-profile.ps1`（302 行）**：
+  - `New-ExecutionProfile` —— §6.1 结构唯一构造点。字符串字段归一为 `''` 而非 `$null`：
+    5.1 的 `ConvertTo-Json` 把 `$null` 写成 `""`，缓存往返后语义会漂移。
+    `errorKind` / `retryable` 刻意**不属于** §6.1：它们描述本次解析尝试，按 §23 永不落盘。
+  - `Get-ExecutionProfileSelection` —— **纯函数**（无 I/O、无子进程），承载 §6.2 优先级 +
+    L2/L3 判定：model = 显式 > `config/read.model` > `model/list` 默认条目；
+    effort = 显式 > `config/read.model_reasoning_effort` > 目标模型 `defaultReasoningEffort`。
+    失败时**仍然返回已解析到的部分值**，让 §9 审计能看到「被拒绝时已知什么」。
+  - `Resolve-ExecutionProfile` —— 一次 `Invoke-CodexAppServerSession` 里读完 config/read +
+    分页 model/list。**一个会话 = 一个子进程 = 一个环境**，正是 §6.2 硬要求；
+    并且**不做代理直连回退**（与额度读路径相反）：回退会替另一个环境答题。
+  - `Get-/Write-/Read-ExecutionProfileCache` —— §14.1 `runtime/execution-profile.json`
+    是**白名单投影**（7 键），不是 Profile dump；写失败只报告不抛（缓存是便利，磁盘满不该毁掉一次锚定）。
+- **`scripts/app-server-client.ps1`**：`Get-CodexErrorRetryable`（§11 表的唯一实现）、
+  `Invoke-CodexConfigReadInSession`、`Invoke-CodexModelListInSession`（同一分页/上限实现复用到会话内）。
+- **`scripts/common.ps1`**：`Get-ExecutionProfilePath`（:79）、`$script:CQK_PROFILE_WAITS_CEILING = 8`、
+  `Get-CodexProfileBudgetSeconds`（:391-412）。
+- **`tests/fixtures/mock-appserver.ps1`**：`initialize` 分支按 `CQK_MOCK_SESSIONS_FILE` 记一行会话，
+  让「一次解析只用一个会话」变成可断言的事实；新增 `config-empty` / `config-error` / `catalog-*` 夹具。
+- **新增 `tests/codex-profile.test.ps1`（133 checks / 11 组）**：§6.2 双优先级、L2「从未存在」与
+  「已退役」分离、L3 支持/不支持/无能力清单、T01（形态问题留在配置层，消息**不得**提 catalog）、
+  T02/T03/T06 走真实读路径、T05 跨页命中不得判 INVALID、一次会话、§23 隐私（config 噪声零泄漏）、
+  §14.1 缓存白名单 + 投毒 Profile 无法夹带、§11 retryable（TIMEOUT→true、AUTH→false、PROFILE_INVALID→false）、
+  预算上限与分页上限不可脱钩。
+- **`docs/architecture.md`**：模块树补 `codex-profile.ps1`，「关键设计」补执行画像一节。
+
+### 三个刻意的设计决定
+1. **hidden/retired → INVALID，但理由文本与「不在目录中」不同**。客户端主动带 `includeHidden`，
+   就为了区分「打错字」和「CLI 升级后模型退役」——同一个 verdict，修法完全不同（T06 的解析半边）。
+2. **目录条目没有 `supportedReasoningEfforts` → UNAVAILABLE + `SCHEMA_UNKNOWN`**，不是 VALID。
+   这是 §21「无法证明有效即视为无效」的 fail-closed 读法：一份不声明能力的目录证明不了任何事。
+3. **`Get-CodexProfileBudgetSeconds` 只定义、不接入** `Get-CodexTickBudgetSeconds`。
+   接入会立刻改掉 6 处钉死的预算数字，而那是 CQK-040 把画像放进 tick 时才该付的账；
+   两者关系用 `Assert-Equal 8 ($script:CQK_PROFILE_WAITS_CEILING) (2 + $script:CQK_MODEL_LIST_MAX_PAGES)`
+   钉住，防止分页上限调整后天花板悄悄失真。
+
+### 回归
+- `tests/run-all.ps1`：**PS7 19/19 通过**；**WinPS 5.1 19/19 通过**。
+- PSScriptAnalyzer（本次 5 个文件）：**ERRORS=0 / TOTAL=35**；仓库级 `scripts` 递归基线
+  ERRORS=0 / TOTAL=70，规则种类未新增。
+  期间修掉局部变量级的 `PSAvoidAssignmentToAutomaticVariable`：`Resolve-ExecutionProfile` 内的
+  `$profile` 与自动变量 `$PROFILE` 同名 → 改 `$prof`。函数**参数** `-Profile` 保留：它只在函数
+  作用域内遮蔽、而画像路径从不读 `$PROFILE`，且 `github-sync.ps1` 的 `$args`、
+  `logger.ps1`/`runner.ps1` 的 `$Event` 是同一取舍的既有先例；调用点写成 `-Profile $prof` 仍清晰。
+  （CI 本身不跑 analyzer，与 CQK-037 一节所述一致，analyzer 是本地门禁。）
+- `tests/secret-scan.ps1` 独立跑：**84 files, no path exclusions, 0 issues**。
+  新测试里的「投毒 token」最初写成一个 `sk-` 开头、后接 20+ 个单词字符的字面量，被扫描器的
+  `sk-[A-Za-z0-9_\-]{20,}` 命中——改为拼接构造，与 `secret-scan.test.ps1` 自身遵守的规则一致。
+
+### 一次假失败的教训（值得复述）
+第一轮 e2e（T04）14 项全报 `errorKind=TIMEOUT`，而它后面的组全绿。根因**不是代码**：
+`catalog-timeout` / `timeout` 夹具会 `Start-Sleep -Seconds 120`，上一轮遗留的 mock 子进程
+还在睡眠就抢走了子进程 spawn 资源。排查时踩到第二个坑——用 `Win32_Process.CommandLine -like
+'*mock-appserver*'` 找残留，探测命令自身（以及 Git 的 bash 包装）也含该字符串，于是「查到 1 个」
+是假的。正确姿势：按 `Name` 过滤 + 排除自身 PID + 看 `CreationDate` 年龄再信数字。
+
+## 会话：第四轮 阶段 F —— CQK-039 Install/Apply armed gate（完成）
+
+### 交付
+- **`scripts/install.ps1`（新增 `Get-ExecutionProfileGate` :200-273 / `Get-ExecutionProfileGateSummary` :275-293）**：
+  §7 门禁表的唯一实现点。返回 `@{attempted; armed; validation; profile; issues; warnings; cache}`。
+  三种走法各自明确：VALID → 写缓存后干净返回；INVALID → 写缓存（面板要知道最后一次真实结论）；
+  **UNAVAILABLE → 刻意不碰缓存**（读失败证明不了任何事，覆盖掉上次 verdict 会让离线面板撒谎）。
+  armed 时产 1 条 issue（文案尾随 `$Stage` 区分「任务未注册」/「既有计划任务保持不变」）；
+  非 armed 时产 1 条 warning，`issues` 保持为空 —— 因为本仓库里非空 `issues` 即 `ok=$false`，
+  把 MonitorOnly 的模型笔误算作 issue 就等于把只读安装变成不可安装，正是 §7 明令禁止的那一格。
+- **`Invoke-KeeperInstall` 第 3 步（:330-343）**：门禁位于环境校验与额度探测**之后**、
+  `if ($issues.Count -gt 0) { return }` **之前**，因此阻断时 Task Scheduler 一次都没被碰过。
+  前置条件 `$pf.codexPath -and $issues.Count -eq 0`：已知损坏的环境不再开 app-server 会话。
+  `-SkipProbe` **不**跳过门禁（§14.1 要 Install/Apply 走 Live 强校验，可绕过的门禁不是门禁）。
+  每条返回都带 `warnings` + `profile`；控制台多打 `[WARN]` 行与 `Execution profile:` 一行摘要。
+- **`scripts/apply-config.ps1`（:41-45）**：`Resolve-CodexCommand` 后立刻过门禁，位置在**两次**
+  `Register-KeeperTask`（:52/:55）**之前**。注册是对 live 任务的 read-modify-write 且无回滚，
+  所以「先门禁、后写」是让 §7「Apply 失败必须保持原有计划任务配置不变」在结构上成立、
+  并可被测试廉价验证（只需断言 live 任务的 interval / Description 仍是旧值）的唯一次序。
+- **`scripts/common.ps1`**：新增 `Test-AutoAnchorArmed`（mode=AutoAnchor AND enabled=true 的**唯一拼法**），
+  并把 `Get-CodexTickBudgetSeconds`(:448)、`runner.ps1`(:212)、任务描述(:149)、本门禁(:239) 四处
+  手写合取统一收敛到它；`Test-ConfigShape` 里模型/等级的注释改为「形态归 L1，语义归 CQK-038 解析器 +
+  §7 门禁 + §8 的 Claim 前复验」。
+- **`tests/install-status.test.ps1`（+6 组）**：T02 端到端阻断（`Installed: NO`，并用
+  `Assert-False (Test-Path $env:CQK_MOCK_EXEC_ARGS_FILE)` 兑现「codex exec = 0」）、
+  UNAVAILABLE×3（`config-error` / `catalog-error` / `catalog-badschema`，刻意不含会睡 120s 的
+  `catalog-timeout`）、非 armed 两格仅警告 + 端到端 MonitorOnly 仍可安装、blocked Apply 不动 live 任务、
+  §14.1 缓存（VALID 写 / UNAVAILABLE 不改 / INVALID 更新 + §23 裸文本负向扫描）、门禁摘要四态。
+
+### 两个必须记下的坑（详见 findings.md）
+1. `Test-ConfigShape` 自带 `codex.queryTimeoutSeconds >= 5` 硬下限：把测试配置的 timeout 调到 2s
+   不会让门禁更快，只会让配置在 L1 就被判非法、门根本不开，表现为 `$blocked.profile` 为 `$null`
+   连带 4 FAIL + 1 终止性错误。修法是夹具默认 `-Timeout 5` **且**在 `New-ArmedCfg` 内 fail-fast
+   `throw`，让未来任何 L1 规则漂移都无法再伪装成 Profile 判定。
+2. `docs/` 也在 `tests/secret-scan.ps1` 扫描范围内：本节上一版草稿原文引用了一个凭据形状的字面量，
+   直接把 `secret-scan.test.ps1` 打挂。规划笔记描述凭据只能用文字。
+
+### 回归
+- `tests/install-status.test.ps1`：PS7 单文件 EXIT=0（18 组，含本次 6 组）；WinPS 5.1 单文件 EXIT=0。
+- `tests/run-all.ps1`：**PS7 19/19 通过**；**WinPS 5.1 `RESULT: all 19 test file(s) passed.`**
+- PSScriptAnalyzer（本次 6 个文件）：**ERRORS=0 / TOTAL=31**。其中 3 条
+  `PSAvoidAssignmentToAutomaticVariable` 逐文件定位后确认为**既有基线**：
+  `codex-profile.ps1` :264/:287 的公开参数 `-Profile`（仅函数作用域内遮蔽，画像路径从不读 `$PROFILE`）、
+  `runner.ps1` :37 的 `$Event`（`logger.ps1` 同规则的先例）。仓库级 `scripts` 递归基线仍是
+  ERRORS=0 / TOTAL=70，规则种类未新增。（CI 不跑 analyzer，analyzer 是本地门禁。）
+- `tests/secret-scan.ps1`：脱敏后 0 issues。
+
+### 下一步
+- 阶段 F 续：**CQK-040** 在 `Invoke-AutoAnchorIfNeeded` 的 **Claim 之前**（auto-anchor.ps1:164-169
+  守卫、:180-189 认领）做 Live Profile 复验：INVALID/UNAVAILABLE → 审计留 skip 记录、不 claim、
+  不 exec、下一轮可复验；同时把 `Get-CodexProfileBudgetSeconds` 正式接入
+  `Get-CodexTickBudgetSeconds`，并重新核对 6 个钉死的预算数字。
+
+---
+
+## 阶段 F 续：CQK-040 运行期 Claim 前 Live 复验（2026-09-12，进行中）
+
+### 本次提交（WIP）包含什么
+`auto-anchor.ps1` 的门禁主体已落地并接到 Claim 之前：新增
+`New-AnchorProfileGateEvent`（事件名 `ANCHOR_PROFILE_INVALID` / `ANCHOR_PROFILE_UNAVAILABLE`，
+`anchor.phase='PROFILE_VALIDATION'`，逐字段复制画像身份，**不含** `anchorInvocationId`、
+不含 `windows`——§4.1 的调用审计只挂在真实 exec 上）与 `Get-AnchorProfileGate`
+（`Resolve-ExecutionProfile` + 缓存写入策略：VALID/INVALID 写缓存、UNAVAILABLE 不写）。
+**不动任何计数**（T10）。`Invoke-AutoAnchorIfNeeded` 里 `$execWindowMinutes` / `$localOnly`
+提到门禁之前计算，门禁紧随 `$guard.should` 之后；Claim 之后那段
+「codex executable not found」skip 已删除（被门吸收，reason 文案原样保留）。
+exec 参数改由 `Get-ExecutionProfileExecArgs -Profile $gate.profile` 提供（只传 configured 值）。
+
+### 已知未完成 / 提交时状态非绿（诚实记录）
+- 计划六步里只做了 1、2 的门禁部分与 3 的一部分：**runner.ps1 的 ERROR 名单未加新事件名**、
+  `$significant` 有意不加（决定见下）、**`auto-anchor.test.ps1:493` 夹具仍是真实模型名
+  `gpt-5-codex`**（新门禁下 Runtime 会判 INVALID → 该组断言必然失败）、T06/T10 新测试组未写。
+- 本次提交**未跑过 `tests/run-all.ps1`**，只做了三脚本的 AST 语法解析（通过）。
+  也就是说：这是一个进行中的检查点提交，不是可发布的 CQK-040 完成态。
+
+### 已落地的四块（均未提交，工作区 dirty）
+1. `scripts/common.ps1` — `Get-CodexTickBudgetSeconds` 的 armed 分支正式加入
+   `(Get-CodexProfileBudgetSeconds).seconds`：armed 配置每次 tick 在 Claim 前多一个 app-server
+   会话，任务时间上限必须为它付费。三处注释同步（attempt budget 不再预告「CQK-040 会加进来」、
+   profile budget 从「尚未接入」改为「已接入并解释为何是 ceiling 而非 wait count」）。
+2. `tests/common.test.ps1` — 重钉两个预算数字：armed timeout=20 → **140→300**；
+   armed timeout=100 + 双 sync → **940→1740**（200 read + 800 profile + 300 exec + 200 verify + 240 git）。
+   逐条复核其余断言：MonitorOnly / 未 armed = 40 不变；poll-fit 边界 13/12/11/10 与 `aaTight`
+   （timeout 100 + poll 15 仍拒）不受影响；`install-status.test.ps1:117` 的 260 不变（MonitorOnly 无 profile 项）。
+   **扫过全部测试夹具：没有任何 poll 值需要改**（`auto-anchor.test.ps1` 基座 timeout 15 + 双 sync
+   → 480 s → 8 min → 10 min 下限，poll-fit 走默认 60）。
+3. `scripts/codex-profile.ps1` — 新增 `Get-ExecutionProfileExecArgs -Profile`：exec 只拿
+   **config.json 显式配置**的 `configuredModel` / `configuredReasoningEffort`，绝不拿
+   effective 值改写调用。理由写进注释：画像的职责是**证明**这次调用安全，不是重写它——
+   否则「验证过一个模型、执行另一个」会让本工单的复验形同虚设。
+4. `scripts/auto-anchor.ps1` — 补上缺失的 `codex-profile.ps1` 带守卫 dot-source
+   （:30-32）。此前 runner 进程根本没加载画像模块，`Resolve-ExecutionProfile` 在
+   `auto-anchor.ps1` 里不可见——这是接线缺口，不补上后面的门禁会直接 CommandNotFound。
+
+### 还剩的六步（顺序即实现顺序）
+1. `Get-AnchorProfileGateState` 门禁辅助（auto-anchor.ps1 内）：
+   `-Attempted=$false` ⇒ 只发事件不改任何计数（T10）；`$true` ⇒ bump count + Fail-AnchorClaim + Add-ProcessedEvent。
+2. 把 `Test-AnchorPromptAllowed` 与 `Resolve-CodexCommand` 两个 pre-exec skip **提到 Claim 之前**，
+   与 Live 复验合并成同一道门；事件名用 `ANCHOR_PROFILE_INVALID` / `ANCHOR_PROFILE_UNAVAILABLE`
+   （绝不复用 `ANCHOR_SKIPPED`），带 `errorKind` 与完整 `anchor` 对象（phase=`PROFILE_VALIDATION`）。
+   三个既有 try 块（prompt 白名单 :214-222、codex 路径 :224-233、Claim 后 lease 复验）语义不变。
+3. `Test-ShouldAnchor` 的 Force 分支加 `State.anchors.anchorOnApplyAttempted` 日级幂等标志
+   （过了门才置位；门失败则下一分钟仍可重试）。
+4. `runner.ps1:246` ERROR 事件名单加入两个新名字；**刻意不加入 `$significant`**（:258）——
+   门禁失败没有任何状态变化，进远程 history 会变成每轮一条噪声。这是 §9.1 的一处有意解释，需记入 findings.md。
+5. 夹具重指：`auto-anchor.test.ps1:493` `model='gpt-5-codex'` → `mock-model-alpha` + `reasoningEffort='low'`
+   （alpha 是唯一 effective effort 与 `config/read` 的 `high` 不同的条目，仍能证明 `explicit` 来源），
+   历史断言正则同步；真实模型名不得进仓库（§22）。
+6. 新测试组：T06/T10（Runtime INVALID；claim 文件 0、exec 文件 0、`$State.anchors` 不变、
+   且**下一轮仍能走到门** ⇒ 无锁死）、UNAVAILABLE（`catalog-error`）变体、T04/T16 画像身份三表面。
+
+### 已核实的两个安全性质（写码前用只读检查确认）
+- **不会锁死**：`Test-ShouldAnchor` 的开放错误扫描只匹配 `LIMIT_REACHED`/`AUTH_ERROR`/`SCHEMA_UNKNOWN`
+  (+`READ_FAILED`)；reset/schedule 的 eventId 由快照稳定字段推导，只要不写 `Add-ProcessedEvent`，
+  下一轮同一事件必然重新可选——这正是门禁必须位于 Claim 之前的全部理由（§8 关键顺序）。
+- **Status 面板**：新事件名不会触发任何新 finding code（`Read-StatusLogTail` 按
+  `RUNNER_OK`/`RUNNER_ERROR` 重置判定）；唯一影响是 `status.ps1:177-179` 的 `lastError`
+  会显示它，且 §10 在判定新鲜时降级为 INFO。级别仍取 ERROR：armed 却锚不动是运维必须看见的状态。
+
+### 待跑的回归（提交前门禁）
+`tests/run-all.ps1` PS7 全量 + WinPS 5.1 全量 + PSScriptAnalyzer（`codex-profile.ps1` 行数已变，
+:264/:287 两条既有 `PSAvoidAssignmentToAutomaticVariable` 基线位置需重新定位）+ `tests/secret-scan.ps1`。
+
+
 
