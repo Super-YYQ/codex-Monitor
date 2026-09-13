@@ -128,7 +128,7 @@ codex-quota-keeper/
 
 2026-09-13 接续状态：CQK-040~046 实现已完成；默认全量 23 套测试在 PS7/PS5.1 均通过、0 跳过，
 7 套使用临时本地 Git push 的集成测试已在明确授权后执行，CQK-047 完成；CQK-048 继续保持未完成。
-本地候选 d95887d、分析器/凭据扫描/重复打包证据详见 [产品就绪审查](production-readiness.md)。
+本地候选程序提交 ab8f6a7、分析器/凭据扫描/重复打包证据详见 [产品就绪审查](production-readiness.md)。
 
 依据 `C:\Users\Administrator\Desktop\codex-Monitor_P0级修复优化设计_v3.0.docx`
 （提取文本 469 行，见 findings.md「v3.0 文档要点」）。基线 `cdca944`。实施顺序按文档 §18。
@@ -175,12 +175,14 @@ codex-quota-keeper/
 - [x] CQK-047 T01~T20 测试矩阵；T19 PS7 + T20 WinPS 5.1 全绿。
       夹具 `tests/fixtures/mock-appserver.ps1` 必须新增 `config/read` / `model/list`（含分页）响应
       ——现有 `default { }` 会静默吞掉新方法，导致超时而非明确失败。
+- [x] Windows PowerShell 5.1 `.cmd` 超时进程树回归：先复现遗留子进程，再验证共享终止逻辑；
+      源码与解压候选在 PS7/PS5.1 均通过，残留测试进程为 0。
 
 ## 阶段 K：发布门禁（CQK-048）
 - [ ] CQK-048 双机真机 soak + 故障注入 = Release Gate —— **由用户排期执行**；
       完成前不打 tag / 不建 Release。文档与 `docs/soak-runbook.md` 同步新增判据。
 
 ## 收尾
-- [ ] run-all.ps1 PS7 + WinPS 5.1 双运行时全绿；PSScriptAnalyzer ERRORS=0；secret-scan 通过
+- [x] run-all.ps1 PS7 + WinPS 5.1 双运行时全绿；PSScriptAnalyzer ERRORS=0；secret-scan 通过
 - [ ] golden 面板按新输出重生成；README / config.example.jsonc / CHANGELOG / docs/scenarios.md 同步
 - [ ] 落 main：feature branch → PR → CI 绿 → merge（禁直接 push main，GH013 实测）

@@ -11,3 +11,5 @@
 最终收尾：本地候选提交 d95887d。PS7/PS5.1 各 15 套首轮通过，common 旧引号断言修正后分别重跑通过，最终选定 16 套都有通过证据；7 套 push 测试未运行。分析器 0 Error、66 非 Error findings，仓库凭据扫描通过。两次 ZIP 78 文件且哈希一致；解压后 cmd CRLF 与状态入口双运行时通过。报告已记录 SHA-256 及测试日志位置。后续只追加验证记录文档，不改变候选程序。
 
 2026-09-13：用户明确授权测试 fixture push。PS7 与 Windows PowerShell 5.1 默认 `run-all.ps1` 均完成：23 个测试文件通过、0 跳过；只向测试创建的临时本地 bare 仓库 push，未访问项目远端。CQK-047 已关闭，CQK-048 真机双机 soak/真实 CLI 冒烟仍是唯一发布验收门禁。
+
+2026-09-13：追加复现 Windows PowerShell 5.1 在 `.cmd` 包装器超时后遗留 app-server 子进程；红测确认后实现共享进程树终止并覆盖 app-server/exec。提交 `ab8f6a7` 上重新执行 PS7/PS5.1 默认全量，各 23 文件通过、0 跳过；解压候选的 status-entry 与 quota-client 双运行时均通过，残留测试进程为 0。PSScriptAnalyzer 1.25.0 递归分析 0 Error/120 非 Error findings，凭据扫描 97 文件通过。两次 78 文件 ZIP 的 SHA-256 均为 `010f526fc8e9ad0d5a2249b991c92b447c80cfc64a3426bd54b9f36dc74a92bf`。

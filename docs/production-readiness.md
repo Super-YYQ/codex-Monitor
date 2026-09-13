@@ -1,4 +1,4 @@
-# 产品就绪审查（2026-09-12）
+# 产品就绪审查（2026-09-13）
 
 当前结果是待发布验收的候选版本，不能据此宣称已完成大规模使用验收。默认仍为 Windows Task Scheduler 零常驻 MonitorOnly；AutoAnchor 保持实验性、显式开启。未改变产品定位，也未引入服务端或常驻进程。
 
@@ -7,7 +7,8 @@
 - 审查基线：`origin/main` 的 `cdca944`；遗留修复分支：`origin/feat/p0-hardening-cqk-036` 的 `6b626e1`。
 - 本地原 main `019ef80` 与历史重写后的 `85ee79b` 文件树完全一致；保留原 main，在 `codex/production-readiness` 接续遗留工作，避免按分支距离误判为内容冲突。
 - CQK-036~039 已有实现，CQK-040 原为未回归的 WIP；本次补齐 CQK-040~046 及审查发现，CQK-047 双运行时全量矩阵已通过，CQK-048 真机验收仍有门禁。
-- 未执行任何 `git push`，未修改实际部署的产品计划任务，未发起真实模型调用。
+- 当前程序候选提交为 `ab8f6a79bbc8f3dbc9b2a7fac2ab5beaab120174`；后续文档提交不改变候选包内的产品文件。
+- 未向项目远端执行 `git push`；经授权的测试只推送到临时本地 bare 仓库。未修改实际部署的产品计划任务，未发起真实模型调用。
 
 ## 双轴审查与修复
 
@@ -25,6 +26,7 @@
 | Spec | `status.cmd -Live` 静默忽略参数 | 支持 Live/Detailed/NoColor/--no-pause，未知参数返回 2，保留子进程退出码 |
 | 追加复现 | 日志列表嵌套、单条日志退化 | 统一列表枚举，覆盖真实日志文件的健康判断 |
 | 追加复现 | `.cmd` 启动器多余引号与 ZIP 中 LF 字节 | 修复命令构造；批处理提交 CRLF 原始字节，实际入口回归通过 |
+| 追加复现 | Windows PowerShell 5.1 超时只终止 `.cmd` 包装器 | 共享进程树终止：现代运行时使用 `Kill(true)`，5.1 使用隐藏的 `taskkill /T /F`；app-server 与 `codex exec` 共用 |
 
 实现沿用共享 JSON-RPC 会话层、Execution Profile Resolver 和 Runner 单一审计写入者；没有充分证据需要替换整个架构。
 
@@ -49,7 +51,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File codex-quota-keeper/tests/run
 
 经明确授权，默认 run-all 已完整执行。7 套 Git 集成测试只向各自创建的临时本地 bare 仓库 push：anchor-claim、auto-anchor、concurrency、github-sync、global-backoff、leader-lease、runner；没有访问或推送项目远端。`-ExcludeGitPush` 仍可用于不允许 fixture push 的受限环境，但不能替代发布矩阵。
 
-新增 readiness 39 项、outbox-readiness 12 项、status-entry 5 项检查已通过定向验证；install-retry 11 项检查已通过。覆盖模型修正后的 reset 重试、无启动退款、失败计数、强制调用限制、旧状态迁移、三处审计脱敏、损坏 outbox 保留、真实 cmd 参数和退出码。
+新增 readiness 39 项、outbox-readiness 12 项、status-entry 5 项检查已通过定向验证；install-retry 11 项检查已通过。覆盖模型修正后的 reset 重试、无启动退款、失败计数、强制调用限制、旧状态迁移、三处审计脱敏、损坏 outbox 保留、真实 cmd 参数和退出码。另以先失败后修复的回归证明 PS5.1 的 `.cmd → PowerShell → app-server` 超时会终止整棵进程树；完整矩阵及解压候选复测后均无测试进程残留。
 
 双运行时最终套件、分析器与候选 ZIP 的结果见下表。测试只涉及临时工作区、模拟 CLI，install-status 使用独立临时任务名。
 
@@ -58,18 +60,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File codex-quota-keeper/tests/run
 | PowerShell 7 默认全量 | `RESULT: 23 test file(s) passed; 0 skipped.` |
 | Windows PowerShell 5.1 默认全量 | `RESULT: 23 test file(s) passed; 0 skipped.` |
 | Git 集成范围 | 临时本地 bare 仓库的 Claim/CAS/并发/历史/退避/租约/Runner 路径全部执行通过；项目远端未 push |
-| 静态分析 PSScriptAnalyzer 1.25.0 | 0 Error，66 条非 Error findings；未把此结果称为零告警 |
-| 仓库凭据扫描 | 93 文件、无路径排除，未发现凭据模式；构建门禁再次通过 |
+| 静态分析 PSScriptAnalyzer 1.25.0 | 对 `codex-quota-keeper/` 递归分析：0 Error，120 条非 Error findings；未把此结果称为零告警 |
+| 仓库凭据扫描 | 97 文件、无路径排除，未发现凭据模式；构建门禁再次通过 |
 | Git 差异检查 | 暂存 diff --check 通过；CRLF 按批处理属性处理 |
-| 候选源提交 | `d95887dbc89e8d28c197fe24ebd1a9022f960f05` |
+| 候选源提交 | `ab8f6a79bbc8f3dbc9b2a7fac2ab5beaab120174` |
 | 重复构建 | 两次 ZIP 均为 78 文件，同一 SHA-256（如下） |
-| 解压验证 | 5 个 cmd 均为 CRLF；解压后状态入口回归在 PS7/PS5.1 各 5 项通过 |
+| 解压验证 | 5 个 cmd 均为 CRLF；状态入口在 PS7/PS5.1 各 5 项通过；quota-client（含包装器超时进程树）在两个运行时均退出 0 |
 
-候选 ZIP：`codex-quota-keeper/tools/dist/readiness-a/codex-quota-keeper-v0.9.0-beta.zip`，
-SHA-256：`f7fb11f5cb67a83201d83d986383fbdddba3dc84afeeb0e83de7c5fc39d24d48`。
+候选 ZIP：`codex-quota-keeper/tools/dist/readiness-final-a/codex-quota-keeper-v0.9.0-beta.zip`，
+SHA-256：`010f526fc8e9ad0d5a2249b991c92b447c80cfc64a3426bd54b9f36dc74a92bf`。
 产物为本地候选、已被 Git 忽略，没有上传。完整 PS7 日志保存在
-`$env:TEMP/cqk-readiness-20260912-full/ps7-full.txt`，完整 PS5.1 日志保存在
-`$env:TEMP/cqk-readiness-20260913-full/ps51-full.txt`。
+`$env:TEMP/cqk-readiness-ab8f6a7/ps7-full.txt`，完整 PS5.1 日志保存在
+`$env:TEMP/cqk-readiness-ab8f6a7/ps51-full.txt`。
 
 ## 尚未关闭的发布门禁
 
