@@ -14,13 +14,18 @@ param(
     [string]$ConfigFile = '',
     [string]$KeeperRoot = '',
     [switch]$NoSync,
-    [switch]$ForceAnchor
+    [switch]$ForceAnchor,
+    [switch]$FromAlarm,
+    [ValidateRange(0, 3600)][int]$WaitLockSeconds = 0
 )
 
 $ErrorActionPreference = 'Stop'
 $scriptDir = Split-Path -Parent $PSCommandPath
 foreach ($mod in @('common', 'logger', 'quota-client', 'state-machine', 'github-sync', 'leader-lease', 'global-backoff', 'preflight')) {
     . (Join-Path $scriptDir "$mod.ps1")
+}
+if (Test-Path (Join-Path $scriptDir 'anchor-alarm.ps1')) {
+    . (Join-Path $scriptDir 'anchor-alarm.ps1')
 }
 if (Test-Path (Join-Path $scriptDir 'auto-anchor.ps1')) {
     . (Join-Path $scriptDir 'auto-anchor.ps1')
@@ -58,7 +63,7 @@ try {
     $script:CqkLogging = Get-LoggingConfig $cfg
 
     # ---- local mutual exclusion (two layers, doc 03 §9) --------------------
-    $lock = Enter-RunnerLock $KeeperRoot
+    $lock = Enter-RunnerLock -Root $KeeperRoot -WaitSeconds $WaitLockSeconds
     if (-not $lock.acquired) {
         $skipText = 'another runner instance holds the local lock'
         if ($lock.detail) { $skipText = "another runner instance holds the local lock ($($lock.detail))" }
@@ -164,6 +169,7 @@ try {
         $state.lastGoodReadAt = Get-IsoTimestamp
         $state.consecutiveReadFailures = 0
         $state.buckets = $read.buckets
+        Update-ExpiryTrack -State $state -Buckets $read.buckets
         $state.rateLimitReachedType = $read.rateLimitReachedType
         $state.schemaUnknown = $read.schemaUnknown
         $state.lastError = $null
@@ -178,7 +184,6 @@ try {
             $null = Set-GlobalBackoff -Config $cfg -KeeperRoot $KeeperRoot -Minutes 120 -Reason 'auth_error' -Machine $machine
         } elseif ($read.errorKind -in @('NETWORK_ERROR', 'TIMEOUT', 'EOF')) {
             Set-Backoff -Root $KeeperRoot -Minutes 10 -Reason 'network'
-            $null = Set-GlobalBackoff -Config $cfg -KeeperRoot $KeeperRoot -Minutes 10 -Reason 'network_error' -Machine $machine
         } elseif ($read.errorKind -eq 'RATE_LIMITED') {
             Set-Backoff -Root $KeeperRoot -Minutes 60 -Reason '429'
             $null = Set-GlobalBackoff -Config $cfg -KeeperRoot $KeeperRoot -Minutes 60 -Reason '429' -Machine $machine
@@ -203,41 +208,29 @@ try {
     # config (codex.autoAnchor.anchorOnApply).
     $isLeader = ($election.role -eq 'LEADER' -and ($null -ne $election.lease -or [bool]$election.localOnly))
     if (Test-AutoAnchorArmed $cfg) {
-        $pending = @{}
-        foreach ($ev in @($state.pendingAnchorEvents) + @($events)) {
-            if ($ev -and $ev.event -eq 'WINDOW_RESET_OBSERVED' -and $ev.eventId -and
-                @($state.processedEventIds) -notcontains [string]$ev.eventId) {
-                $pending[[string]$ev.eventId] = @{ event = 'WINDOW_RESET_OBSERVED'; eventId = [string]$ev.eventId }
-            }
-        }
-        $state.pendingAnchorEvents = @($pending.Values | Sort-Object eventId | Select-Object -First 100)
-        $anchorEvents = @($events | Where-Object { $_.event -ne 'WINDOW_RESET_OBSERVED' }) + @($state.pendingAnchorEvents)
         if (Get-Command Invoke-AutoAnchorIfNeeded -ErrorAction SilentlyContinue) {
             $anchorOutcome = Invoke-AutoAnchorIfNeeded -Config $cfg -KeeperRoot $KeeperRoot `
-                -State $state -Events $anchorEvents -IsLeader $isLeader -Machine $machine -Election $election `
+                -State $state -Events $events -IsLeader $isLeader -Machine $machine -Election $election `
                 -ForceAnchor:$ForceAnchor
             if ($anchorOutcome -and $anchorOutcome.events) { $events += @($anchorOutcome.events) }
         } else {
             Write-RunnerLog -Event 'ANCHOR_UNAVAILABLE' -Level 'ERROR' -ErrorText 'autoAnchor enabled but auto-anchor module missing'
         }
     }
-    # Record the observation AFTER the anchor hook: idle detection must see the
-    # PREVIOUS poll record (lastReadAt) to tell a first observation from a second
-    # one. State on disk is updated with this run's timestamp either way.
     $state.lastReadAt = Get-IsoTimestamp
 
-    # ---- mark observed reset events processed (idempotency, doc 03 §8) ------
-    foreach ($ev in @($events)) {
-        if (-not (Test-AutoAnchorArmed $cfg) -and $ev -and $ev.event -eq 'WINDOW_RESET_OBSERVED' -and $ev.eventId) {
-            if (@($state.processedEventIds) -notcontains [string]$ev.eventId) {
-                Add-ProcessedEvent -State $state -EventId ([string]$ev.eventId)
-            }
+    # A successful observation reconciles the one-shot expiry alarm. The alarm
+    # carries no decision; it only wakes this same runner at resetsAt + 1 minute.
+    $aaForAlarm = Get-AutoAnchorConfig $cfg
+    if ($read.ok -and (Test-AutoAnchorArmed $cfg) -and @($aaForAlarm.anchorOnExpiry).Count -gt 0 -and
+        (Get-Command Sync-AnchorAlarmTask -ErrorAction SilentlyContinue)) {
+        $alarm = Sync-AnchorAlarmTask -Config $cfg -State $state -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile -Now (Get-Date)
+        if ($alarm.ok -and $alarm.changed) {
+            $events += ,@{ event = $alarm.event; message = "$($alarm.taskName): $($alarm.reason)" }
+        } elseif (-not $alarm.ok) {
+            Write-RunnerLog -Event 'ANCHOR_ALARM_FAILED' -Level 'ERROR' -ErrorText $alarm.reason
         }
     }
-
-    $state.pendingAnchorEvents = @($state.pendingAnchorEvents | Where-Object {
-        $_ -and @($state.processedEventIds) -notcontains [string]$_.eventId
-    })
 
     # ---- persist local state + logs ------------------------------------------
     $state.role = $election.role
@@ -298,15 +291,6 @@ try {
     if ($counts.Count -gt 0) {
         $summaryFiles += (Update-DailySummary -Root $KeeperRoot -Date $now.ToString('yyyy-MM-dd') `
                 -EventCounts $counts -Windows $read.windows -MachineId ([string]$machine.machineId))
-    }
-
-    # ---- renew lease (skip when remote is down) ------------------------------
-    if ($election.role -eq 'LEADER' -and $election.remoteReachable) {
-        $renewed = Renew-LeaderLease -Config $cfg -KeeperRoot $KeeperRoot -Machine $machine
-        if ($renewed.role -eq 'LEADER' -and $renewed.lease) {
-            Save-LocalLeaseView -Root $KeeperRoot -State $state -Election $renewed
-            Save-KeeperState -Root $KeeperRoot -State $state
-        }
     }
 
     # ---- sync sanitized history (failure-isolated, doc 03 §12) ---------------

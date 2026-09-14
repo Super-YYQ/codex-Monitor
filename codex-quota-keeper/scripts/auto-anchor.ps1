@@ -1,10 +1,7 @@
 ﻿# Codex Quota Keeper - AutoAnchor (EXPERIMENTAL, default disabled).
-# After a quota window reset is observed - or, on the keeper's own idle judgment
-# (never anchored + second observation still shows zero usage), via the
-# keepalive backstop (no anchor within keepaliveIntervalMinutes since the last
-# one), or via a due daily schedule slot (codex.autoAnchor.schedule: pure timer,
-# no reset/idle judgment) - send one minimal prompt via `codex exec` to anchor
-# the next window. Every guard is fail-closed (doc 01 §6, doc 03 §8). Enabling
+# Independent daily schedule and configured window-expiry triggers can coalesce
+# into one minimal `codex exec`; anchorOnApply can explicitly force one. Every
+# guard is fail-closed (doc 01 §6, doc 03 §8). Enabling
 # requires mode=AutoAnchor AND codex.autoAnchor=true. Without a coordination repo
 # (single machine) the Git CAS claim is replaced by a durable local claim file
 # (anchor-claim.ps1, CQK-023) - the runner lock and state.processedEventIds are
@@ -92,7 +89,7 @@ function Claim-AnchorEvent {
 
 function New-AnchorInvocationId {
     # doc v3.0 §4.1: one PHYSICAL codex exec gets its own audit id, because a
-    # single call may be triggered by several merged reset/schedule events. A
+    # single call may be triggered by several merged schedule/expiry events. A
     # trigger eventId can therefore never be reused as the model-call id - and
     # the id must not be derived from just one of them (that is how
     # $claimed[0] silently dropped the rest of the merged triggers).
@@ -194,7 +191,7 @@ function Get-AnchorProfileGate {
     #       no  -> ANCHOR_PROFILE_INVALID / UNAVAILABLE, no Claim, no exec, retried
     #       yes -> Claim event(s) -> Lease Revalidate -> codex exec
     #
-    # Claiming first would consume a deterministic reset/schedule event for a model
+    # Claiming first would consume a deterministic schedule/expiry event for a model
     # call that never happened, and that event could lose its one chance to be
     # handled. Refusing before the Claim leaves every claim untouched, so the next
     # poll re-resolves and can still anchor.
@@ -281,7 +278,7 @@ function Invoke-AutoAnchorIfNeeded {
     # reused as the model-call id) plus the post-anchor windows, so the runner
     # needs no second pass to key the audit on the invocation.
     # -ForceAnchor (codex.autoAnchor.anchorOnApply -> install/apply-config) fires
-    # one anchor right away, bypassing keepalive and the minimum gap; the guard
+    # one anchor right away, bypassing trigger selection and the minimum gap; the guard
     # still enforces the daily cap and all fail-closed checks.
     param(
         [hashtable]$Config,
@@ -309,7 +306,7 @@ function Invoke-AutoAnchorIfNeeded {
 
     # ---- CQK-040 (§8): prove the Execution Profile BEFORE the Claim ----------
     # What was legal at Install time is not proven legal now, and the order is the
-    # point: resolving after the Claim would burn a deterministic reset/schedule
+    # point: resolving after the Claim would burn a deterministic schedule/expiry
     # event on a model call that never happens. A refusal here claims nothing, so
     # the next poll re-resolves and can still anchor.
     $gate = Get-AnchorProfileGate -Config $Config -KeeperRoot $KeeperRoot -CodexPath $CodexPath `
@@ -444,6 +441,17 @@ function Invoke-AutoAnchorIfNeeded {
     if ($verified -and $exec.ok) {
         $State.anchors.successCount++
         $State.anchors.lastSuccessAt = $endedAt
+        # The verification read is newer than the pre-anchor poll. Make it the
+        # persisted snapshot so expiry alarm reconciliation immediately tracks
+        # the newly opened window instead of waiting for the next hourly poll.
+        if ($verify.buckets) {
+            $State.buckets = $verify.buckets
+            $State.rateLimitReachedType = $verify.rateLimitReachedType
+            $State.schemaUnknown = $verify.schemaUnknown
+            if (Get-Command Update-ExpiryTrack -ErrorAction SilentlyContinue) {
+                Update-ExpiryTrack -State $State -Buckets $verify.buckets
+            }
+        }
     } else { $State.anchors.failedCount++ }
 
     foreach ($id in $claimed) { Add-ProcessedEvent -State $State -EventId $id }

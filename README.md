@@ -1,4 +1,4 @@
-# Codex Monitor
+# Codex Monitor（仅 Windows）
 
 当前开发分支的修复、验证范围和未关闭的发布门禁见 [产品就绪审查](docs/production-readiness.md)。
 
@@ -44,7 +44,8 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
 
 1. 需要 Windows 10/11、PowerShell 7（入口兼容 Windows PowerShell 5.1）、
    可运行的 Codex CLI 或 Desktop 且当前用户已登录。
-   **建议先把 `codex-quota-keeper` 整个目录复制到固定部署目录**（如 `D:\Tools\codex-quota-keeper`）
+   **建议先把 `codex-quota-keeper` 整个目录复制到当前用户私有的固定部署目录**
+   （如 `$env:LOCALAPPDATA\CodexQuotaKeeper`）
    再继续——计划任务绑定安装路径，且 `runtime/` 数据与机器身份随部署目录走；
    不要在源码 Git 仓库里直接运行（虽然 `runtime/`、`config.json`、`history/` 已被
    `.gitignore` 忽略不会污染仓库，但源码更新/回退仍会干扰运行中的副本）。
@@ -77,13 +78,14 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
 | `task.name` | `CodexQuotaKeeper.Check` | Windows 计划任务名 |
 | `task.startWithWindows` | `true` | 开机自启 |
 | `task.runIfNetworkAvailable` | `true` | 仅在有网络时运行 |
-| `task.wakeToRun` | `false` | 是否允许唤醒计算机执行 |
+| `task.wakeToRun` | `false` | 请求 Windows 从睡眠/休眠唤醒；不能从关机唤醒，实际能力还受硬件与电源策略限制 |
+| `task.alarmName` | `""` | 到期一次性闹钟任务名；空值自动使用 `<task.name>.AnchorAlarm` |
 
 > **触发节奏**：任务以「安装时刻 +1 分钟」为锚点（`-Once` 触发器），按 `poll.intervalMinutes`
 > 重复；`startWithWindows=true`（默认）另加登录触发；关机错过的周期由 `StartWhenAvailable`
 > 在可运行时补跑。改配置执行 `apply-config.cmd` 会重注册任务，锚点重置为当时 +1 分钟。
 > 安装时的一次性只读 quota probe 不算轮询（不保存状态），首次正式运行是 first observation，
-> 空历史下不产生事件。
+> 空历史下不产生 reset 事件。schedule 使用独立原生每日触发器；expiry 使用单独的一次性闹钟。
 
 ### 多机协调（Leader 租约）
 
@@ -138,9 +140,9 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
 | `codex.autoAnchor.prompt` | `Reply exactly OK.` | 锚定用的最小 Prompt（支持中文等 Unicode，长度 ≤ 200；仍禁用换行与 shell 元字符） |
 | `codex.autoAnchor.maxPerDay` | `6` | 每日最大执行次数 |
 | `codex.autoAnchor.minimumGapMinutes` | `300` | 「静默期」：两次锚定的最小间隔（分钟）；一次 CLI 调用后至少等这么久才会再触发（anchorOnApply 强制触发除外） |
-| `codex.autoAnchor.keepaliveIntervalMinutes` | `300` | 空闲**兜底**触发间隔（分钟）：存在首次锚定后，距上次锚定超过该值仍未观测到窗口重置即由 keeper 再触发一次（默认 = 一个 5 小时窗口）；`0` = 关闭兜底（空闲判定与重置触发仍生效） |
 | `codex.autoAnchor.anchorOnApply` | `false` | 安装或应用配置时请求立即锚定；每日本地最多实际尝试一次，不等静默期，仍受每日总上限与运行期校验约束 |
-| `codex.autoAnchor.schedule` | `[]` | **每日定时模式（与周期判断互斥）**：`"HH:mm"` 数组（本地时间、24 小时制、必须补零）。配置任意槽位即切换为纯定时模式——每个时间点后的第一次轮询触发一次 CLI，不做重置/空闲/兜底判断，重置事件被忽略；清空数组回到周期判断模式（重置/空闲/兜底生效）。同一时间点每天最多一次，不受静默期限制（仍受每日上限与 fail-closed 约束） |
+| `codex.autoAnchor.schedule` | `[]` | 独立的每日 `"HH:mm"` 触发器；安装为原生计划任务触发器。到点时若 primary 已在运行则只消费槽位、不调用模型；否则同一槽位每天最多一次。可与 `anchorOnExpiry` 同开 |
+| `codex.autoAnchor.anchorOnExpiry` | `[]` | 窗口到期补空档，可选 `"primary"` / `"secondary"`。窗口仍在运行时不调用；到期事件持久去重。配置后另建一个一次性闹钟任务指向最近到期时间 +1 分钟 |
 | `codex.autoAnchor.model` | `""` | **锚定执行的模型**：配置后传 `codex exec -m <model>`（如 `gpt-5-codex`）；留空 = 不传，沿用本机 `~/.codex/config.toml` 默认。仅允许字母/数字/`.`/`_`/`-`，1–100 字符 |
 | `codex.autoAnchor.reasoningEffort` | `""` | **锚定执行的思考等级**：配置后传 `-c model_reasoning_effort=<值>` 覆盖（如 `low`）；留空 = 不覆盖，沿用 CLI 默认。小写字母开头，仅小写字母/数字/`-`，1–30 字符；合法档位随 CLI/模型演进，填错在执行时按 fail-closed 记 ABORTED |
 
@@ -174,23 +176,18 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
 > 每种触发场景的完整时间线模拟（真实格式的状态快照、事件文件、守卫拒绝原因、Mermaid 图）
 > 见 **[docs/scenarios.md](docs/scenarios.md)**。
 
-触发方式（真正调用 Codex CLI 模型）。**两种模式互斥，按需二选一**：
+真正调用模型的自动触发器有两个，彼此独立、可以同时启用：
 
-**模式 A：周期判断模式（`schedule` 为空，默认）**——由 keeper 判断何时该锚定：
+1. **每日定时（schedule）**：例如 `["08:55","13:55"]`，用于把 primary 的 5h 窗口
+   对齐工作时间。计划任务到点后 runner 会重新读取额度；primary 已在运行时不会调用模型，
+   该槽位仍会被消费，避免稍后补打。
+2. **到期补空档（anchorOnExpiry）**：例如 `["secondary"]`，仅当选定窗口没有运行
+   （当前 `resetsAt` 为空/已过期，或上次已知窗口到期后消失）时触发一次。安装器维护一个
+   独立的一次性闹钟任务，在最近到期时间 +1 分钟唤醒 runner；每次成功读取后重新指向下一次到期。
 
-1. **窗口重置触发**：检测到额度窗口重置后，自动发送一个无业务意义的最小 Prompt
-   以锚定下一轮窗口（需要你先使用过 Codex）。
-2. **空闲判定触发（从没启动过 Codex 的场景）**：keeper 从未锚定过，且第二次轮询记录
-   （默认 60 分钟一轮）仍是零用量时，判定"Codex 没人用"，自动执行一次 CLI 调用；
-   随后 5 小时静默（`minimumGapMinutes` 默认 300），要等窗口真正滚动才会再次触发。
-3. **空闲兜底触发（keepalive，默认 300 分钟）**：存在首次锚定后，连续 5 小时仍未观测到
-   任何重置（也没人使用 Codex），keeper 再自触发一次；`0` = 关闭兜底。
-
-**模式 B：每日定时模式（`schedule` 非空）**——不做任何判断，到点就打：
-
-4. **每日定时（schedule）**：`codex.autoAnchor.schedule`（如 `["09:30","21:00"]`）时，
-   每个时间点后的第一次轮询触发一次 CLI——固定时刻、纯定时，重置/空闲/兜底判断全部
-   停用、重置事件被忽略；也不需要你使用过 Codex。同一时间点每天最多一次。
+重置事件仍写入审计日志，但不再触发模型；旧 `keepaliveIntervalMinutes` 会被忽略并给出迁移提示，
+如需连续衔接 primary 窗口，改用 `anchorOnExpiry:["primary"]`。两个自动触发器均为空时，
+即使 AutoAnchor 已 armed 也只查询额度，不会自动调用模型。
 
 **立即触发（anchorOnApply）不属于模式，任何模式下都可用**：`codex.autoAnchor.anchorOnApply=true`
 时，运行 `install.cmd` / `apply-config.cmd` 会请求立即锚定；每个本地自然日最多实际尝试一次，
@@ -198,7 +195,7 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
 
 - **官方未明确背书该用途**；OpenAI《使用条款》对"规避限制"存在解释风险，本项目不承诺零风控。
 - 默认 `codex.autoAnchor.enabled=false`，安装器不会自动开启。
-- 开启后仍有完整约束：每日上限、最小间隔、429/认证/未知 schema/远程不可达一律 fail-closed；
+- 开启后仍有完整约束：每日上限、expiry 最小间隔、429/认证/未知 schema/远程不可达一律 fail-closed；
   多机（配置了协调仓库）另有分布式 CAS Claim（同一事件全局最多一次副作用）与执行前租约重验证；
   **单机（未配置协调仓库）同样可用**——本地 runner 锁、持久 Claim 和 state 去重共同限制同一事件最多一次调用；结果不确定时不重试。
 - 每次执行的 before/after 额度快照写入 history，便于审计。
@@ -257,6 +254,7 @@ CI（GitHub Actions）在每次 push / PR 上运行：PS 7 与 PS 5.1 全量测�
 - [docs/security-model.md](docs/security-model.md) — 安全边界与隐私设计
 - [docs/findings.md](docs/findings.md) — 开发发现与决策记录
 - [docs/review-2026-09-13.md](docs/review-2026-09-13.md) — 项目审查：触发模型、架构、缺陷、安全与优化建议
+- [docs/design/autoanchor-trigger-redesign-design-v1.0.md](docs/design/autoanchor-trigger-redesign-design-v1.0.md) — AutoAnchor 触发模型重设计开发设计说明书（依据 review-2026-09-13，工作项 CQK-049~064）
 - [docs/progress.md](docs/progress.md) — 实现进度
 - [docs/task_plan.md](docs/task_plan.md) — 开发任务计划
 - [SECURITY.md](SECURITY.md) — 漏洞报告与安全策略

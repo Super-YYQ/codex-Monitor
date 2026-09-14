@@ -6,7 +6,7 @@
 #   - null window fields skip reset inference but keep partial status
 #   - processedEventIds is LOCAL dedup only; cross-machine idempotency is the
 #     responsibility of the remote claim (CQK-013)
-# Owns runtime/state.json persistence (schema 2, bucket model).
+# Owns runtime/state.json persistence (schema 3, bucket model + expiry tracking).
 
 $script:CqkStateMachineDir = Split-Path -Parent $PSCommandPath
 if (-not (Get-Command Get-KeeperRoot -ErrorAction SilentlyContinue)) {
@@ -22,7 +22,7 @@ $script:CQK_EV_AUTH_ERROR        = 'AUTH_ERROR'
 $script:CQK_EV_SCHEMA_UNKNOWN    = 'SCHEMA_UNKNOWN'
 $script:CQK_EV_LEADER_CHANGED    = 'LEADER_CHANGED'
 
-$script:CQK_STATE_SCHEMA = 2
+$script:CQK_STATE_SCHEMA = 3
 
 function New-KeeperState {
     return @{
@@ -38,7 +38,7 @@ function New-KeeperState {
         consecutiveReadFailures = 0
         processedEventIds    = @()
         anchors              = (Get-AnchorStatistics)
-        pendingAnchorEvents  = @()
+        expiryTrack          = @{}
         leader               = @{ ownerId = $null; ownerLabel = $null; expiresAt = $null }
         heartbeat            = @{ ts = $null; role = $null }
         updatedAt            = $null
@@ -80,8 +80,11 @@ function Load-KeeperState {
     $state = Merge-ConfigDefaults (New-KeeperState) $loaded
     $state.buckets = ConvertTo-StateBuckets $loaded
     $state.anchors = Get-AnchorStatistics $loaded.anchors
+    if ($loaded.expiryTrack -is [hashtable]) { $state.expiryTrack = @{} + $loaded.expiryTrack }
+    else { $state.expiryTrack = @{} }
     $state.schema = $script:CQK_STATE_SCHEMA
     $state.windows = $null   # legacy key, no longer written
+    $state.Remove('pendingAnchorEvents')
     return $state
 }
 
@@ -133,24 +136,39 @@ function Get-AnchorEventId {
     return Get-Sha256Hex "$BucketId|$WindowType|$durationPart|$PreviousResetsAt|reset"
 }
 
-function Get-KeepaliveEventId {
-    # Deterministic per keepalive slot so repeat runs and other machines cannot
-    # double-anchor the same idle period. Slot = epoch seconds floored to the
-    # keepalive interval (e.g. 300 min -> boundaries every 5h).
-    param([int]$KeepaliveMinutes, [DateTime]$Now)
-    $intervalSeconds = $KeepaliveMinutes * 60
-    $slotSeconds = [long](([Math]::Floor((ConvertTo-EpochSeconds $Now) / $intervalSeconds)) * $intervalSeconds)
-    return Get-Sha256Hex "keepalive|$slotSeconds"
+function Get-ExpiryAnchorEventId {
+    # One deterministic trigger per observed expiry. The last non-empty
+    # resetsAt changes when the window restarts, naturally arming the next cycle.
+    param([string]$BucketId, [string]$WindowType, [long]$LastNonEmptyResetsAt)
+    return Get-Sha256Hex "expiry|$BucketId|$WindowType|$LastNonEmptyResetsAt"
 }
 
-function Get-IdleDetectionEventId {
-    # Scenario-1 idle detection: the keeper never anchored and Codex was never
-    # used - after the second observation with zero usage it fires exactly one
-    # anchor itself. Day-granularity slot so a stale remote CLAIMED record from
-    # a crashed leader self-heals on the next day (the trigger only exists while
-    # never-anchored, so a day slot is effectively once-per-lifetime).
-    param([DateTime]$Now)
-    return Get-Sha256Hex ("idle|" + $Now.ToString('yyyy-MM-dd'))
+function Update-ExpiryTrack {
+    # Remember future or expired non-empty reset timestamps before the current
+    # snapshot is persisted. Missing windows deliberately leave their previous
+    # value intact so a mid-cycle disappearance can be anchored once.
+    param([hashtable]$State, $Buckets)
+    if ($State.expiryTrack -isnot [hashtable]) { $State.expiryTrack = @{} }
+    $map = Get-BucketWindowMap @($Buckets)
+    foreach ($key in @($map.Keys)) {
+        $win = $map[$key]
+        if ($null -ne $win.resetsAt -and [long]$win.resetsAt -gt 0) {
+            $State.expiryTrack[$key] = [long]$win.resetsAt
+        }
+    }
+}
+
+function Get-LastNonEmptyResetsAt {
+    param([hashtable]$State, [string]$BucketId, [string]$WindowType)
+    $key = Get-WindowKey $BucketId $WindowType
+    if ($State.expiryTrack -is [hashtable] -and $State.expiryTrack.ContainsKey($key)) {
+        return [long]$State.expiryTrack[$key]
+    }
+    $map = Get-BucketWindowMap @($State.buckets)
+    if ($map.ContainsKey($key) -and $null -ne $map[$key].resetsAt) {
+        return [long]$map[$key].resetsAt
+    }
+    return [long]0
 }
 
 function Get-ScheduleEventId {
@@ -299,11 +317,9 @@ function Get-LeaderChangedEvent {
 }
 
 function Test-ShouldAnchor {
-    # AutoAnchor guard per audit plan §20. Every condition must hold; any failure
-    # returns should=$false with the reason (fail closed). -Force is the explicit
-    # "anchor right now" request (anchorOnApply): it bypasses keepalive and the
-    # minimum gap - the user asked for an immediate call - but never the daily
-    # cap, open errors, or leader/remote checks.
+    # The external seam for all anchor decisions. Callers provide the latest
+    # successful snapshot in State; this function collects independent schedule
+    # and expiry triggers, while keeping all fail-closed policy in one place.
     param(
         [hashtable]$Config,
         [hashtable]$State,
@@ -335,8 +351,7 @@ function Test-ShouldAnchor {
     if ($State.rateLimitReachedType) { return & $deny 'previous state shows rate limit reached' }
     if ($State.schemaUnknown) { return & $deny 'previous state had unknown schema' }
 
-    # Daily cap (always enforced, even for a forced anchor) + minimum gap
-    # (bypassed only by an explicit force or a due daily schedule slot).
+    # Daily cap is always enforced, including explicit forced anchors.
     $anchorCfg = Get-AutoAnchorConfig $Config
     $today = $Now.ToString('yyyy-MM-dd')
     $stats = Get-AnchorStatistics -Anchors $State.anchors -Today $today
@@ -344,39 +359,85 @@ function Test-ShouldAnchor {
     if ($count -ge [int]$anchorCfg.maxPerDay) {
         return & $deny "daily anchor cap reached ($count/$($anchorCfg.maxPerDay))"
     }
-    $readFailed = $false
-    foreach ($ev in @($Events)) {
-        if ($ev -and $ev.event -eq 'READ_FAILED') { $readFailed = $true; break }
+    # Explicit force wins and bypasses the minimum gap. It does not bypass any
+    # safety guard above.
+    if ($Force) {
+        if ($stats.anchorOnApplyAttempted) { return & $deny 'anchorOnApply already attempted today' }
+        $forceId = Get-ForceAnchorEventId -Now $Now
+        if (@($State.processedEventIds) -contains $forceId) {
+            return & $deny 'forced anchor already executed this minute'
+        }
+        return @{ should = $true; reason = $null; eventIds = @($forceId); triggerKind = 'force' }
     }
-    # Daily schedule (timer mode): every configured HH:mm fires one anchor on the
-    # first poll at/after that time. Configuring ANY schedule slot switches
-    # AutoAnchor to the pure timer mode and MUTUALLY EXCLUDES the judgment
-    # triggers (window reset / idle detection / keepalive) - exactly one of the
-    # two modes is active; clearing schedule returns to judgment mode. As an
-    # explicit user request a due slot bypasses the minimum gap (the daily cap
-    # above still applies). Fails closed on this cycle's read failure, exactly
-    # like idle detection.
+
+    $pending = @()
+    $sources = @()
+    $nowEpoch = ConvertTo-EpochSeconds $Now
+    $curMap = Get-BucketWindowMap @($State.buckets)
+
+    # Trigger 1: daily schedule. Native Task Scheduler triggers call the same
+    # runner, and the poll remains a fallback. A late slot is consumed without a
+    # model call. If the primary window is already running, the slot has already
+    # achieved its purpose and is also consumed without a call.
     $scheduleIds = @()
     foreach ($slot in @($anchorCfg.schedule)) {
         if ([string]::IsNullOrWhiteSpace([string]$slot)) { continue }
         $slotTime = [datetime]::MinValue
         if (-not [datetime]::TryParseExact([string]$slot, 'HH:mm', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$slotTime)) { continue }
-        if ($Now -lt $Now.Date.Add($slotTime.TimeOfDay)) { continue }
+        $dueAt = $Now.Date.Add($slotTime.TimeOfDay)
+        if ($Now -lt $dueAt) { continue }
         $sid = Get-ScheduleEventId -Day $today -Slot ([string]$slot)
         if (@($State.processedEventIds) -contains $sid) { continue }
+        if (($Now - $dueAt).TotalMinutes -gt [double](Get-PollConfig $Config).intervalMinutes) {
+            Add-ProcessedEvent -State $State -EventId $sid
+            continue
+        }
+        $primaryWindows = @($curMap.Values | Where-Object { [string]$_.windowType -eq 'primary' })
+        if ($primaryWindows.Count -eq 0) { continue }
+        $primaryRunning = @($primaryWindows | Where-Object { $null -ne $_.resetsAt -and [long]$_.resetsAt -gt $nowEpoch }).Count -gt 0
+        if ($primaryRunning) {
+            Add-ProcessedEvent -State $State -EventId $sid
+            continue
+        }
         $scheduleIds += $sid
     }
-    $scheduleDue = ($scheduleIds.Count -gt 0)
-    $scheduleMode = (@($anchorCfg.schedule | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0)
-    if ($scheduleDue -and $readFailed) {
-        return & $deny 'quota read failed this cycle; scheduled anchor fails closed'
+    if ($scheduleIds.Count -gt 0) {
+        $pending += @($scheduleIds)
+        $sources += 'schedule'
     }
-    if ($scheduleMode -and -not $Force -and -not $scheduleDue) {
-        return & $deny 'timer mode active (schedule configured); no due slot now - judgment triggers (reset/idle/keepalive) are mutually exclusive and disabled'
+
+    # Trigger 2: each configured window type is evaluated independently from the
+    # schedule. Iterate current and previously tracked keys so a window removed
+    # by a unified reset still produces one deterministic expiry trigger.
+    $expiryIds = @()
+    foreach ($windowType in @($anchorCfg.anchorOnExpiry)) {
+        $keys = @($curMap.Keys | Where-Object { [string]$curMap[$_].windowType -eq [string]$windowType })
+        if ($State.expiryTrack -is [hashtable]) {
+            $suffix = '|' + [string]$windowType
+            $keys += @($State.expiryTrack.Keys | Where-Object { ([string]$_).EndsWith($suffix, [System.StringComparison]::Ordinal) })
+        }
+        foreach ($key in @($keys | Select-Object -Unique)) {
+            $win = if ($curMap.ContainsKey($key)) { $curMap[$key] } else { $null }
+            if ($win -and $null -ne $win.resetsAt -and [long]$win.resetsAt -gt $nowEpoch) { continue }
+            $bucketId = if ($win) { [string]$win.bucketId } else { ([string]$key).Substring(0, ([string]$key).Length - $suffix.Length) }
+            $lastResetsAt = Get-LastNonEmptyResetsAt -State $State -BucketId $bucketId -WindowType ([string]$windowType)
+            $eid = Get-ExpiryAnchorEventId -BucketId $bucketId -WindowType ([string]$windowType) -LastNonEmptyResetsAt $lastResetsAt
+            if (@($State.processedEventIds) -notcontains $eid) { $expiryIds += $eid }
+        }
     }
-    if ($State.anchors.lastAnchorAt -and -not $Force -and -not $scheduleDue) {
+    if ($expiryIds.Count -gt 0) {
+        $pending += @($expiryIds)
+        $sources += 'expiry'
+    }
+
+    $pending = @($pending | Select-Object -Unique)
+    if ($pending.Count -eq 0) { return & $deny 'no due schedule slot and no expired tracked window' }
+
+    # Schedule is an explicit time request and bypasses the gap. Expiry-only
+    # calls retain the global gap as a secondary safety brake.
+    if ($scheduleIds.Count -eq 0 -and $stats.lastAttemptAt) {
         $last = [DateTimeOffset]::MinValue
-        if ([DateTimeOffset]::TryParse([string]$State.anchors.lastAnchorAt, [ref]$last)) {
+        if ([DateTimeOffset]::TryParse([string]$stats.lastAttemptAt, [ref]$last)) {
             $gapMinutes = ($Now - $last.LocalDateTime).TotalMinutes
             if ($gapMinutes -lt [double]$anchorCfg.minimumGapMinutes) {
                 return & $deny ("minimum anchor gap not elapsed ({0:n0} < {1} min)" -f $gapMinutes, $anchorCfg.minimumGapMinutes)
@@ -384,77 +445,5 @@ function Test-ShouldAnchor {
         }
     }
 
-    # Triggers. An explicit force wins (the user asked for the CLI right now and
-    # even the minimum gap is bypassed). Timer mode and judgment mode are mutually
-    # exclusive: with schedule configured, ONLY due schedule slots fire (reset
-    # events are ignored); without schedule, reset events, the never-anchored
-    # idle detection and the keepalive backstop apply.
-    $triggerKind = $null
-    $pending = @()
-    if ($Force) {
-        if ($stats.anchorOnApplyAttempted) { return & $deny 'anchorOnApply already attempted today' }
-        $forceId = Get-ForceAnchorEventId -Now $Now
-        if (@($State.processedEventIds) -contains $forceId) {
-            return & $deny 'forced anchor already executed this minute'
-        }
-        $pending = @($forceId)
-        $triggerKind = 'force'
-    } elseif ($scheduleMode) {
-        # Timer mode: judgment triggers disabled. Only due slots fire here.
-        if (-not $scheduleDue) { return & $deny 'no due schedule slot' }
-        $pending = @($scheduleIds)
-        $triggerKind = 'schedule'
-    } else {
-        $resetPending = $false
-        foreach ($ev in @($Events)) {
-            if ($null -eq $ev) { continue }
-            if ($ev.event -eq $script:CQK_EV_WINDOW_RESET) {
-                $processed = @($State.processedEventIds) -contains [string]$ev.eventId
-                if (-not $processed) { $pending += [string]$ev.eventId; $resetPending = $true }
-            }
-        }
-        if ($pending.Count -gt 0) {
-            $triggerKind = 'reset'
-        } elseif (-not $State.anchors.lastAnchorAt) {
-            # Never anchored. The first observation is only a baseline; the idle
-            # detection needs a second poll record to conclude "nobody is using
-            # Codex", and then fires the first CLI call itself.
-            if (-not $State.lastReadAt) {
-                return & $deny 'first observation; idle detection needs two poll records'
-            }
-            if ($readFailed) { return & $deny 'quota read failed this cycle; idle detection fails closed' }
-            $primary = @((Get-BucketWindowMap @($State.buckets)).Values | Where-Object { [string]$_.windowType -eq 'primary' } | Select-Object -First 1)
-            if ($null -eq $primary -or $null -eq $primary.usedPercent) {
-                return & $deny 'quota snapshot unavailable; idle detection fails closed'
-            }
-            if ([double]$primary.usedPercent -gt 0) {
-                return & $deny 'quota in use; idle detection only fires on an unused window'
-            }
-            $idleId = Get-IdleDetectionEventId -Now $Now
-            if (@($State.processedEventIds) -contains $idleId) {
-                return & $deny 'idle detection already processed today'
-            }
-            $pending = @($idleId)
-            $triggerKind = 'idle'
-        } else {
-            $ka = [int]$anchorCfg.keepaliveIntervalMinutes
-            if ($ka -le 0) { return & $deny 'no unprocessed reset event' }
-            $idleMinutes = [double]::PositiveInfinity
-            $last = [DateTimeOffset]::MinValue
-            if ([DateTimeOffset]::TryParse([string]$State.anchors.lastAnchorAt, [ref]$last)) {
-                $idleMinutes = ($Now - $last.LocalDateTime).TotalMinutes
-            }
-            if ($idleMinutes -lt $ka) {
-                return & $deny ("keepalive not due ({0:n0} < {1} min idle since last anchor)" -f $idleMinutes, $ka)
-            }
-            $keId = Get-KeepaliveEventId -KeepaliveMinutes $ka -Now $Now
-            if (@($State.processedEventIds) -contains $keId) {
-                return & $deny 'keepalive slot already processed'
-            }
-            $pending = @($keId)
-            $triggerKind = 'keepalive'
-        }
-    }
-
-    return @{ should = $true; reason = $null; eventIds = $pending; triggerKind = $triggerKind }
+    return @{ should = $true; reason = $null; eventIds = $pending; triggerKind = ($sources -join '+') }
 }

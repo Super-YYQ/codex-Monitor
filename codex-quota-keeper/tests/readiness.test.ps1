@@ -37,21 +37,18 @@ try {
     Assert-Equal 0 $migrated.anchors.successCount 'unknown success is never invented'
     Assert-Null $migrated.anchors.lastSuccessAt 'old last anchor is not a known success'
 
-    Start-TestGroup 'a refused reset remains eligible on the next runner tick'
-    $root = Join-Path $ws 'retry-reset'
+    Start-TestGroup 'a refused expiry remains eligible on the next runner tick'
+    $root = Join-Path $ws 'retry-expiry'
     Ensure-Directory $root | Out-Null
     $cfg = New-TestConfig @{
         mode = 'AutoAnchor'
-        codex = @{ command = $mock; queryTimeoutSeconds = 5; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 1; keepaliveIntervalMinutes = 0; model = 'invalid-model' } }
+        codex = @{ command = $mock; queryTimeoutSeconds = 5; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 1; anchorOnExpiry = @('primary'); model = 'invalid-model' } }
         github = @{ coordination = @{ enabled = $false }; historySync = @{ enabled = $false } }
     }
     $configFile = Write-TestConfigFile (Join-Path $root 'config.json') $cfg
     $env:CQK_MOCK_EXEC_ARGS_FILE = Join-Path $ws 'exec.txt'
     $env:CQK_MOCK_EXEC = 'ok'
-    $env:CQK_MOCK_MODE = 'multi-reset-baseline'
-    & $hostExe -NoProfile -File (Join-Path $scripts 'runner.ps1') -KeeperRoot $root -ConfigFile $configFile
-    Assert-Equal 0 $LASTEXITCODE 'baseline runner finishes'
-    $env:CQK_MOCK_MODE = 'multi-reset'
+    $env:CQK_MOCK_MODE = 'expiry-primary'
     & $hostExe -NoProfile -File (Join-Path $scripts 'runner.ps1') -KeeperRoot $root -ConfigFile $configFile
     Assert-Equal 0 $LASTEXITCODE 'rejected-profile runner finishes'
     Assert-False (Test-Path $env:CQK_MOCK_EXEC_ARGS_FILE) 'invalid profile performs no exec'
@@ -64,7 +61,7 @@ try {
     $null = Write-TestConfigFile $configFile $cfg
     & $hostExe -NoProfile -File (Join-Path $scripts 'runner.ps1') -KeeperRoot $root -ConfigFile $configFile
     Assert-Equal 0 $LASTEXITCODE 'corrected-profile runner finishes'
-    Assert-True (Test-Path $env:CQK_MOCK_EXEC_ARGS_FILE) 'same reset executes after profile correction'
+    Assert-True (Test-Path $env:CQK_MOCK_EXEC_ARGS_FILE) 'same expiry executes after profile correction'
     $after = Load-KeeperState $root
     Assert-Equal 1 $after.anchors.attemptCount 'one actual attempt'
     Assert-Equal 1 $after.anchors.successCount 'one verified success'
@@ -76,7 +73,7 @@ try {
     if ($records.Count) {
         Assert-Equal 'mock-model-alpha' $records[0].anchor.effectiveModel 'effective model audited'
         Assert-Equal 'VALID' $records[0].anchor.profileValidation 'validation audited'
-        Assert-Equal 2 @($records[0].anchor.triggerEventIds).Count 'both reset triggers preserved'
+        Assert-Equal 1 @($records[0].anchor.triggerEventIds).Count 'expiry trigger identity is preserved'
     }
 
     Start-TestGroup 'all audit surfaces project the same anchor fields'

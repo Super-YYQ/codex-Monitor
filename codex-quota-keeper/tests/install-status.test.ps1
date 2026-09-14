@@ -136,7 +136,7 @@ try {
 
     $cfgArmed = New-Cfg 15
     $cfgArmed.mode = 'AutoAnchor'
-    $cfgArmed.codex.autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; keepaliveIntervalMinutes = 240 }
+    $cfgArmed.codex.autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; schedule = @('08:55', '13:55'); anchorOnExpiry = @('secondary') }
     $descArmed = Get-KeeperTaskDescription -Config $cfgArmed
     Assert-True ($descArmed -match 'EXPERIMENTAL') 'armed AutoAnchor is flagged EXPERIMENTAL'
     Assert-True ($descArmed -match 'auto-anchoring') 'armed description says what the task now also does'
@@ -144,6 +144,18 @@ try {
     $tpArmed = New-KeeperTaskParameters -Config $cfgArmed -KeeperRoot $keeperRoot -ConfigFile $cfgFile
     Assert-Equal $descArmed $tpArmed.Description 'registered parameters carry the mode-derived description'
     Assert-True ($tpArmed.Description.Length -le 255) 'description fits the Task Scheduler length limit'
+    Assert-Equal 4 @($tpArmed.Trigger).Count 'poll, logon, and two native daily schedule triggers are registered'
+    $cfgDisarmedSchedule = New-Cfg 15
+    $cfgDisarmedSchedule.codex.autoAnchor = @{ enabled = $false; schedule = @('08:55') }
+    $tpDisarmedSchedule = New-KeeperTaskParameters -Config $cfgDisarmedSchedule -KeeperRoot $keeperRoot -ConfigFile $cfgFile
+    Assert-Equal 2 @($tpDisarmedSchedule.Trigger).Count 'disarmed schedule does not add unnecessary task triggers'
+
+    Start-TestGroup 'install: deployment ACL write detection is precise'
+
+    Assert-False (Test-FileSystemRightsWriteCapable -Rights ([System.Security.AccessControl.FileSystemRights]::ReadAndExecute)) 'read-only ACE is not reported as writable'
+    Assert-True (Test-FileSystemRightsWriteCapable -Rights ([System.Security.AccessControl.FileSystemRights]::Write)) 'write ACE is reported'
+    Assert-True (Test-FileSystemRightsWriteCapable -Rights ([System.Security.AccessControl.FileSystemRights]::Modify)) 'modify ACE is reported'
+    Assert-True (Test-FileSystemRightsWriteCapable -Rights ([System.Security.AccessControl.FileSystemRights]::FullControl)) 'full-control ACE is reported'
 
     Start-TestGroup 'install: full registration with read-only probe'
 
@@ -167,13 +179,14 @@ try {
     Start-TestGroup 'install: anchorOnApply decides the forced anchor launch'
 
     $cfgAaOn = New-Cfg 15
-    $cfgAaOn.codex.autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; keepaliveIntervalMinutes = 240; anchorOnApply = $true }
+    $cfgAaOn.codex.autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; anchorOnApply = $true }
     $spec = Get-ForcedAnchorLaunchSpec -Config $cfgAaOn -KeeperRoot $keeperRoot -ConfigFile $cfgFile
     Assert-False $spec.skip 'spec produced when anchorOnApply=true and autoAnchor enabled'
     Assert-True ("$($spec.exe)" -match 'wscript') 'spec launches via wscript (windowless host)'
     $forcedVbs = [System.IO.File]::ReadAllText("$($spec.vbsPath)")
     Assert-True ("$forcedVbs" -match 'runner\.ps1') 'spec vbs runs runner.ps1'
     Assert-True ("$forcedVbs" -match '\-ForceAnchor') 'spec vbs passes -ForceAnchor'
+    Assert-True ("$forcedVbs" -match '\-WaitLockSeconds 60') 'forced runner waits for a colliding scheduled poll'
     Assert-True ("$forcedVbs" -match [regex]::Escape([System.IO.Path]::GetFullPath($cfgFile))) 'spec vbs passes the custom config path'
     Assert-True ("$forcedVbs" -match 'WindowStyle Hidden') 'spec vbs hides the console window'
 
@@ -181,7 +194,7 @@ try {
     Assert-True $specOff.skip 'autoAnchor off -> no forced launch'
 
     $cfgAaOff = New-Cfg 15
-    $cfgAaOff.codex.autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; keepaliveIntervalMinutes = 240; anchorOnApply = $false }
+    $cfgAaOff.codex.autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; anchorOnApply = $false }
     $specAaOff = Get-ForcedAnchorLaunchSpec -Config $cfgAaOff -KeeperRoot $keeperRoot -ConfigFile $cfgFile
     Assert-True $specAaOff.skip 'anchorOnApply=false -> no forced launch'
 
@@ -238,7 +251,7 @@ try {
         $c.mode = 'AutoAnchor'
         $c.codex.queryTimeoutSeconds = $Timeout
         $c.codex.autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6
-                                 minimumGapMinutes = 60; keepaliveIntervalMinutes = 240
+                                 minimumGapMinutes = 60
                                  model = $Model; reasoningEffort = $Effort }
         # Belt and braces: if this config ever stops being L1-valid, say so here
         # rather than letting a malformed-file rejection masquerade as a profile
@@ -418,17 +431,18 @@ try {
 
     $cfgAa = New-Cfg 30
     $cfgAa.mode = 'AutoAnchor'
-    $cfgAa.codex.autoAnchor = @{ enabled = $true; schedule = @('09:30') }
+    $cfgAa.codex.autoAnchor = @{ enabled = $true; schedule = @('09:30'); anchorOnExpiry = @('secondary') }
     $null = Write-TestConfigFile $cfgFile $cfgAa
     $statusAa = Get-KeeperStatus -KeeperRoot $keeperRoot -ConfigFile $cfgFile
     Assert-True $statusAa.configOk "autoAnchor config valid ($($statusAa.lastError))"
     Assert-True $statusAa.autoAnchor 'autoAnchor reported ON (v2 nested config shape)'
-    Assert-Equal 300 $statusAa.anchorKeepalive.intervalMinutes 'keepalive interval reported'
+    Assert-Equal 0 $statusAa.anchorKeepalive.intervalMinutes 'legacy keepalive projection is permanently off'
+    Assert-Contains $statusAa.anchorExpiry.windows 'secondary' 'expiry window reported'
     Assert-Equal 1 @($statusAa.anchorSchedule.slots).Count 'schedule slots reported'
     Assert-Equal '09:30' $statusAa.anchorSchedule.slots[0] 'schedule slot preserved'
     $textAa = (Write-StatusText $statusAa | Out-String)
     Assert-True ("$textAa" -match '\*\*\* ON') 'ON warning shown in status text'
-    Assert-True ("$textAa" -match 'Anchor backstop') 'backstop line shown'
+    Assert-True ("$textAa" -match 'Anchor on expiry') 'expiry trigger line shown'
     Assert-True ("$textAa" -match 'Scheduled anchor\s+: 09:30') 'schedule line shown'
     $null = Write-TestConfigFile $cfgFile (New-Cfg 30)
 

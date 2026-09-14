@@ -26,7 +26,7 @@ function Invoke-ApplyConfig {
 
     $loaded = Load-Config $ConfigFile
     if ($null -eq $loaded.config -or @($loaded.issues).Count -gt 0) {
-        return @{ ok = $false; issues = $loaded.issues; warnings = @(); profile = $null; taskName = $null; intervalMinutes = $null; taskCreated = $false; forcedAnchor = $null }
+        return @{ ok = $false; issues = $loaded.issues; warnings = @($loaded.warnings); profile = $null; taskName = $null; intervalMinutes = $null; taskCreated = $false; forcedAnchor = $null }
     }
     $cfg = $loaded.config
     $taskName = [string]$cfg.task.name
@@ -41,7 +41,7 @@ function Invoke-ApplyConfig {
     $codexPath = Resolve-CodexCommand $cfg
     $gate = Get-ExecutionProfileGate -Config $cfg -CodexPath $codexPath -KeeperRoot $KeeperRoot -Stage 'Apply'
     if (@($gate.issues).Count -gt 0) {
-        return @{ ok = $false; issues = @($gate.issues); warnings = @($gate.warnings); profile = $gate; taskName = $taskName; intervalMinutes = (Get-PollConfig $cfg).intervalMinutes; taskCreated = $false; forcedAnchor = $null }
+        return @{ ok = $false; issues = @($gate.issues); warnings = @($loaded.warnings) + @($gate.warnings); profile = $gate; taskName = $taskName; intervalMinutes = (Get-PollConfig $cfg).intervalMinutes; taskCreated = $false; forcedAnchor = $null }
     }
 
     $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
@@ -57,8 +57,12 @@ function Invoke-ApplyConfig {
     }
     # codex.autoAnchor.anchorOnApply=true: the config was just applied, so honor
     # the "trigger the CLI right now" request (fire and forget).
+    $alarm = Sync-AnchorAlarmTask -Config $cfg -State (Load-KeeperState $KeeperRoot) `
+        -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile
     $forcedAnchor = Invoke-ForcedAnchorIfRequested -Config $cfg -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile
-    return @{ ok = $true; issues = @(); warnings = @($gate.warnings); profile = $gate; taskName = $taskName; intervalMinutes = (Get-PollConfig $cfg).intervalMinutes; taskCreated = $taskCreated; forcedAnchor = $forcedAnchor }
+    $warnings = @($loaded.warnings) + @($gate.warnings)
+    if (-not $alarm.ok) { $warnings += "expiry alarm was not reconciled: $($alarm.reason)" }
+    return @{ ok = $true; issues = @(); warnings = $warnings; profile = $gate; taskName = $taskName; intervalMinutes = (Get-PollConfig $cfg).intervalMinutes; taskCreated = $taskCreated; forcedAnchor = $forcedAnchor; alarm = $alarm }
 }
 
 if ($MyInvocation.InvocationName -ne '.') {

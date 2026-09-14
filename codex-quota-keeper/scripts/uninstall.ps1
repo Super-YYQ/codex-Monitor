@@ -19,8 +19,12 @@ function Invoke-KeeperUninstall {
     if (-not $ConfigFile) { $ConfigFile = Get-ConfigPath $KeeperRoot }
 
     $taskName = $null
+    $alarmTaskName = $null
     $loaded = Load-Config $ConfigFile
-    if ($loaded.config) { $taskName = [string]$loaded.config.task.name }
+    if ($loaded.config) {
+        $taskName = [string]$loaded.config.task.name
+        $alarmTaskName = if ([string]::IsNullOrWhiteSpace([string]$loaded.config.task.alarmName)) { "$taskName.AnchorAlarm" } else { [string]$loaded.config.task.alarmName }
+    }
 
     $removedTask = $false
     if ($taskName) {
@@ -28,6 +32,14 @@ function Invoke-KeeperUninstall {
         if ($existing) {
             Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
             $removedTask = $true
+        }
+    }
+    $removedAlarmTask = $false
+    if ($alarmTaskName) {
+        $existingAlarm = Get-ScheduledTask -TaskName $alarmTaskName -ErrorAction SilentlyContinue
+        if ($existingAlarm) {
+            Unregister-ScheduledTask -TaskName $alarmTaskName -Confirm:$false
+            $removedAlarmTask = $true
         }
     }
 
@@ -44,7 +56,7 @@ function Invoke-KeeperUninstall {
         $historyRemoved = $true
     }
 
-    return @{ taskName = $taskName; removedTask = $removedTask; historyRemoved = $historyRemoved }
+    return @{ taskName = $taskName; removedTask = $removedTask; alarmTaskName = $alarmTaskName; removedAlarmTask = $removedAlarmTask; historyRemoved = $historyRemoved }
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
@@ -55,6 +67,9 @@ if ($MyInvocation.InvocationName -ne '.') {
         Write-Host "  Scheduled task   : REMOVED ('$($r.taskName)')"
     } else {
         Write-Host "  Scheduled task   : not found (nothing to remove)"
+    }
+    if ($r.removedAlarmTask) {
+        Write-Host "  Expiry alarm task: REMOVED ('$($r.alarmTaskName)')"
     }
     if ($r.historyRemoved) {
         Write-Host '  Local history    : DELETED (-DeleteHistory)'

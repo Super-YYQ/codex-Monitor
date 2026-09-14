@@ -100,7 +100,7 @@ try {
 
     $state3 = Read-JsonFile (Join-Path $keeperRoot 'runtime\state.json')
     $expectedId = Get-Sha256Hex 'codex-default|primary|300|1788062400|reset'
-    Assert-Contains $state3.processedEventIds $expectedId 'reset eventId marked processed'
+    Assert-False (@($state3.processedEventIds) -contains $expectedId) 'audit-only reset id does not enter anchor dedup state'
 
     $histFile = Get-ChildItem -LiteralPath (Join-Path $keeperRoot 'history') -Filter 'events-*.jsonl' -File -ErrorAction SilentlyContinue | Select-Object -First 1
     Assert-True ($null -ne $histFile) 'history event file written'
@@ -197,6 +197,8 @@ try {
     Assert-Equal 'network' $backoff8n.reason 'transport failure classified as network (was mislabeled 429 via "rate limits" wrapper text)'
     $evts8n = Get-LogEventNames $keeperRoot
     Assert-Contains $evts8n 'READ_FAILED' 'read failure logged'
+    Assert-False (Test-Path -LiteralPath (Get-PendingGlobalBackoffPath $keeperRoot)) 'local network failure creates no pending cluster marker'
+    Assert-False (Get-GlobalBackoff -Config $cfg -KeeperRoot $keeperRoot).active 'local network failure creates no active cluster backoff'
     Clear-Backoff $keeperRoot
     Clear-GlobalBackoff -ClonePath $repos.clone
     $env:CQK_MOCK_MODE = 'normal'
@@ -338,7 +340,7 @@ try {
     $oldHist = Join-Path (Get-HistoryDir $keeperRoot) 'events-2026-01-01.jsonl'
     [System.IO.File]::WriteAllText($oldHist, '{}')
     (Get-Item $oldHist).LastWriteTime = $old
-    # keeperRoot4 renewed the lease during its drain; expire it so keeperRoot
+    # keeperRoot4 acquired the lease during its drain; expire it so keeperRoot
     # can take over and reach the retention stage.
     $blob5 = Get-RemoteBranchBlob -RepoPath $repos.clone -Branch 'cqk/coordination' -PathInRepo 'coordination/lease.json'
     $stale5 = @{ schema = 1; ownerId = 'GHOST2'; ownerLabel = 'ghost'

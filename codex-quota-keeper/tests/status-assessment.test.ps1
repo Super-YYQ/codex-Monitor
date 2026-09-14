@@ -39,7 +39,8 @@ function New-StubStatus {
         mode                = 'MonitorOnly'
         autoAnchor          = $false
         pollIntervalMinutes = 60
-        anchorKeepalive     = @{ intervalMinutes = 300; lastAnchorAt = $null }
+        anchorExpiry        = @{ windows = @(); installed = $false; nextRunTime = $null; lastAnchorAt = $null }
+        anchorSchedule      = @{ slots = @() }
         task                = @{
             installed           = $true; enabled = $true
             lastRunTime         = $Now; lastResult = 0
@@ -65,7 +66,7 @@ function New-StubStatus {
 
 function New-StubConfig {
     param([bool]$Coordination = $true, [bool]$AutoAnchor = $false, [int]$Poll = 60,
-        [int]$LeaseTtl = 180, [int]$Grace = 5, [string[]]$Schedule = @(), [int]$Keepalive = 300)
+        [int]$LeaseTtl = 180, [int]$Grace = 5, [string[]]$Schedule = @(), [string[]]$AnchorOnExpiry = @())
     return New-TestConfig @{
         mode   = $(if ($AutoAnchor) { 'AutoAnchor' } else { 'MonitorOnly' })
         poll   = @{ intervalMinutes = $Poll }
@@ -76,7 +77,7 @@ function New-StubConfig {
         }
         codex  = @{ autoAnchor = @{
             enabled = $AutoAnchor; maxPerDay = 6; minimumGapMinutes = 300
-            keepaliveIntervalMinutes = $Keepalive; schedule = $Schedule
+            anchorOnExpiry = $AnchorOnExpiry; schedule = $Schedule
         } }
     }
 }
@@ -128,8 +129,8 @@ try {
         'QUOTA_NEVER_READ', 'QUOTA_STALE', 'QUOTA_TOO_OLD', 'QUOTA_READ_FAILED',
         'AUTH_PROBE_FAILED', 'LEASE_TTL_TOO_SHORT', 'LEASE_TTL_LOW_MARGIN', 'BACKOFF_ACTIVE',
         'ROLE_UNKNOWN', 'LAST_ERROR_RECENT', 'GIT_UNREACHABLE',
-        'LOCAL_ONLY', 'AUTOANCHOR_ENABLED', 'AUTOANCHOR_OFF', 'ANCHOR_JUDGMENT_SUPPRESSED',
-        'KEEPALIVE_OFF', 'BACKOFF_ACTIVE_SINGLE', 'ROLE_PASSIVE', 'RUNNER_RUNNING',
+        'LOCAL_ONLY', 'AUTOANCHOR_ENABLED', 'AUTOANCHOR_OFF', 'ANCHOR_TRIGGERS_OFF',
+        'BACKOFF_ACTIVE_SINGLE', 'ROLE_PASSIVE', 'RUNNER_RUNNING',
         'LIVE_PROBE_OK', 'NEXT_RUN_DELAYED', 'ANCHOR_GAP_COOLDOWN', 'TASK_TIME_LIMIT_TIGHT'
     )
     foreach ($code in $allCodes) {
@@ -420,22 +421,17 @@ try {
     Assert-True ((Get-CodeFinding $aj 'AUTOANCHOR_ENABLED').title -match '实验') '§12: EXPERIMENTAL -> 实验功能'
     Assert-True ("$($ajFind.detail)" -like 'daily cap 6*') '§10 row 10: detail shows the daily cap'
     Assert-True ("$($ajFind.detail)" -like '*today 0*') 'today count shown'
-    Assert-False ((Get-CodeSet $aj) -contains 'ANCHOR_JUDGMENT_SUPPRESSED') 'judgment mode is not suppressed'
-    Assert-False ((Get-CodeSet $aj) -contains 'KEEPALIVE_OFF') 'keepalive on by default'
+    Assert-True ((Get-CodeSet $aj) -contains 'ANCHOR_TRIGGERS_OFF') 'armed config with no schedule/expiry trigger is explicitly read-only'
     Assert-Equal 'HEALTHY' $aj.overall 'AutoAnchor alone is not a fault (§16.5)'
 
     $as = Get-StatusAssessment -Status (New-StubStatus @{ autoAnchor = $true; anchorSchedule = @{ slots = @('09:30', '21:00') } }) `
         -Config (New-StubConfig -AutoAnchor $true -Schedule @('09:30', '21:00')) -KeeperRoot $emptyRoot -Now $Now
-    Assert-True (Test-HasCode $as 'ANCHOR_JUDGMENT_SUPPRESSED') 'schedule mode says the judgment triggers are off'
-    $asFind = Get-CodeFinding $as 'ANCHOR_JUDGMENT_SUPPRESSED'
-    Assert-True ("$($asFind.title)" -match '停用') '§16.5 wording: 已停用'
-    Assert-True ("$($asFind.detail)" -match '09:30') 'detail quotes the slots'
-    Assert-False ((Get-CodeSet $as) -contains 'KEEPALIVE_OFF') 'keepalive note is judgment-mode only'
+    Assert-False (Test-HasCode $as 'ANCHOR_TRIGGERS_OFF') 'schedule is an independent configured trigger'
     Assert-Equal 'HEALTHY' $as.overall 'timer mode is a configuration, not a fault'
 
-    $ak = Get-StatusAssessment -Status (New-StubStatus @{ autoAnchor = $true; anchorKeepalive = @{ intervalMinutes = 0 } }) `
-        -Config (New-StubConfig -AutoAnchor $true -Keepalive 0) -KeeperRoot $emptyRoot -Now $Now
-    Assert-True (Test-HasCode $ak 'KEEPALIVE_OFF') 'keepalive disabled in judgment mode is reported'
+    $ak = Get-StatusAssessment -Status (New-StubStatus @{ autoAnchor = $true }) `
+        -Config (New-StubConfig -AutoAnchor $true) -KeeperRoot $emptyRoot -Now $Now
+    Assert-True (Test-HasCode $ak 'ANCHOR_TRIGGERS_OFF') 'no schedule/expiry trigger is reported'
 
     # ---- Get-StatusAnchorBlock mirrors Test-ShouldAnchor (§16.5) ----------
     Assert-Equal 'ANCHOR_GAP_COOLDOWN' (Get-StatusAnchorBlock -MinimumGapMinutes 300 -LastAnchorAt (ConvertTo-IsoString $Now.AddMinutes(-42)) -Now $Now).code 'gap cooldown reported'

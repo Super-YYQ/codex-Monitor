@@ -87,7 +87,7 @@ function Get-ReasonText {
 }
 
 function New-LocalAutoAnchorConfig {
-    # LOCAL_ONLY (no coordination repo) + the idle trigger. minimumGapMinutes is
+    # LOCAL_ONLY (no coordination repo) + the primary expiry trigger. minimumGapMinutes is
     # deliberately larger than a test run: with anchors.lastAnchorAt cleared the
     # gap is not consulted, so the ONLY thing that can block the next tick is the
     # durable claim file - which is exactly the guarantee under test.
@@ -95,7 +95,7 @@ function New-LocalAutoAnchorConfig {
     $cfgFile = Join-Path $KeeperRoot 'config.json'
     $cfg = New-TestConfig @{
         mode    = 'AutoAnchor'
-        codex   = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 300; keepaliveIntervalMinutes = 0 } }
+        codex   = @{ command = $mockPath; queryTimeoutSeconds = 15; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 300; anchorOnExpiry = @('primary') } }
         github  = @{ coordination = @{ enabled = $false }; historySync = @{ enabled = $false } }
         logging = @{ retentionDays = $RetentionDays; includeMachineLabel = $false }
     }
@@ -168,23 +168,17 @@ try {
     New-Item -ItemType Directory -Path $rootB -Force | Out-Null
     $cB = New-LocalAutoAnchorConfig -KeeperRoot $rootB
     $execArgsB = Join-Path $ws 'exec-args-crash.txt'
-    $env:CQK_MOCK_MODE = 'idle'
+    $env:CQK_MOCK_MODE = 'expiry-primary'
     $env:CQK_MOCK_EXEC = 'ok'
     $env:CQK_MOCK_EXEC_ARGS_FILE = $execArgsB
 
-    $rB1 = Invoke-RunnerSub -KeeperRoot $rootB -ConfigFile $cB.path
-    Assert-Equal 0 $rB1.exitCode "baseline run ok ($($rB1.output))"
-    Assert-False (Test-Path -LiteralPath (Get-AnchorClaimsDir $rootB)) 'baseline poll creates no claim (guard denies first)'
-    Assert-False (Test-Path -LiteralPath $execArgsB) 'baseline poll never reaches the CLI'
-
     $rB2 = Invoke-RunnerSub -KeeperRoot $rootB -ConfigFile $cB.path
-    Assert-Equal 0 $rB2.exitCode "second observation ok ($($rB2.output))"
+    Assert-Equal 0 $rB2.exitCode "expiry run ok ($($rB2.output))"
     $evtsB2 = Get-LogEventNames $rootB
-    Assert-Contains $evtsB2 'ANCHOR_LOCAL' 'idle run took the local claim path'
-    Assert-Contains $evtsB2 'ANCHOR_EXECUTED' 'idle run anchored'
+    Assert-Contains $evtsB2 'ANCHOR_LOCAL' 'expiry run took the local claim path'
+    Assert-Contains $evtsB2 'ANCHOR_EXECUTED' 'expiry run anchored'
     # Take the eventId from the artifact the run actually wrote rather than
-    # recomputing it: the idle slot is day-scoped, so recomputing across local
-    # midnight would point at a different file.
+    # recomputing it: the exact expiry identity belongs to the trigger module.
     $filesB2 = @(Get-ChildItem -LiteralPath (Get-AnchorClaimsDir $rootB) -Filter '*.json' -File -ErrorAction SilentlyContinue)
     Assert-Equal 1 $filesB2.Count 'exactly one claim file per anchor'
     $claimPathB = $filesB2[0].FullName
@@ -235,11 +229,9 @@ try {
     $rootC = Join-Path $ws 'ordering'
     New-Item -ItemType Directory -Path $rootC -Force | Out-Null
     $cC = New-LocalAutoAnchorConfig -KeeperRoot $rootC
-    $env:CQK_MOCK_MODE = 'idle'
-    $rC1 = Invoke-RunnerSub -KeeperRoot $rootC -ConfigFile $cC.path
-    Assert-Equal 0 $rC1.exitCode "ordering baseline ok ($($rC1.output))"
+    $env:CQK_MOCK_MODE = 'expiry-primary'
     $rC2 = Invoke-RunnerSub -KeeperRoot $rootC -ConfigFile $cC.path
-    Assert-Equal 0 $rC2.exitCode "ordering anchor run ok ($($rC2.output))"
+    Assert-Equal 0 $rC2.exitCode "ordering expiry run ok ($($rC2.output))"
     $filesC = @(Get-ChildItem -LiteralPath (Get-AnchorClaimsDir $rootC) -Filter '*.json' -File -ErrorAction SilentlyContinue)
     Assert-Equal 1 $filesC.Count 'the ordering run wrote exactly one claim'
     $pathC2 = $filesC[0].FullName
@@ -248,7 +240,7 @@ try {
     $evC2 = [System.IO.Path]::GetFileNameWithoutExtension($pathC2)
     $recC2 = ConvertFrom-JsonSafe ([System.IO.File]::ReadAllText($pathC2))
     Assert-Equal 'COMPLETED' $recC2.state 'COMPLETED is durable'
-    Assert-Equal $evC2 $recC2.eventId 'the idle trigger id is the claim key'
+    Assert-Equal $evC2 $recC2.eventId 'the expiry trigger id is the claim key'
     # The regression: the runner used to persist processedEventIds only AFTER the
     # model call returned, so a concurrent process could start its own claim in
     # that gap. Now COMPLETED is on disk first - so the durable record, not the

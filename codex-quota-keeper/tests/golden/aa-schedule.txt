@@ -24,7 +24,6 @@ Codex Quota Keeper 状态
   功能状态        : [注意] 已开启（Experimental）
   工作模式        : 每日定时（Schedule）
   定时时间        : 09:30、21:00
-  周期判断        : 已停用（reset / idle / keepalive 不触发）
   每日上限        : 6 次
   今日已执行      : 2 / 6
   下一个槽位      : 21:00

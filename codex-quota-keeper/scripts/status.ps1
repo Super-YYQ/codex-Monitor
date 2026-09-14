@@ -73,7 +73,10 @@ function Get-KeeperStatus {
         configOk  = $false
         mode      = $null
         autoAnchor = $false
-        anchorKeepalive = @{ intervalMinutes = $null; lastAnchorAt = $null }
+        anchorExpiry = @{ windows = @(); taskName = $null; installed = $false; nextRunTime = $null; lastAnchorAt = $null }
+        # Compatibility projection for pre-v1 status consumers. Keepalive is
+        # permanently off; new callers should read anchorExpiry.
+        anchorKeepalive = @{ intervalMinutes = 0; lastAnchorAt = $null }
         pollIntervalMinutes = $null
         machineId = $null
         machineLabel = $null
@@ -117,6 +120,14 @@ function Get-KeeperStatus {
         if ($null -ne $status.task.intervalMinutes) {
             $status.task.intervalMatchesConfig = ($status.task.intervalMinutes -eq $status.pollIntervalMinutes)
         }
+    }
+    $alarmName = if ([string]::IsNullOrWhiteSpace([string]$cfg.task.alarmName)) { "$taskName.AnchorAlarm" } else { [string]$cfg.task.alarmName }
+    $status.anchorExpiry.taskName = $alarmName
+    $alarmTask = Get-ScheduledTask -TaskName $alarmName -ErrorAction SilentlyContinue
+    if ($alarmTask) {
+        $status.anchorExpiry.installed = $true
+        $alarmInfo = Get-ScheduledTaskInfo -TaskName $alarmName -ErrorAction SilentlyContinue
+        if ($alarmInfo) { $status.anchorExpiry.nextRunTime = $alarmInfo.NextRunTime }
     }
 
     # ---- codex availability ---------------------------------------------------
@@ -165,7 +176,9 @@ function Get-KeeperStatus {
     $state = Load-KeeperState $KeeperRoot
     $aaCfg = Get-AutoAnchorConfig $cfg
     $status.anchorStats = Get-AnchorStatistics -Anchors $state.anchors -Today (Get-Date).ToString('yyyy-MM-dd')
-    $status.anchorKeepalive = @{ intervalMinutes = [int]$aaCfg.keepaliveIntervalMinutes; lastAnchorAt = [string]$state.anchors.lastAnchorAt }
+    $status.anchorExpiry.windows = @($aaCfg.anchorOnExpiry)
+    $status.anchorExpiry.lastAnchorAt = [string]$status.anchorStats.lastAttemptAt
+    $status.anchorKeepalive = @{ intervalMinutes = 0; lastAnchorAt = [string]$status.anchorStats.lastAttemptAt }
     $status.anchorSchedule = @{ slots = @($aaCfg.schedule) }
     $status.anchorExec = @{ model = [string]$aaCfg.model; reasoningEffort = [string]$aaCfg.reasoningEffort }
     $coord = Get-CoordinationConfig $cfg

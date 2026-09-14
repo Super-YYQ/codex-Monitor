@@ -22,6 +22,9 @@ if (-not (Get-Command Invoke-CodexRateLimitsRead -ErrorAction SilentlyContinue))
 if (-not (Get-Command Resolve-ExecutionProfile -ErrorAction SilentlyContinue)) {
     . (Join-Path $script:CqkInstallDir 'codex-profile.ps1')
 }
+if (-not (Get-Command Sync-AnchorAlarmTask -ErrorAction SilentlyContinue)) {
+    . (Join-Path $script:CqkInstallDir 'anchor-alarm.ps1')
+}
 
 function Get-KeeperPowerShellPath {
     $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
@@ -76,7 +79,7 @@ function Get-KeeperHiddenLauncherSpec {
     if (-not $ConfigFile) { $ConfigFile = Get-ConfigPath $root }
     $inner = ('"{0}" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{1}" -KeeperRoot "{2}" -ConfigFile "{3}"' -f `
         $pwsh, $runner, $root, [System.IO.Path]::GetFullPath($ConfigFile))
-    if ($ForceAnchorSwitch) { $inner = "$inner -ForceAnchor" }
+    if ($ForceAnchorSwitch) { $inner = "$inner -ForceAnchor -WaitLockSeconds 60" }
     $name = if ($ForceAnchorSwitch) { 'hidden-launch-forced-anchor.vbs' } else { 'hidden-launch.vbs' }
     $vbsPath = Write-KeeperHiddenLauncherVbs -KeeperRoot $KeeperRoot -InnerCommand $inner -Name $name
     return @{ exe = $wscript; arguments = '"{0}"' -f $vbsPath; vbsPath = $vbsPath; innerCommand = $inner }
@@ -105,6 +108,17 @@ function New-KeeperTaskParameters {
         $triggers = @($trigger, $logonTrigger)
     } else {
         $triggers = @($trigger)
+    }
+    # Schedule slots are native wake-up triggers as well as state-machine
+    # decisions. The polling trigger remains the recovery path when Windows
+    # misses a daily trigger.
+    $scheduleSlots = @()
+    if (Test-AutoAnchorArmed $Config) { $scheduleSlots = @((Get-AutoAnchorConfig $Config).schedule) }
+    foreach ($slot in $scheduleSlots) {
+        $slotTime = [datetime]::MinValue
+        if ([datetime]::TryParseExact([string]$slot, 'HH:mm', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$slotTime)) {
+            $triggers += New-ScheduledTaskTrigger -Daily -At $slotTime
+        }
     }
 
     $settingsParams = @{
@@ -156,7 +170,7 @@ function Get-KeeperTaskDescription {
 
 function Get-ForcedAnchorLaunchSpec {
     # codex.autoAnchor.anchorOnApply=true: build the one-shot runner launch that
-    # forces a CLI anchor right away (no waiting for keepalive or a reset). The
+    # forces a CLI anchor right away (no waiting for schedule or expiry). The
     # runner applies its own guards (daily cap, fail-closed errors, local lock).
     # Pure construction so tests can inspect it without spawning a process.
     param([hashtable]$Config, [string]$KeeperRoot, [string]$ConfigFile)
@@ -196,6 +210,40 @@ function Register-KeeperTask {
         -Action $tp.Action -Trigger $tp.Trigger -Settings $tp.Settings `
         -Principal $tp.Principal -Description $tp.Description -Force | Out-Null
     return $tp.TaskName
+}
+
+function Test-KeeperRootAclSafety {
+    # Advisory only: a broad write ACE lets another local account replace the
+    # scripts/VBS that run in this user's interactive scheduled task.
+    param([string]$KeeperRoot)
+    $root = Get-KeeperRoot $KeeperRoot
+    try { $acl = Get-Acl -LiteralPath $root -ErrorAction Stop }
+    catch { return @{ safe = $false; checked = $false; reason = "could not inspect deployment ACL: $(Hide-SensitiveText $_.Exception.Message)" } }
+    $broadSids = @('S-1-1-0', 'S-1-5-11', 'S-1-5-32-545')
+    foreach ($ace in @($acl.Access)) {
+        if ($ace.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
+        $sid = $null
+        try { $sid = $ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { }
+        $identity = [string]$ace.IdentityReference.Value
+        $broad = ($sid -in $broadSids) -or ($identity -match '(?i)(^|\\)(Everyone|Users|Authenticated Users)$')
+        if ($broad -and (Test-FileSystemRightsWriteCapable -Rights $ace.FileSystemRights)) {
+            return @{ safe = $false; checked = $true; reason = "deployment directory is writable by '$identity' ($($ace.FileSystemRights))" }
+        }
+    }
+    return @{ safe = $true; checked = $true; reason = $null }
+}
+
+function Test-FileSystemRightsWriteCapable {
+    param([System.Security.AccessControl.FileSystemRights]$Rights)
+    # Composite enum values overlap. OR-ing FullControl into a bit mask would also
+    # match read-only ACEs, so compare each write-capable composite in full.
+    foreach ($required in @(
+            [System.Security.AccessControl.FileSystemRights]::Write,
+            [System.Security.AccessControl.FileSystemRights]::Modify,
+            [System.Security.AccessControl.FileSystemRights]::FullControl)) {
+        if (($Rights -band $required) -eq $required) { return $true }
+    }
+    return $false
 }
 
 function Get-ExecutionProfileGate {
@@ -327,6 +375,12 @@ function Invoke-KeeperInstall {
 
     $configCheck = Load-Config $ConfigFile
     $configIssues = @($configCheck.issues)
+    $warnings += @($configCheck.warnings)
+    $aclCheck = Test-KeeperRootAclSafety -KeeperRoot $KeeperRoot
+    if (-not $aclCheck.safe) {
+        $recommendedRoot = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)) 'CodexQuotaKeeper'
+        $warnings += "$($aclCheck.reason). Prefer a user-private deployment such as '$recommendedRoot'."
+    }
 
     # 1. Environment validation (PS version, git, codex, repo whitelist, runtime).
     $pf = Invoke-Preflight -Config $null -ConfigPath $ConfigFile -KeeperRoot $KeeperRoot
@@ -372,9 +426,12 @@ function Invoke-KeeperInstall {
     # 5/6. Register the per-user scheduled task.
     if ($null -eq $loaded) { $loaded = Load-Config $ConfigFile }
     $taskName = Register-KeeperTask -Config $loaded.config -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile
+    $alarm = Sync-AnchorAlarmTask -Config $loaded.config -State (Load-KeeperState $KeeperRoot) `
+        -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile
     $forcedAnchor = Invoke-ForcedAnchorIfRequested -Config $loaded.config -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile
 
-    return @{ configIssues = $configIssues; ok = $true; issues = @(); warnings = $warnings; profile = $gate; taskName = $taskName; machine = $pf.machine; probe = $probe; codexPath = $pf.codexPath; forcedAnchor = $forcedAnchor }
+    if (-not $alarm.ok) { $warnings += "expiry alarm was not reconciled: $($alarm.reason)" }
+    return @{ configIssues = $configIssues; ok = $true; issues = @(); warnings = $warnings; profile = $gate; taskName = $taskName; machine = $pf.machine; probe = $probe; codexPath = $pf.codexPath; forcedAnchor = $forcedAnchor; alarm = $alarm }
 }
 
 function Get-InstallPreflightLines {

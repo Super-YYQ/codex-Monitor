@@ -21,7 +21,8 @@ Assert-Equal 'cqk/coordination' $defaults.github.coordination.branch 'coordinati
 Assert-Equal 'cqk/history' $defaults.github.historySync.branch 'history branch name'
 Assert-True ([bool]$defaults.task.startWithWindows) 'startWithWindows default true'
 Assert-Equal 300 $defaults.codex.autoAnchor.minimumGapMinutes 'minimumGap default 300 (5h quiet after a call)'
-Assert-Equal 300 $defaults.codex.autoAnchor.keepaliveIntervalMinutes 'keepalive default 300 (idle backstop, one 5h window)'
+Assert-Equal 0 @($defaults.codex.autoAnchor.anchorOnExpiry).Count 'expiry anchoring default off'
+Assert-False $defaults.codex.autoAnchor.ContainsKey('keepaliveIntervalMinutes') 'removed keepalive setting is not shipped'
 Assert-False ([bool]$defaults.codex.autoAnchor.anchorOnApply) 'anchorOnApply default off (opt-in immediate trigger)'
 Assert-Equal '' $defaults.codex.autoAnchor.model 'anchor model default empty (CLI config.toml default applies)'
 Assert-Equal '' $defaults.codex.autoAnchor.reasoningEffort 'anchor reasoningEffort default empty (CLI config.toml default applies)'
@@ -182,7 +183,7 @@ try {
     $loaded3 = Load-Config $cfgFile
     Assert-True (@($loaded3.issues).Count -ge 1) 'autoAnchor without AutoAnchor mode rejected'
 
-    Start-TestGroup 'config: keepalive interval validation'
+    Start-TestGroup 'config: anchorOnExpiry validation and keepalive deprecation'
 
     $kaOk = New-TestConfig @{
         mode   = 'AutoAnchor'
@@ -191,8 +192,9 @@ try {
     }
     [void](Write-TestConfigFile $cfgFile $kaOk)
     $lkaOk = Load-Config $cfgFile
-    Assert-Equal 0 @($lkaOk.issues).Count 'keepalive >= minimumGap accepted'
-    Assert-Equal 240 (Get-AutoAnchorConfig $lkaOk.config).keepaliveIntervalMinutes 'keepalive interval parsed'
+    Assert-Equal 0 @($lkaOk.issues).Count 'legacy keepalive is ignored instead of blocking upgrades'
+    Assert-Equal 1 @($lkaOk.warnings).Count 'legacy keepalive emits one deprecation warning'
+    Assert-False (Get-AutoAnchorConfig $lkaOk.config).ContainsKey('keepaliveIntervalMinutes') 'legacy keepalive is not exposed to callers'
 
     $kaBelow = New-TestConfig @{
         mode   = 'AutoAnchor'
@@ -201,7 +203,7 @@ try {
     }
     [void](Write-TestConfigFile $cfgFile $kaBelow)
     $lkaBelow = Load-Config $cfgFile
-    Assert-True (@($lkaBelow.issues).Count -ge 1) 'keepalive below minimumGap rejected'
+    Assert-Equal 0 @($lkaBelow.issues).Count 'legacy keepalive value no longer participates in validation'
 
     $kaOff = New-TestConfig @{
         mode   = 'AutoAnchor'
@@ -210,7 +212,25 @@ try {
     }
     [void](Write-TestConfigFile $cfgFile $kaOff)
     $lkaOff = Load-Config $cfgFile
-    Assert-Equal 0 @($lkaOff.issues).Count 'keepalive=0 (off) accepted'
+    Assert-Equal 0 @($lkaOff.issues).Count 'legacy keepalive=0 remains migration-safe'
+
+    $expiryOk = New-TestConfig @{
+        mode = 'AutoAnchor'
+        github = @{ coordination = @{ enabled = $false; repoPath = '' }; historySync = @{ enabled = $false } }
+        codex = @{ autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; anchorOnExpiry = @('secondary', 'secondary', 'primary') } }
+    }
+    [void](Write-TestConfigFile $cfgFile $expiryOk)
+    $loadedExpiry = Load-Config $cfgFile
+    Assert-Equal 0 @($loadedExpiry.issues).Count 'known expiry window types accepted'
+    Assert-Equal 2 @((Get-AutoAnchorConfig $loadedExpiry.config).anchorOnExpiry).Count 'expiry window types deduplicated'
+
+    $expiryBad = New-TestConfig @{
+        mode = 'AutoAnchor'
+        github = @{ coordination = @{ enabled = $false; repoPath = '' }; historySync = @{ enabled = $false } }
+        codex = @{ autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; anchorOnExpiry = @('weekly') } }
+    }
+    [void](Write-TestConfigFile $cfgFile $expiryBad)
+    Assert-True (@((Load-Config $cfgFile).issues).Count -ge 1) 'unknown expiry window type rejected'
 
     Start-TestGroup 'config: daily schedule validation (timer mode)'
 
@@ -510,6 +530,10 @@ Assert-False ($clean -match 'abc12345') 'token value removed'
 Assert-False ($clean -match 'xyz-98765432') 'refresh token removed'
 Assert-False ($clean -match 'sk-proj-abcdef') 'openai key removed'
 Assert-True ($clean -match 'keep-this') 'benign content preserved'
+$profileLeak = Join-Path $env:USERPROFILE 'private\runtime\state.json'
+$profileClean = Hide-SensitiveText "failed at $profileLeak"
+Assert-False ($profileClean -match [regex]::Escape($env:USERPROFILE)) 'absolute user profile path removed'
+Assert-True ($profileClean -match '<user>') 'user profile path is normalized, not silently dropped'
 
 $rec = Sanitize-Record @{
     ts = 't'; event = 'E'; machineId = 'm'; windows = @(); error = 'token=abc12345';
@@ -549,6 +573,32 @@ try {
     $noTmpLeft = Get-ChildItem -LiteralPath $ws -Filter '*.tmp-*' -Recurse -Force
     Assert-Equal 0 @($noTmpLeft).Count 'no temp files left behind'
 } finally {
+    Remove-TestWorkspace $ws
+}
+
+Start-TestGroup 'runner lock: alarm waiter acquires after another process releases'
+
+$ws = New-TestWorkspace
+$holder = $null
+try {
+    $readyPath = Join-Path $ws 'holder.ready'
+    $helper = Join-Path $testsDir 'fixtures\hold-runner-lock.ps1'
+    $hostExe = (Get-Process -Id $PID).Path
+    $holder = Start-Process -FilePath $hostExe -ArgumentList @(
+        '-NoProfile', '-File', ('"{0}"' -f $helper), '-Root', ('"{0}"' -f $ws),
+        '-ReadyPath', ('"{0}"' -f $readyPath), '-HoldSeconds', '2'
+    ) -PassThru -WindowStyle Hidden
+    $deadline = (Get-Date).AddSeconds(8)
+    while (-not (Test-Path -LiteralPath $readyPath) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 50 }
+    Assert-True (Test-Path -LiteralPath $readyPath) 'holder process acquired the lock'
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $waited = Enter-RunnerLock -Root $ws -WaitSeconds 5
+    $sw.Stop()
+    Assert-True $waited.acquired 'waiting runner acquires after holder exits'
+    Assert-True ($sw.Elapsed.TotalMilliseconds -ge 500) 'waiting runner did not bypass the live mutex'
+    Exit-RunnerLock -Root $ws
+} finally {
+    if ($holder -and -not $holder.HasExited) { Stop-Process -Id $holder.Id -Force -ErrorAction SilentlyContinue }
     Remove-TestWorkspace $ws
 }
 
