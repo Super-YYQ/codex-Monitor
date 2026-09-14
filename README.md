@@ -257,6 +257,7 @@ CI（GitHub Actions）在每次 push / PR 上运行：PS 7 与 PS 5.1 全量测�
 - [docs/security-model.md](docs/security-model.md) — 安全边界与隐私设计
 - [docs/findings.md](docs/findings.md) — 开发发现与决策记录
 - [docs/review-2026-09-13.md](docs/review-2026-09-13.md) — 项目审查：触发模型、架构、缺陷、安全与优化建议
+- [docs/design/autoanchor-trigger-redesign-design-v1.0.md](docs/design/autoanchor-trigger-redesign-design-v1.0.md) — AutoAnchor 触发模型重设计开发设计说明书（依据 review-2026-09-13，工作项 CQK-049~064）
 - [docs/progress.md](docs/progress.md) — 实现进度
 - [docs/task_plan.md](docs/task_plan.md) — 开发任务计划
 - [SECURITY.md](SECURITY.md) — 漏洞报告与安全策略
