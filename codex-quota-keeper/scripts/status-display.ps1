@@ -132,7 +132,9 @@ function Format-WorkModeZh {
     # §11.2 / §11.3 / §15.2 autoAnchor.workMode.
     param([string]$WorkMode)
     if ([string]$WorkMode -eq 'SCHEDULE') { return '每日定时（Schedule）' }
-    return '周期判断'
+    if ([string]$WorkMode -eq 'EXPIRY') { return '到期补空档（Expiry）' }
+    if ([string]$WorkMode -eq 'COMBINED') { return '定时 + 到期补空档' }
+    return '纯查询（无自动触发）'
 }
 
 function Get-StatusSeverityTag {
@@ -362,9 +364,14 @@ function Get-StatusDisplayModel {
         $txt = ('{0}' -f $slot).Trim()
         if ($txt) { $slots += $txt }
     }
+    $expiryWindows = @()
+    foreach ($windowType in @(Get-StatusValue -Map $s -Path 'anchorExpiry.windows')) {
+        $txt = ('{0}' -f $windowType).Trim()
+        if ($txt) { $expiryWindows += $txt }
+    }
     $maxPerDay = 0
     if ($null -ne $aa.maxPerDay) { $maxPerDay = [int]$aa.maxPerDay }
-    $workMode = $(if ($slots.Count -gt 0) { 'SCHEDULE' } else { 'JUDGMENT' })
+    $workMode = $(if ($slots.Count -gt 0 -and $expiryWindows.Count -gt 0) { 'COMBINED' } elseif ($slots.Count -gt 0) { 'SCHEDULE' } elseif ($expiryWindows.Count -gt 0) { 'EXPIRY' } else { 'NONE' })
     $overall = [string](Get-StatusValue -Map $a -Path 'overall')
     if (-not $overall) { $overall = 'HEALTHY' }
 
@@ -439,13 +446,15 @@ function Get-StatusDisplayModel {
             enabled    = [bool](Get-StatusValue -Map $s -Path 'autoAnchor')
             workMode   = $workMode
             slots      = $slots
+            expiryWindows = $expiryWindows
+            alarmInstalled = [bool](Get-StatusValue -Map $s -Path 'anchorExpiry.installed')
+            alarmNext  = Format-StatusDateTime (Get-StatusValue -Map $s -Path 'anchorExpiry.nextRunTime')
             nextSlot   = Get-NextScheduleSlotZh -Slots $slots -Now $Now
             minGap     = $(if ($null -ne $aa.minimumGapMinutes) { [int]$aa.minimumGapMinutes } else { 0 })
-            keepalive  = [int](Get-StatusValue -Map $s -Path 'anchorKeepalive.intervalMinutes')
             maxPerDay  = $maxPerDay
             today      = Get-StatusAnchorToday -State $st -Today $Now.ToString('yyyy-MM-dd')
             # §11.2 shows '2026-09-08 10:03' - minute precision, like the reset times.
-            lastAt     = Format-StatusDateTime (Get-StatusValue -Map $s -Path 'anchorKeepalive.lastAnchorAt') 'yyyy-MM-dd HH:mm'
+            lastAt     = Format-StatusDateTime (Get-StatusValue -Map $s -Path 'anchorExpiry.lastAnchorAt') 'yyyy-MM-dd HH:mm'
             model      = $model
             effort     = $effort
             # §16.5: an empty model/effort must never render as an empty value.
@@ -582,18 +591,13 @@ function Get-StatusDisplayLines {
     } else {
         Write-StatusRow $lines -Label '功能状态' -Value '已开启（Experimental）' -Severity 'WARNING'
         Write-StatusRow $lines -Label '工作模式' -Value (Format-WorkModeZh $aa.workMode)
-        if ($aa.workMode -eq 'SCHEDULE') {
-            # §11.3: slots are 、-separated; judgment is explicitly NOT live. No
-            # severity tags in this block - §11.3's sample rows are all plain, and an
-            # [信息] on every line makes the one row that matters read as noise.
-            Write-StatusRow $lines -Label '定时时间' -Value ($aa.slots -join '、')
-            Write-StatusRow $lines -Label '周期判断' -Value '已停用（reset / idle / keepalive 不触发）'
-        } else {
-            Write-StatusRow $lines -Label '触发方式' -Value '窗口重置 / 首次空闲检测 / Keepalive'
-            if ($aa.minGap -gt 0) { Write-StatusRow $lines -Label '最小间隔' -Value "$($aa.minGap) 分钟" }
-            if ($aa.keepalive -gt 0) { Write-StatusRow $lines -Label 'Keepalive' -Value "$($aa.keepalive) 分钟" }
-            else { Write-StatusRow $lines -Label 'Keepalive' -Value '已关闭（仅重置/空闲触发）' }
+        if ($aa.slots.Count -gt 0) { Write-StatusRow $lines -Label '定时时间' -Value ($aa.slots -join '、') }
+        if ($aa.expiryWindows.Count -gt 0) {
+            Write-StatusRow $lines -Label '到期锚定' -Value ($aa.expiryWindows -join '、')
+            Write-StatusRow $lines -Label '到期闹钟' -Value $(if ($aa.alarmInstalled) { $(if ($aa.alarmNext) { $aa.alarmNext } else { '已注册' }) } else { '等待成功读取后注册' })
         }
+        if ($aa.workMode -eq 'NONE') { Write-StatusRow $lines -Label '触发方式' -Value '未配置（仅查询额度）' }
+        if ($aa.expiryWindows.Count -gt 0 -and $aa.minGap -gt 0) { Write-StatusRow $lines -Label '到期最小间隔' -Value "$($aa.minGap) 分钟" }
         if ($aa.maxPerDay -gt 0) { Write-StatusRow $lines -Label '每日上限' -Value "$($aa.maxPerDay) 次" }
         $capText = "$($aa.today) / $(if ($aa.maxPerDay -gt 0) { $aa.maxPerDay } else { '不限' })"
         if ($aa.maxPerDay -gt 0 -and $aa.today -ge $aa.maxPerDay) {
@@ -602,7 +606,7 @@ function Get-StatusDisplayLines {
         } else {
             Write-StatusRow $lines -Label '今日已执行' -Value $capText
         }
-        if ($aa.workMode -eq 'SCHEDULE' -and $aa.nextSlot) { Write-StatusRow $lines -Label '下一个槽位' -Value $aa.nextSlot }
+        if ($aa.slots.Count -gt 0 -and $aa.nextSlot) { Write-StatusRow $lines -Label '下一个槽位' -Value $aa.nextSlot }
         if ($aa.lastAt) { Write-StatusRow $lines -Label '上次执行' -Value $aa.lastAt }
         # §16.5: an empty model must never render as an empty value.
         Write-StatusRow $lines -Label '执行模型' -Value $aa.modelText
@@ -788,11 +792,10 @@ function Write-StatusTextEn {
     $lines += ('Mode                : {0}' -f $Status.mode)
     if ($Status.autoAnchor) {
         $lines += 'AutoAnchor          : *** ON - EXPERIMENTAL, consumes quota ***'
-        $ka = [int]$Status.anchorKeepalive.intervalMinutes
-        $kaText = if ($ka -le 0) { 'off (reset/idle triggers only)' } else { "every $ka min" }
-        $lastAnchor = [string]$Status.anchorKeepalive.lastAnchorAt
+        $lastAnchor = [string]$Status.anchorExpiry.lastAnchorAt
         $lastText = if ($lastAnchor) { $lastAnchor } else { 'never' }
-        $lines += ('Anchor backstop     : {0} (last anchor: {1})' -f $kaText, $lastText)
+        $expiryText = if (@($Status.anchorExpiry.windows).Count -gt 0) { @($Status.anchorExpiry.windows) -join ', ' } else { 'none' }
+        $lines += ('Anchor on expiry    : {0} (last anchor: {1})' -f $expiryText, $lastText)
         if ($Status.anchorSchedule) {
             $slots = @($Status.anchorSchedule.slots)
             $slotText = if ($slots.Count -gt 0) { $slots -join ', ' } else { 'none' }

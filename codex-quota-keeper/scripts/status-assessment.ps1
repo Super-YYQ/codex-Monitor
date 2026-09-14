@@ -78,14 +78,13 @@ $script:CqkStatusFindingCatalog = @{
     PROFILE_UNAVAILABLE        = @{ severity = 'WARNING'; title = '执行模型暂时无法校验'; action = '检查 Codex 登录和网络，再运行 Status -Live'; titleEn = 'execution profile is unavailable'; actionEn = 'check Codex login and network, then run Status -Live' }
     PROFILE_STALE              = @{ severity = 'WARNING'; title = '执行模型校验结果已过期或尚不存在'; action = '运行 Status -Live 获取当前校验结果'; titleEn = 'execution profile is stale or missing'; actionEn = 'run Status -Live to validate the current profile' }
     AUTOANCHOR_OFF              = @{ severity = 'INFO'; title = '自动锚定未开启'; action = '当前只读取额度，不会自动调用模型'; titleEn = 'auto-anchoring is OFF'; actionEn = 'quota is read only; no model call is made' }
-    ANCHOR_JUDGMENT_SUPPRESSED  = @{ severity = 'INFO'; title = '周期判断已停用（定时模式）'; action = '当前仅按定时槽位触发；如需恢复判断触发，清空 codex.autoAnchor.schedule'; titleEn = 'judgment triggers disabled (schedule mode)'; actionEn = 'only schedule slots fire now; clear codex.autoAnchor.schedule to restore judgment' }
-    KEEPALIVE_OFF               = @{ severity = 'INFO'; title = '空闲兜底（Keepalive）已关闭'; action = '仅按窗口重置与空闲判定触发；如需兜底把 keepaliveIntervalMinutes 设为大于 0'; titleEn = 'idle backstop (keepalive) is off'; actionEn = 'reset/idle triggers only; set keepaliveIntervalMinutes > 0 for the backstop' }
+    ANCHOR_TRIGGERS_OFF         = @{ severity = 'INFO'; title = '自动锚定未配置触发器'; action = '当前仍只查询额度；配置 schedule 和/或 anchorOnExpiry 后才会自动调用模型'; titleEn = 'no auto-anchor trigger configured'; actionEn = 'quota remains read-only; configure schedule and/or anchorOnExpiry to call a model' }
     BACKOFF_ACTIVE_SINGLE       = @{ severity = 'INFO'; title = '本机退避中（单机模式）'; action = '不影响总体状态；到期自动恢复'; titleEn = 'local backoff active (single machine)'; actionEn = 'does not affect the overall verdict in single-machine mode' }
     ROLE_PASSIVE                = @{ severity = 'INFO'; title = '本机为待机节点'; action = '属正常分工：由负责人机器访问 Codex，本机不访问'; titleEn = 'this machine is a passive node'; actionEn = 'normal split: the leader polls Codex, this machine does not' }
     RUNNER_RUNNING              = @{ severity = 'INFO'; title = '轮询进程正在运行'; action = '无需干预'; titleEn = 'runner process is running now'; actionEn = 'no action needed' }
     LIVE_PROBE_OK               = @{ severity = 'INFO'; title = '实时连接检测通过'; action = '无需干预'; titleEn = 'live connection probe passed'; actionEn = 'no action needed' }
     NEXT_RUN_DELAYED            = @{ severity = 'INFO'; title = '下次运行时间晚于预期'; action = '若持续如此，检查电脑睡眠设置与任务计划程序'; titleEn = 'next run is later than expected'; actionEn = 'if it persists, check sleep settings and Task Scheduler' }
-    ANCHOR_GAP_COOLDOWN         = @{ severity = 'INFO'; title = '自动锚定处于静默期'; action = '属正常节流；达到最小间隔或窗口重置后即可再次触发'; titleEn = 'auto-anchor quiet period'; actionEn = 'normal throttling; the next trigger needs the minimum gap or a window reset' }
+    ANCHOR_GAP_COOLDOWN         = @{ severity = 'INFO'; title = '自动锚定处于静默期'; action = '属正常节流；达到 expiry 最小间隔后可再次触发'; titleEn = 'auto-anchor quiet period'; actionEn = 'normal throttling; the next expiry trigger needs the minimum gap' }
 }
 
 function Get-StatusFindingCatalog {
@@ -692,14 +691,9 @@ function Get-StatusAssessment {
             if ($profileCode) { Add-StatusFinding -Assessment $a -Code $profileCode -Detail ([string]$ep.reason) -Now $Now }
         }
         $nonEmptySlots = @($slots | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
-        if ($nonEmptySlots.Count -gt 0) {
-            # §11.3: the user must not be left thinking a window reset would fire.
-            # Quote the slots so "定时模式" names the actual times instead of just
-            # asserting that some schedule exists.
-            Add-StatusFinding -Assessment $a -Code 'ANCHOR_JUDGMENT_SUPPRESSED' `
-                -Detail ("schedule: " + ($nonEmptySlots -join ', ') + "; reset/idle/keepalive triggers disabled") -Now $Now
-        } elseif ([int](& $gv 'anchorKeepalive.intervalMinutes') -le 0) {
-            Add-StatusFinding -Assessment $a -Code 'KEEPALIVE_OFF' -Now $Now
+        $expiryWindows = @(& $gv 'anchorExpiry.windows') | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+        if ($nonEmptySlots.Count -eq 0 -and @($expiryWindows).Count -eq 0) {
+            Add-StatusFinding -Assessment $a -Code 'ANCHOR_TRIGGERS_OFF' -Now $Now
         }
         $block = Get-StatusAnchorBlock -QuotaStale ([bool](& $gv 'quota.stale')) `
             -RateLimitReachedType ([string](Get-StatusValue -Map $state -Path 'rateLimitReachedType')) `

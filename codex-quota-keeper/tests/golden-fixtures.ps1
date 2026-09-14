@@ -51,7 +51,7 @@ function New-GoldenStatus {
         pollIntervalMinutes = 60
         machineLabel        = 'Home PC'
         machineId           = '4f90abcd-1234'
-        anchorKeepalive     = @{ intervalMinutes = 300; lastAnchorAt = $null }
+        anchorExpiry        = @{ windows = @(); installed = $false; nextRunTime = $null; lastAnchorAt = $null }
         anchorSchedule      = @{ slots = @() }
         anchorExec          = @{ model = ''; reasoningEffort = '' }
         task                = @{
@@ -79,7 +79,7 @@ function New-GoldenStatus {
 
 function New-GoldenConfig {
     param([bool]$Coordination = $true, [bool]$AutoAnchor = $false, [int]$Poll = 60,
-        [int]$LeaseTtl = 180, [int]$Grace = 5, [string[]]$Schedule = @(), [int]$Keepalive = 300)
+        [int]$LeaseTtl = 180, [int]$Grace = 5, [string[]]$Schedule = @(), [string[]]$AnchorOnExpiry = @())
     $now = $script:GoldenNow
     return @{
         schemaVersion = 2
@@ -94,7 +94,7 @@ function New-GoldenConfig {
             command = 'auto'; queryTimeoutSeconds = 20; proxy = ''
             autoAnchor = @{
                 enabled = $AutoAnchor; prompt = 'OK'; maxPerDay = 6; minimumGapMinutes = 300
-                keepaliveIntervalMinutes = $Keepalive; schedule = $Schedule
+                anchorOnExpiry = $AnchorOnExpiry; schedule = $Schedule
             }
         }
         logging       = @{ retentionDays = 90; includeMachineLabel = $false }
@@ -126,18 +126,18 @@ function Get-GoldenCases {
             Status = (New-GoldenStatus @{ quota = $freshQuota } -LocalOnly)
             Config = (New-GoldenConfig -Coordination $false)
         }
-        # case 2 - judgment mode: trigger list, gap, keepalive, cap, CLI defaults.
-        # The state fixture agrees with status.anchorKeepalive.lastAnchorAt (on a real
+        # case 2 - expiry mode: tracked windows, gap, cap, CLI defaults.
+        # The state fixture agrees with status.anchorExpiry.lastAnchorAt (on a real
         # machine both come from that same file) - 2h < minimumGapMinutes 300, so this
         # is also the snapshot that pins ANCHOR_GAP_COOLDOWN: the 当前锚定 row rendered
         # as INFO, which unlike ERROR/WARNING carries no 建议 continuation.
-        'aa-judgment' = @{
+        'aa-expiry' = @{
             Status  = (New-GoldenStatus @{
                 autoAnchor      = $true; mode = 'AutoAnchor'
-                anchorKeepalive = @{ intervalMinutes = 300; lastAnchorAt = (Format-GoldenStamp $now.AddHours(-2)) }
+                anchorExpiry    = @{ windows = @('secondary'); installed = $true; nextRunTime = (Format-GoldenStamp $now.AddDays(5)); lastAnchorAt = (Format-GoldenStamp $now.AddHours(-2)) }
                 quota           = $freshQuota
             } -LocalOnly)
-            Config  = (New-GoldenConfig -Coordination $false -AutoAnchor $true)
+            Config  = (New-GoldenConfig -Coordination $false -AutoAnchor $true -AnchorOnExpiry @('secondary'))
             Anchors = @{ day = $now.ToString('yyyy-MM-dd'); count = 1; lastAnchorAt = (Format-GoldenStamp $now.AddHours(-2)) }
         }
         # case 3 - schedule mode: slots + next slot, periodic judgment explicitly
@@ -158,12 +158,13 @@ function Get-GoldenCases {
         'multi-pc-error' = @{
             Status = (New-GoldenStatus @{
                 autoAnchor = $true; mode = 'AutoAnchor'
+                anchorExpiry = @{ windows = @('secondary'); installed = $false; nextRunTime = $null; lastAnchorAt = $null }
                 git        = @{ enabled = $true; repoPath = 'R:\repo'; reachable = $false }
                 role       = @{ role = 'UNKNOWN'; leaderOwner = $null; leaderLabel = $null; leaseExpiresAt = $null; localOnly = $false }
                 quota      = @{ lastReadAt = (Format-GoldenStamp $now.AddDays(-2)); stale = $true; windows = @() }
                 lastError  = 'auth failed for user bob: token=sk-fake-0123456789abcdef'
             })
-            Config = (New-GoldenConfig -AutoAnchor $true -LeaseTtl 30)
+            Config = (New-GoldenConfig -AutoAnchor $true -LeaseTtl 30 -AnchorOnExpiry @('secondary'))
         }
     }
 }

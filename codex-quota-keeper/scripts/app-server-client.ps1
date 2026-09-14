@@ -45,7 +45,7 @@ function Get-CodexAppServerErrorKind {
     if ($Code -in @('401', '403')) { return 'AUTH_ERROR' }
     if ($Code -eq '429') { return 'RATE_LIMITED' }
     if ($Message -match '(?i)\b(401|403)\b|unauthori[sz]ed|\bauth(?:entication|enticated)?\b|not\s+logged|login required') { return 'AUTH_ERROR' }
-    if ($Message -match '(?i)error sending request|connection\s+(refused|reset|closed|aborted)|resolving host|unreachable|no such host|dns|tls|certificate|proxy connect') { return 'NETWORK_ERROR' }
+    if ($Message -match '(?i)error sending request|connection\s+(refused|reset|closed|aborted)|resolving host|unreachable|no such host|\bdns\b|\btls\b|certificate|proxy connect') { return 'NETWORK_ERROR' }
     if ($Message -match '(?i)timed?\s*out|timeout') { return 'TIMEOUT' }
     if ($Message -match '(?i)\b429\b|too many requests|usage.?limit|rate.?limit\s+(is\s+)?(exceeded|reached|hit)') { return 'RATE_LIMITED' }
     return 'PROTOCOL_ERROR'

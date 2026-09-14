@@ -258,6 +258,16 @@ function Hide-SensitiveText {
         $result,
         '(?i)(openai[-_ ]?api[-_ ]?key|access[_-]?token|refresh[_-]?token|authorization|cookie|session[_-]?id|api[_-]?key|password|secret|token)(\s*[=:]\s*)"?[^"\s,;}]*"?',
         '$1$2[REDACTED]')
+    # Error messages frequently contain absolute paths. Keep the useful path
+    # suffix while preventing the local Windows account name from entering
+    # runtime logs or remotely-synced history (CQK-059).
+    $userRoots = @(
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile),
+        [string]$env:USERPROFILE
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique
+    foreach ($userRoot in $userRoots) {
+        $result = [regex]::Replace($result, [regex]::Escape([string]$userRoot), '<user>', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    }
     return $result
 }
 
@@ -337,13 +347,13 @@ function Get-AnchorStatistics {
 }
 
 function Get-AutoAnchorConfig {
-    # v2: codex.autoAnchor = @{ enabled; prompt; maxPerDay; minimumGapMinutes; keepaliveIntervalMinutes; anchorOnApply;
-    #                           schedule; model; reasoningEffort }
+    # v2: codex.autoAnchor = @{ enabled; prompt; maxPerDay; minimumGapMinutes; anchorOnApply;
+    #                           schedule; anchorOnExpiry; model; reasoningEffort }
     # v1: codex.autoAnchor = bool + codex.anchorPrompt / maxAnchorsPerDay / minimumAnchorGapMinutes /
     #                        anchorKeepaliveMinutes / anchorOnApply
     param([hashtable]$Config)
     if ($null -eq $Config -or $null -eq $Config.codex) {
-        return @{ enabled = $false; prompt = ''; maxPerDay = 0; minimumGapMinutes = 0; keepaliveIntervalMinutes = 0; anchorOnApply = $false; model = ''; reasoningEffort = '' }
+        return @{ enabled = $false; prompt = ''; maxPerDay = 0; minimumGapMinutes = 0; anchorOnApply = $false; schedule = @(); anchorOnExpiry = @(); model = ''; reasoningEffort = ''; deprecatedKeepaliveConfigured = $false }
     }
     $aa = $Config.codex.autoAnchor
     if ($aa -is [hashtable]) {
@@ -352,11 +362,12 @@ function Get-AutoAnchorConfig {
             prompt             = [string]$aa.prompt
             maxPerDay          = [int]$aa.maxPerDay
             minimumGapMinutes  = [int]$aa.minimumGapMinutes
-            keepaliveIntervalMinutes = [int]$aa.keepaliveIntervalMinutes
             anchorOnApply      = [bool]($aa.anchorOnApply -eq $true)
             schedule           = @(@($aa.schedule) | Where-Object { $_ -and -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ } | Select-Object -Unique)
+            anchorOnExpiry     = @(@($aa.anchorOnExpiry) | Where-Object { [string]$_ -in @('primary', 'secondary') } | ForEach-Object { [string]$_ } | Select-Object -Unique)
             model              = [string]$aa.model
             reasoningEffort    = [string]$aa.reasoningEffort
+            deprecatedKeepaliveConfigured = [bool]$aa.ContainsKey('keepaliveIntervalMinutes')
         }
     }
     return @{
@@ -364,11 +375,12 @@ function Get-AutoAnchorConfig {
         prompt             = [string]$Config.codex.anchorPrompt
         maxPerDay          = [int]$Config.codex.maxAnchorsPerDay
         minimumGapMinutes  = [int]$Config.codex.minimumAnchorGapMinutes
-        keepaliveIntervalMinutes = [int]$Config.codex.anchorKeepaliveMinutes
         anchorOnApply      = [bool]($Config.codex.anchorOnApply -eq $true)
         schedule           = @()
+        anchorOnExpiry     = @()
         model              = ''
         reasoningEffort    = ''
+        deprecatedKeepaliveConfigured = [bool]$Config.codex.ContainsKey('anchorKeepaliveMinutes')
     }
 }
 
@@ -666,10 +678,10 @@ function Get-DefaultConfig {
                 enabled = $false
                 prompt = 'Reply exactly OK.'
                 maxPerDay = 6
-                minimumGapMinutes = 300           # 5h quiet: 一次调用后 5 小时窗口内不再触发（force 除外）
-                keepaliveIntervalMinutes = 300    # 0 = off; >0 = idle backstop: 距上次锚定超过该值仍未观测到滚动则自触发（默认 = 一个 5 小时窗口）
+                minimumGapMinutes = 300           # expiry 次级安全间隔；schedule / force 不受此限制
                 anchorOnApply = $false   # true = install.cmd/apply-config.cmd fire one forced anchor right away
-                schedule = @()           # 每日定时触发（"HH:mm" 本地时间数组）：到点后第一次轮询触发一次；空 = 关闭
+                schedule = @()           # 每日 5h 对齐触发（"HH:mm" 本地时间数组）；与 anchorOnExpiry 可同时启用
+                anchorOnExpiry = @()     # 到期补空档：可选 primary / secondary；空 = 不补
                 model = ''               # 锚定用的模型（-m）；空 = 沿用 ~/.codex/config.toml 默认
                 reasoningEffort = ''     # 锚定用的思考等级（-c model_reasoning_effort=）；空 = 沿用 CLI 默认
             }
@@ -679,6 +691,7 @@ function Get-DefaultConfig {
             startWithWindows = $true
             runIfNetworkAvailable = $true
             wakeToRun = $false
+            alarmName = ''               # 空 = <task.name>.AnchorAlarm
         }
     }
 }
@@ -717,7 +730,6 @@ function Convert-LegacyConfig {
         if ($c.ContainsKey('anchorPrompt')) { $aa.prompt = $c.anchorPrompt }
         if ($c.ContainsKey('maxAnchorsPerDay')) { $aa.maxPerDay = $c.maxAnchorsPerDay }
         if ($c.ContainsKey('minimumAnchorGapMinutes')) { $aa.minimumGapMinutes = $c.minimumAnchorGapMinutes }
-        if ($c.ContainsKey('anchorKeepaliveMinutes')) { $aa.keepaliveIntervalMinutes = $c.anchorKeepaliveMinutes }
         if ($c.ContainsKey('anchorOnApply')) { $aa.anchorOnApply = ($c.anchorOnApply -eq $true) }
         $Config.codex.autoAnchor = $aa
     }
@@ -817,12 +829,6 @@ function Test-ConfigShape {
         if ([int]$aa.minimumGapMinutes -lt 1) {
             $issues += 'codex.autoAnchor.minimumGapMinutes must be >= 1'
         }
-        if ([int]$aa.keepaliveIntervalMinutes -lt 0) {
-            $issues += 'codex.autoAnchor.keepaliveIntervalMinutes must be >= 0 (0 = off)'
-        }
-        if ([int]$aa.keepaliveIntervalMinutes -gt 0 -and [int]$aa.keepaliveIntervalMinutes -lt [int]$aa.minimumGapMinutes) {
-            $issues += ("codex.autoAnchor.keepaliveIntervalMinutes ({0}) must be >= minimumGapMinutes ({1}) when enabled" -f [int]$aa.keepaliveIntervalMinutes, [int]$aa.minimumGapMinutes)
-        }
         foreach ($slot in @($aa.schedule)) {
             if ([string]$slot -notmatch '^([01]\d|2[0-3]):[0-5]\d$') {
                 $issues += ("codex.autoAnchor.schedule entries must be zero-padded 24h 'HH:mm'; got '$slot'")
@@ -830,6 +836,12 @@ function Test-ConfigShape {
         }
         if (@($aa.schedule).Count -gt [int]$aa.maxPerDay) {
             $issues += ("codex.autoAnchor.schedule has {0} slot(s) but maxPerDay is {1}; the daily cap would block later slots" -f @($aa.schedule).Count, [int]$aa.maxPerDay)
+        }
+        foreach ($windowType in @($Config.codex.autoAnchor.anchorOnExpiry)) {
+            if ([string]::IsNullOrWhiteSpace([string]$windowType)) { continue }
+            if ([string]$windowType -notin @('primary', 'secondary')) {
+                $issues += ("codex.autoAnchor.anchorOnExpiry entries must be 'primary' or 'secondary'; got '$windowType'")
+            }
         }
         # Model / reasoning effort passthrough (codex exec -m / -c model_reasoning_effort=).
         # Only the safe SHAPE is enforced here - deliberately no static whitelist,
@@ -861,27 +873,42 @@ function Test-ConfigShape {
     return $issues
 }
 
+function Get-ConfigDeprecationWarnings {
+    param([hashtable]$RawConfig)
+    $warnings = @()
+    if ($RawConfig -and $RawConfig.codex -is [hashtable]) {
+        $codex = $RawConfig.codex
+        if ($codex.autoAnchor -is [hashtable] -and $codex.autoAnchor.ContainsKey('keepaliveIntervalMinutes')) {
+            $warnings += 'codex.autoAnchor.keepaliveIntervalMinutes is deprecated and ignored; use anchorOnExpiry=["primary"] for continuous 5h window anchoring'
+        } elseif ($codex.ContainsKey('anchorKeepaliveMinutes')) {
+            $warnings += 'codex.anchorKeepaliveMinutes is deprecated and ignored; use codex.autoAnchor.anchorOnExpiry=["primary"]'
+        }
+    }
+    return ,$warnings
+}
+
 function Load-Config {
-    # Returns @{ config = <hashtable with defaults merged>; issues = @(); path = ... }
+    # Returns @{ config = <hashtable with defaults merged>; issues = @(); warnings = @(); path = ... }
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) {
-        return @{ config = $null; issues = @("config file not found: $Path (copy config.example.jsonc to config.json)"); path = $Path }
+        return @{ config = $null; issues = @("config file not found: $Path (copy config.example.jsonc to config.json)"); warnings = @(); path = $Path }
     }
     $raw = Read-JsonFile $Path
     if ($null -eq $raw) {
-        return @{ config = $null; issues = @("config file is not valid JSON: $Path"); path = $Path }
+        return @{ config = $null; issues = @("config file is not valid JSON: $Path"); warnings = @(); path = $Path }
     }
     if ($raw -isnot [hashtable]) {
-        return @{ config = $null; issues = @('config root must be a JSON object'); path = $Path }
+        return @{ config = $null; issues = @('config root must be a JSON object'); warnings = @(); path = $Path }
     }
     try {
+        $warnings = Get-ConfigDeprecationWarnings $raw
         $raw = Convert-LegacyConfig $raw
         $merged = Merge-ConfigDefaults (Get-DefaultConfig) $raw
         $issues = Test-ConfigShape $merged
     } catch {
-        return @{ config = $null; issues = @("config validation error: $($_.Exception.Message)"); path = $Path }
+        return @{ config = $null; issues = @("config validation error: $($_.Exception.Message)"); warnings = @(); path = $Path }
     }
-    return @{ config = $merged; issues = $issues; path = $Path }
+    return @{ config = $merged; issues = $issues; warnings = $warnings; path = $Path }
 }
 
 # ---------------------------------------------------------------------------
@@ -991,7 +1018,7 @@ function Clear-PendingGlobalBackoff {
 # Local mutual exclusion: named mutex + lock file (two layers per doc).
 
 function Enter-RunnerLock {
-    param([string]$Root)
+    param([string]$Root, [ValidateRange(0, 3600)][int]$WaitSeconds = 0)
     Ensure-Directory (Get-LockDir $Root) | Out-Null
     $lockPath = Join-Path (Get-LockDir $Root) 'runner.lock'
     $rootKey = (Get-Sha256Hex ("lock:" + (Get-KeeperRoot $Root).ToLowerInvariant())).Substring(0, 12)
@@ -1022,7 +1049,7 @@ function Enter-RunnerLock {
     }
     if ($mutex) {
         $got = $false
-        try { $got = $mutex.WaitOne(0) } catch { $got = $false }
+        try { $got = $mutex.WaitOne([TimeSpan]::FromSeconds($WaitSeconds)) } catch { $got = $false }
         if (-not $got) {
             $fileDiag = 'no lock file present'
             if (Test-Path -LiteralPath $lockPath) {
@@ -1031,7 +1058,7 @@ function Enter-RunnerLock {
             }
             $mutex.Dispose()
             return @{ acquired = $false; lockPath = $lockPath; owner = $null; layer = 'mutex';
-                      detail = "named mutex held ($mutexName); $fileDiag" }
+                      detail = "named mutex held ($mutexName) after waiting $WaitSeconds second(s); $fileDiag" }
         }
     } elseif (Test-Path -LiteralPath $lockPath) {
         # Layer 1 fallback, used only when the mutex API is unavailable: break a

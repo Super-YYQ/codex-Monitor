@@ -25,8 +25,10 @@
 #   limit-reached rateLimitReachedType set on the result
 #   rate-limit    error response mentioning 429/usage limit (backoff path)
 #   network-error transport failure wording ("error sending request", must NOT be classified 429)
-#   idle          zero usage on both windows (never-used account, scenario-1 idle detection)
+#   idle          legacy zero-usage fixture retained for snapshot/read tests
 #   reset         primary window renewed: old resetsAt past, new resetsAt future
+#   expiry-active / expiry-primary / expiry-secondary / multi-expired
+#                 deterministic fixtures for the v1 expiry trigger model
 #   unknown-schema rateLimits shape unrecognized -> client must fail closed
 #   unrecognized-root result has no rateLimits structure at all
 #   auth-error    error response mentioning authentication
@@ -492,13 +494,36 @@ while ($true) {
                     $windows.secondary = Get-MockWindow 10080 18 1788667200
                     $extra.limitId = 'codex-default'
                 }
+                'expiry-active' {
+                    $windows.primary = Get-MockWindow 300 1 2000000000
+                    $windows.secondary = Get-MockWindow 10080 1 2000600000
+                    $extra.limitId = 'codex-default'
+                }
+                'expiry-primary' {
+                    $windows.primary = Get-MockWindow 300 100 1000000000
+                    $windows.secondary = Get-MockWindow 10080 1 2000600000
+                    $extra.limitId = 'codex-default'
+                }
+                'expiry-secondary' {
+                    $windows.primary = Get-MockWindow 300 1 2000000000
+                    $windows.secondary = Get-MockWindow 10080 100 1000600000
+                    $extra.limitId = 'codex-default'
+                }
                 default {
                     $windows.primary = Get-MockWindow 300 25 1788062400
                     $extra.limitId = 'codex-default'
                 }
             }
 
-            if ($mode -eq 'multi-bucket') {
+            if ($mode -eq 'multi-expired') {
+                Send-MockResponse @{
+                    jsonrpc = '2.0'; id = $id
+                    result = @{ rateLimitsByLimitId = @{
+                        'bucket-b' = @{ limitId = 'bucket-b'; limitName = 'Bucket B'; planType = 'pro'; primary = (Get-MockWindow 300 100 1000001000) }
+                        'bucket-a' = @{ limitId = 'bucket-a'; limitName = 'Bucket A'; planType = 'pro'; primary = (Get-MockWindow 300 100 1000000000) }
+                    } }
+                }
+            } elseif ($mode -eq 'multi-bucket') {
                 Send-MockResponse @{
                     jsonrpc = '2.0'; id = $id
                     result  = @{

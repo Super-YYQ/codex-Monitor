@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### AutoAnchor trigger redesign（2026-09-14）
+- `schedule` 与新增的 `anchorOnExpiry` 改为可并行的独立触发器；同轮多个事件合并为一次
+  `codex exec`。schedule 到点时若 primary 已在运行则消费槽位但不执行，避免迟到补打。
+- 删除 reset 驱动、idle 与 keepalive 触发路径；reset 继续作为审计事件。旧
+  `keepaliveIntervalMinutes` 兼容读取但忽略，并提示改用 `anchorOnExpiry:["primary"]`。
+- 状态升级为 schema 3，新增 `expiryTrack`，丢弃旧 `pendingAnchorEvents`；安装器维护一个稳定的
+  一次性到期闹钟任务，并为手动/闹钟并发增加最长 60 秒的 runner 锁等待。
+- 网络/TIMEOUT/EOF 失败只做本机退避；429 与认证失败仍传播集群级退避。DNS/TLS 分类改为词边界匹配。
+- 安装时检查部署根目录 ACL，并推荐 `$env:LOCALAPPDATA\CodexQuotaKeeper`；日志脱敏会归一化用户目录。
+
 ### Production readiness（2026-09-12，尚未发布）
 - 接续 CQK-040 WIP，补齐运行期执行配置门禁；校验失败的重置事件留待下一轮，已存在 Claim 的事件退出待处理队列。
 - runtime/local history/outbox 共用执行审计字段与脱敏规则；损坏待发记录不会随成功批次被删除。

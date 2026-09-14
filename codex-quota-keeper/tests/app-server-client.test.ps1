@@ -140,6 +140,10 @@ Assert-Equal 'AUTH_ERROR' (Get-CodexAppServerErrorKind -Code '' -Message 'Unauth
 Assert-Equal 'AUTH_ERROR' (Get-CodexAppServerErrorKind -Code '403' -Message 'forbidden') '403 code -> AUTH_ERROR'
 Assert-Equal 'PROTOCOL_ERROR' (Get-CodexAppServerErrorKind -Code '-32601' -Message 'method not found') 'unknown method -> PROTOCOL_ERROR'
 Assert-Equal 'PROTOCOL_ERROR' (Get-CodexAppServerErrorKind -Code '-32600' -Message 'invalid cursor: abc') 'bad cursor -> PROTOCOL_ERROR'
+Assert-Equal 'NETWORK_ERROR' (Get-CodexAppServerErrorKind -Code '' -Message 'DNS lookup failed') 'standalone DNS term -> NETWORK_ERROR'
+Assert-Equal 'NETWORK_ERROR' (Get-CodexAppServerErrorKind -Code '' -Message 'TLS handshake failed') 'standalone TLS term -> NETWORK_ERROR'
+Assert-Equal 'PROTOCOL_ERROR' (Get-CodexAppServerErrorKind -Code '' -Message 'failed under C:\work\subtls-cache') 'tls substring is not a network error'
+Assert-Equal 'PROTOCOL_ERROR' (Get-CodexAppServerErrorKind -Code '' -Message 'failed under C:\work\dnsrecords') 'dns substring is not a network error'
 
 # ---------------------------------------------------------------------------
 # End-to-end: config/read through the real session layer

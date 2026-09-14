@@ -56,7 +56,7 @@ codex-quota-keeper/
 
    - **从源码仓库**：clone 后直接使用 `codex-quota-keeper/` 目录（打包流程见
      `docs/release-engineering.md`）。
-2. 解压到固定目录（**不要放在源码 Git 仓库里**，避免与源码更新互相干扰），例如 `D:\Tools\codex-quota-keeper`。
+2. 解压到当前用户私有的固定目录（**不要放在源码 Git 仓库里**），例如 `$env:LOCALAPPDATA\CodexQuotaKeeper`。
 3. 复制 `config.example.jsonc` 为 `config.json`——模板是 JSONC（支持 `//` 与 `/* */` 注释，
    每项带中文说明），取消注释即自定义，未配置字段用内置默认值；按需改
    `poll.intervalMinutes`、`leader.label`、`github.coordination.repoPath`（完整字段见下方「配置」）。
@@ -119,9 +119,9 @@ codex-quota-keeper/
 | `logging.includeMachineLabel` | false | 隐私开关：machineLabel 是否进 history |
 | `codex.proxy` | （空） | codex 出入站代理 URL，如 `http://127.0.0.1:7890`、`socks5://127.0.0.1:7891`（空 = 直连） |
 | `codex.autoAnchor.enabled` | false | 实验功能开关（默认关闭） |
-| `codex.autoAnchor.keepaliveIntervalMinutes` | 300 | 空闲**兜底**间隔（分钟）：存在首次锚定后，距上次锚定超过该值仍未观测到窗口重置即再触发一次（默认 = 一个 5 小时窗口）；`0` = 关闭兜底（空闲判定与重置触发仍生效） |
 | `codex.autoAnchor.anchorOnApply` | false | 安装或应用配置时请求立即锚定；每个本地自然日最多实际尝试一次，仍受每日总上限和运行期校验约束 |
-| `codex.autoAnchor.schedule` | `[]` | **每日定时模式（与周期判断互斥）**：`"HH:mm"` 数组（本地时间、24 小时制、必须补零）。配置任意槽位即切换为纯定时模式——每个时间点后的第一次轮询触发一次 CLI，重置/空闲/兜底判断全部停用；清空数组回到周期判断模式。同一时间点每天最多一次，不受静默期限制（仍受每日上限与 fail-closed 约束） |
+| `codex.autoAnchor.schedule` | `[]` | 独立的每日 `"HH:mm"` 触发器；primary 已在运行时消费槽位但不调用模型。可与 `anchorOnExpiry` 同开 |
+| `codex.autoAnchor.anchorOnExpiry` | `[]` | 到期补空档窗口，可选 `"primary"` / `"secondary"`；安装后由独立的一次性闹钟在最近到期时间 +1 分钟唤醒 runner |
 
 ## 前置条件
 
@@ -164,12 +164,12 @@ PASSIVE   其他机器持有租约
 LEADER    持有租约，正常轮询
 DEGRADED  本地可查但 Git 租约/日志不可用
 AUTH_ERR  Codex 认证不可用
-BACKOFF   429 / 瞬时故障，等待后重试
+BACKOFF   429 / 认证故障的集群级退避
 
 AutoAnchor（实验）:
-RESET_SEEN -> 幂等守卫(eventId) -> ANCHORING -> VERIFY -> ANCHORED
-                    | error -> ABORTED
-（空闲判定 / 空闲兜底 / 每日定时 schedule 与 anchorOnApply 强制触发走同一链路：触发原因 = 二次观测仍无人使用 / 空闲超时 / 定时到点 / 用户显式请求，不需要 RESET_SEEN）
+schedule + anchorOnExpiry -> 合并事件 -> 幂等守卫/Claim -> ANCHORING -> VERIFY -> ANCHORED
+                                              | error -> ABORTED
+anchorOnApply 为显式强制触发；reset 只审计，不进入锚定决策。
 ```
 
 ## AutoAnchor 风险说明（实验，默认关闭）
@@ -177,24 +177,16 @@ RESET_SEEN -> 幂等守卫(eventId) -> ANCHORING -> VERIFY -> ANCHORED
 > 各触发场景的完整时间线模拟（含每次轮询的快照数据、eventId、守卫拒绝原因）见
 > **[docs/scenarios.md](../docs/scenarios.md)**。
 
-触发方式（都执行真正的 `codex exec` 模型调用）。**两种模式互斥，按需二选一**：
+两个自动触发器独立、可同开，都会在真正执行前重新读取额度并走同一套 fail-closed 门禁：
 
-**模式 A：周期判断模式（`schedule` 为空，默认）**——由 keeper 判断时机：
+1. **每日定时（schedule）**：例如 `["08:55","13:55"]`，用于把 primary 5h 窗口对齐
+   工作时间。到点时 primary 已在运行则消费槽位但不调用模型；否则同一槽位每天最多一次。
+2. **到期补空档（anchorOnExpiry）**：例如 `["secondary"]`，选定窗口不在运行才触发。
+   独立的一次性闹钟任务在最近已知到期时间 +1 分钟唤醒 runner，runner 再校验当前快照；
+   同一到期事件不会重复执行。
 
-1. **窗口重置触发**：检测到额度窗口重置后，自动发送一个无业务意义的最小 Prompt（如
-   `Reply exactly OK.`）以提前锚定下一轮额度窗口（需要你先使用过 Codex）。
-2. **空闲判定触发（从未使用过 Codex 的场景）**：keeper 从未锚定过（`anchors.count=0`）、
-   第二次轮询记录仍是零用量（默认 60 分钟一轮，即约一小时后）时，判定"Codex 没人用"，
-   自动执行一次 CLI 调用——这正是"你从来没启动过 Codex，它也会触发一次"。
-   随后进入 5 小时静默期（`minimumGapMinutes` 默认 300），再次触发要等窗口真正滚动。
-3. **空闲兜底触发（keepalive，默认 300 分钟）**：存在首次锚定后，若连续 5 小时仍未
-   观测到任何窗口重置（也没人使用 Codex），keeper 再自触发一次；设为 `0` 关闭兜底。
-
-**模式 B：每日定时模式（`schedule` 非空）**——不做任何判断，到点就打：
-
-4. **每日定时（schedule）**：`codex.autoAnchor.schedule=["09:30","21:00"]` 时，每个时间点后的
-   第一次轮询触发一次 CLI——固定时刻、纯定时，重置/空闲/兜底判断全部停用、重置事件被
-   忽略；也不要求你使用过 Codex。同一时间点每天最多一次。
+重置事件只保留为审计信息；旧 `keepaliveIntervalMinutes` 被忽略并在应用配置时提示迁移。
+如需连续衔接 primary，使用 `anchorOnExpiry:["primary"]`。两个触发器均为空时不自动调用模型。
 
 **立即触发（anchorOnApply）不属于模式，任何模式下都可用**：`codex.autoAnchor.anchorOnApply=true`
 时，运行 `install.cmd` / `apply-config.cmd` 会请求立即锚定；每个本地自然日最多实际尝试一次，
@@ -202,7 +194,7 @@ RESET_SEEN -> 幂等守卫(eventId) -> ANCHORING -> VERIFY -> ANCHORED
 
 这是**实验性**行为：
 
-- OpenAI《使用条款》禁止规避任何 rate limits / restrictions；官方未明确批准“quota keepalive/AutoAnchor”这一用途。
+- OpenAI《使用条款》禁止规避任何 rate limits / restrictions；官方未明确批准 AutoAnchor 这一用途。
 - **单机同样可用**：未配置协调仓库（LOCAL_ONLY）时跳过远端 CAS Claim 与租约重验证，
   以本地 runner 锁、持久 Claim 和 state 去重承担 at-most-once；配置了多机协调后使用分布式 Claim。
 - 本项目**不保证零风控**。首次开启会显示醒目警告；默认关闭，安装器不会自动开启。

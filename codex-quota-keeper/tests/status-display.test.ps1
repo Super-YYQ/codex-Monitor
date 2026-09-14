@@ -173,7 +173,9 @@ try {
     Assert-Equal '5 小时额度' (Format-QuotaWindowHeaderZh 300) 'header adds 额度'
     Assert-Equal '7 天额度' (Format-QuotaWindowHeaderZh 10080) 'weekly header'
     Assert-Equal '45 分钟窗口' (Format-QuotaWindowHeaderZh 45) 'a name already ending in 窗口 is not doubled'
-    Assert-Equal '周期判断' (Format-WorkModeZh 'JUDGMENT') 'judgment'
+    Assert-Equal '纯查询（无自动触发）' (Format-WorkModeZh 'NONE') 'no automatic trigger'
+    Assert-Equal '到期补空档（Expiry）' (Format-WorkModeZh 'EXPIRY') 'expiry trigger'
+    Assert-Equal '定时 + 到期补空档' (Format-WorkModeZh 'COMBINED') 'combined triggers'
     Assert-Equal '每日定时（Schedule）' (Format-WorkModeZh 'SCHEDULE') 'schedule'
     Assert-Equal '是' (Format-BooleanZh $true) 'true'
     Assert-Equal '否' (Format-BooleanZh $null) 'null is 否, not blank'
@@ -239,11 +241,11 @@ try {
         $state.anchors = @{ day = $Today; count = 3; lastAnchorAt = (Format-GoldenStamp $Now.AddMinutes(-20)) }
         Write-JsonFileAtomic (Get-StatePath $rootM) $state
 
-        $cfgM = New-GoldenConfig -Coordination $false -AutoAnchor $true
+        $cfgM = New-GoldenConfig -Coordination $false -AutoAnchor $true -AnchorOnExpiry @('secondary')
         $stM = New-DisplayStatus @{
             autoAnchor      = $true; mode = 'AutoAnchor'
             quota           = Get-GoldenFreshQuota
-            anchorKeepalive = @{ intervalMinutes = 300; lastAnchorAt = (Format-GoldenStamp $Now.AddMinutes(-20)) }
+            anchorExpiry    = @{ windows = @('secondary'); installed = $true; nextRunTime = (Format-GoldenStamp $Now.AddDays(5)); lastAnchorAt = (Format-GoldenStamp $Now.AddMinutes(-20)) }
         }
         $avM = Get-StatusAssessment -Status $stM -Config $cfgM -KeeperRoot $rootM -Now $Now
         $m = Get-StatusDisplayModel -Status $stM -Assessment $avM -Config $cfgM -KeeperRoot $rootM -Now $Now
@@ -255,7 +257,7 @@ try {
 
         # today: state.anchors for today's date, not yesterday's count.
         Assert-Equal 3 $m.autoAnchor.today 'today count read from state.json'
-        Assert-Equal 300 $m.autoAnchor.keepalive 'keepalive minutes passed through'
+        Assert-Contains $m.autoAnchor.expiryWindows 'secondary' 'expiry window passed through'
         Assert-Equal 300 $m.autoAnchor.minGap 'minimumGapMinutes threaded from the config'
         Assert-Equal 6 $m.autoAnchor.maxPerDay 'maxPerDay threaded from the config'
 
@@ -279,8 +281,8 @@ try {
         Assert-Equal 'INFO' (Get-StatusFinding -Assessment $avM -Code 'ANCHOR_GAP_COOLDOWN').severity 'a cooldown is information, not a fault'
 
         # workMode is derived from the slots the collector reported, not from a flag.
-        Assert-Equal 'JUDGMENT' $m.autoAnchor.workMode 'no slots means judgment mode'
-        Assert-Equal '' $m.autoAnchor.nextSlot 'judgment mode has no next slot'
+        Assert-Equal 'EXPIRY' $m.autoAnchor.workMode 'expiry-only mode derived'
+        Assert-Equal '' $m.autoAnchor.nextSlot 'expiry-only mode has no next slot'
         $stSched = New-DisplayStatus @{
             autoAnchor     = $true; mode = 'AutoAnchor'
             anchorSchedule = @{ slots = @('09:30', '21:00') }
@@ -416,27 +418,26 @@ try {
 
     $panelOn = Get-StatusDisplayLines -Status (New-GoldenStatus @{
         autoAnchor      = $true; mode = 'AutoAnchor'
-        anchorKeepalive = @{ intervalMinutes = 300; lastAnchorAt = $null }
+        anchorExpiry    = @{ windows = @('secondary'); installed = $true; nextRunTime = (Format-GoldenStamp $Now.AddDays(5)); lastAnchorAt = $null }
         quota           = Get-GoldenFreshQuota
-    } -LocalOnly) -Config (New-GoldenConfig -Coordination $false -AutoAnchor $true) -KeeperRoot $rootBase -Now $Now
+    } -LocalOnly) -Config (New-GoldenConfig -Coordination $false -AutoAnchor $true -AnchorOnExpiry @('secondary')) -KeeperRoot $rootBase -Now $Now
     $onTexts = Get-RowText $panelOn
     Assert-Contains $onTexts '  功能状态        : [注意] 已开启（Experimental）' 'AutoAnchor on warns: it consumes quota'
     Assert-Contains $onTexts '  说明            : 该功能会主动调用 Codex 模型并消耗额度' 'the cost warning is in the section the user is reading'
-    Assert-Contains $onTexts '  触发方式        : 窗口重置 / 首次空闲检测 / Keepalive' 'judgment mode lists its triggers'
-    Assert-Contains $onTexts '  最小间隔        : 300 分钟' 'the configured gap is shown'
-    Assert-Contains $onTexts '  Keepalive       : 300 分钟' 'the configured keepalive is shown'
+    Assert-Contains $onTexts '  到期锚定        : secondary' 'configured expiry window is shown'
+    Assert-Contains $onTexts '  到期最小间隔    : 300 分钟' 'expiry safety gap is shown'
     Assert-Contains $onTexts '  每日上限        : 6 次' 'the configured cap is shown'
     Assert-Contains $onTexts '  执行模型        : 沿用 CLI 默认' 'empty model never renders as an empty value'
     Assert-Contains $onTexts '  思考等级        : 沿用 CLI 默认' 'empty effort likewise'
-    Assert-RowValue $panelOn '工作模式' '周期判断' 'judgment mode named'
+    Assert-RowValue $panelOn '工作模式' '到期补空档（Expiry）' 'expiry mode named'
     Assert-RowValue $panelOn '今日已执行' '0 / 6' 'an empty day reads 0 of the cap'
     Assert-RowValue $panelOn '数据状态' '[正常] 最新' 'fresh quota'
-    Assert-False (@($onTexts | Where-Object { $_.Contains('下一个槽位') }).Count -gt 0) 'judgment mode has no next-slot row'
+    Assert-False (@($onTexts | Where-Object { $_.Contains('下一个槽位') }).Count -gt 0) 'expiry-only mode has no next-slot row'
     Assert-False (@($onTexts | Where-Object { $_.Contains('上次执行') }).Count -gt 0) 'no anchor yet means no 上次执行 row'
     $checkedOn = Test-RowAlignment $onTexts
     Assert-True ($checkedOn -ge 14) "AutoAnchor rows examined by the sweep (got $checkedOn)"
 
-    # Schedule mode replaces the trigger list and states plainly that judgment is off.
+    # Schedule is an independent trigger and does not imply another trigger is disabled.
     $panelSched = Get-StatusDisplayLines -Status (New-GoldenStatus @{
         autoAnchor     = $true; mode = 'AutoAnchor'
         anchorSchedule = @{ slots = @('09:30', '21:00') }
@@ -445,13 +446,12 @@ try {
     $stTexts = Get-RowText $panelSched
     Assert-Contains $stTexts '  工作模式        : 每日定时（Schedule）' 'schedule mode named'
     Assert-Contains $stTexts '  定时时间        : 09:30、21:00' 'slots are 、-separated'
-    Assert-Contains $stTexts '  周期判断        : 已停用（reset / idle / keepalive 不触发）' 'judgment explicitly off, not implied'
     Assert-Contains $stTexts '  下一个槽位      : 21:00' 'next slot shown'
-    Assert-False (@($stTexts | Where-Object { $_.Contains('触发方式') }).Count -gt 0) 'schedule mode does not show the judgment trigger list'
-    Assert-False (@($stTexts | Where-Object { $_.Contains('最小间隔') }).Count -gt 0) 'schedule mode does not quote the judgment-only gap'
+    Assert-False (@($stTexts | Where-Object { $_.Contains('触发方式') }).Count -gt 0) 'configured schedule needs no fallback trigger row'
+    Assert-False (@($stTexts | Where-Object { $_.Contains('到期最小间隔') }).Count -gt 0) 'schedule-only mode does not show expiry gap'
     # §11.3 sample rows carry no severity tags in this block - an [信息] on every
     # line makes the row that matters read as noise.
-    $taggedSchedule = @($stTexts | Where-Object { $_ -match '^\s+(定时时间|周期判断|工作模式|下一个槽位)' -and $_ -match '\[' }).Count
+    $taggedSchedule = @($stTexts | Where-Object { $_ -match '^\s+(定时时间|工作模式|下一个槽位)' -and $_ -match '\[' }).Count
     Assert-Equal 0 $taggedSchedule 'schedule block rows stay untagged'
 
     # The verdict the panel prints is the assessment's verdict, not its own opinion.
@@ -474,9 +474,9 @@ try {
         $stCap = New-DisplayStatus @{
             autoAnchor      = $true; mode = 'AutoAnchor'
             quota           = Get-GoldenFreshQuota
-            anchorKeepalive = @{ intervalMinutes = 300; lastAnchorAt = (Format-GoldenStamp $Now.AddHours(-3)) }
+            anchorExpiry    = @{ windows = @('secondary'); installed = $true; nextRunTime = (Format-GoldenStamp $Now.AddDays(5)); lastAnchorAt = (Format-GoldenStamp $Now.AddHours(-3)) }
         }
-        $capTexts = Get-RowText (Get-StatusDisplayLines -Status $stCap -Config (New-GoldenConfig -Coordination $false -AutoAnchor $true) -KeeperRoot $rootCap -Now $Now)
+        $capTexts = Get-RowText (Get-StatusDisplayLines -Status $stCap -Config (New-GoldenConfig -Coordination $false -AutoAnchor $true -AnchorOnExpiry @('secondary')) -KeeperRoot $rootCap -Now $Now)
         Assert-Contains $capTexts '  今日已执行      : [注意] 6 / 6' 'a capped day is tagged'
         Assert-Contains $capTexts '  当前锚定        : [注意] 今日锚定已达上限' 'and the guard reason is shown in the same section'
         Assert-False (@($capTexts | Where-Object { $_.Contains('[异常] 当前自动锚定被安全阻止') }).Count -gt 0) 'a configured cap is not reported as a block'
@@ -711,14 +711,14 @@ try {
         Assert-True $byName['monitor-only-healthy'].Contains('单机模式（LOCAL_ONLY）') 'case 1 pins LOCAL_ONLY as a mode, not an alarm'
         Assert-True $byName['monitor-only-healthy'].Contains('实时连接检测') 'case 1 pins the not-run live probe row'
         Assert-False $byName['monitor-only-healthy'].Contains('[异常]') 'case 1, the healthy baseline, contains no error row'
-        Assert-True $byName['aa-judgment'].Contains('[信息] 自动锚定处于静默期') 'case 2 pins the INFO cooldown row'
-        Assert-False $byName['aa-judgment'].Contains('建议：') 'an INFO cooldown row carries no advice line'
-        Assert-True $byName['aa-judgment'].Contains('今日已执行      : 1 / 6') 'case 2 pins today count from state.json'
-        Assert-True $byName['aa-judgment'].Contains('上次执行        : 2026-09-09 10:00') 'case 2 pins the minute-precision anchor time'
+        Assert-True $byName['aa-expiry'].Contains('[信息] 自动锚定处于静默期') 'case 2 pins the INFO cooldown row'
+        Assert-False $byName['aa-expiry'].Contains('建议：') 'an INFO cooldown row carries no advice line'
+        Assert-True $byName['aa-expiry'].Contains('今日已执行      : 1 / 6') 'case 2 pins today count from state.json'
+        Assert-True $byName['aa-expiry'].Contains('上次执行        : 2026-09-09 10:00') 'case 2 pins the minute-precision anchor time'
         Assert-True $byName['aa-schedule'].Contains('下一个槽位      : 21:00') 'case 3 pins the next slot'
         Assert-True $byName['aa-schedule'].Contains('执行模型        : gpt-5-codex') 'case 3 pins an explicit model override'
         Assert-True $byName['aa-schedule'].Contains('今日已执行      : 2 / 6') 'case 3 pins a second day count'
-        Assert-True $byName['aa-judgment'].Contains('执行模型        : 沿用 CLI 默认') 'case 2 pins the CLI-default wording'
+        Assert-True $byName['aa-expiry'].Contains('执行模型        : 沿用 CLI 默认') 'case 2 pins the CLI-default wording'
         Assert-True $byName['multi-pc-error'].Contains('[异常] 多机协调仓库不可达') 'case 4 pins the unreachable-repo ERROR'
         Assert-True $byName['multi-pc-error'].Contains('token=[REDACTED]') 'case 4 pins end-to-end sanitisation'
         Assert-False $byName['multi-pc-error'].Contains('sk-fake-') 'and the fake secret itself is gone'
