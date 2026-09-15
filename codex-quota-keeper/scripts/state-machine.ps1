@@ -16,6 +16,7 @@ if (-not (Get-Command Get-KeeperRoot -ErrorAction SilentlyContinue)) {
 # Events
 $script:CQK_EV_SNAPSHOT_CHANGED  = 'QUOTA_SNAPSHOT_CHANGED'
 $script:CQK_EV_WINDOW_RESET      = 'WINDOW_RESET_OBSERVED'
+$script:CQK_EV_EARLY_RECOVERY    = 'QUOTA_RECOVERED_EARLY'
 $script:CQK_EV_WINDOW_GONE       = 'WINDOW_DISAPPEARED'
 $script:CQK_EV_LIMIT_REACHED     = 'LIMIT_REACHED'
 $script:CQK_EV_AUTH_ERROR        = 'AUTH_ERROR'
@@ -39,6 +40,7 @@ function New-KeeperState {
         processedEventIds    = @()
         anchors              = (Get-AnchorStatistics)
         expiryTrack          = @{}
+        windowObservations   = @{}
         leader               = @{ ownerId = $null; ownerLabel = $null; expiresAt = $null }
         heartbeat            = @{ ts = $null; role = $null }
         updatedAt            = $null
@@ -82,6 +84,8 @@ function Load-KeeperState {
     $state.anchors = Get-AnchorStatistics $loaded.anchors
     if ($loaded.expiryTrack -is [hashtable]) { $state.expiryTrack = @{} + $loaded.expiryTrack }
     else { $state.expiryTrack = @{} }
+    if ($loaded.windowObservations -is [hashtable]) { $state.windowObservations = $loaded.windowObservations }
+    else { $state.windowObservations = @{} }
     $state.schema = $script:CQK_STATE_SCHEMA
     $state.windows = $null   # legacy key, no longer written
     $state.Remove('pendingAnchorEvents')
@@ -108,6 +112,33 @@ function Get-WindowKey {
     # Unique window key: bucketId + windowType (CQK-003).
     param([string]$BucketId, [string]$WindowType)
     return "$BucketId|$WindowType"
+}
+
+# Tolerance for treating resetsAt as "now + full duration". A read costs a few
+# seconds, so an idle prediction lands slightly short of the exact boundary.
+$script:CQK_IDLE_PREDICTION_TOLERANCE_SECONDS = 120
+
+function Test-WindowIdlePrediction {
+    # Candidate only: a newly opened window may also report rounded zero usage.
+    param($Window, [long]$NowEpoch)
+    if ($null -eq $Window -or $null -eq $Window.resetsAt -or
+        $null -eq $Window.windowDurationMins -or $null -eq $Window.usedPercent) { return $false }
+    if ([double]$Window.usedPercent -ne 0 -or [long]$Window.resetsAt -le $NowEpoch) { return $false }
+    $durationSeconds = [long]([double]$Window.windowDurationMins * 60)
+    if ($durationSeconds -le 0) { return $false }
+    $remaining = [long]$Window.resetsAt - $NowEpoch
+    return ([Math]::Abs($remaining - $durationSeconds) -le $script:CQK_IDLE_PREDICTION_TOLERANCE_SECONDS)
+}
+
+function Test-WindowRunning {
+    # Unknown future windows fail closed. Only consecutive moving predictions
+    # can establish idle; a fixed boundary with rounded zero usage cannot.
+    param($Window, [long]$NowEpoch, $Observation = $null)
+    if ($null -eq $Window -or $null -eq $Window.resetsAt) { return $false }
+    if ([long]$Window.resetsAt -le $NowEpoch) { return $false }
+    if ((Test-WindowIdlePrediction $Window $NowEpoch) -and $Observation -and
+        $Observation.idleConfirmed -eq $true -and $Observation.resetsAt -eq $Window.resetsAt) { return $false }
+    return $true
 }
 
 function Get-BucketWindowMap {
@@ -144,18 +175,49 @@ function Get-ExpiryAnchorEventId {
 }
 
 function Update-ExpiryTrack {
-    # Remember future or expired non-empty reset timestamps before the current
-    # snapshot is persisted. Missing windows deliberately leave their previous
-    # value intact so a mid-cycle disappearance can be anchored once.
-    param([hashtable]$State, $Buckets)
+    # Called before replacing State.buckets. Keep the last real boundary across
+    # idle polls: rolling predictions must never manufacture new expiry IDs.
+    param([hashtable]$State, $Buckets, [datetime]$Now = (Get-Date))
     if ($State.expiryTrack -isnot [hashtable]) { $State.expiryTrack = @{} }
+    if ($State.windowObservations -isnot [hashtable]) { $State.windowObservations = @{} }
+    $nowEpoch = ConvertTo-EpochSeconds $Now
+    $previousMap = Get-BucketWindowMap @($State.buckets)
+    $previousAt = [DateTimeOffset]::MinValue
+    $hasPreviousAt = [DateTimeOffset]::TryParse([string]$State.lastGoodReadAt, [ref]$previousAt)
+    $observations = @{}
     $map = Get-BucketWindowMap @($Buckets)
     foreach ($key in @($map.Keys)) {
         $win = $map[$key]
-        if ($null -ne $win.resetsAt -and [long]$win.resetsAt -gt 0) {
+        $candidate = Test-WindowIdlePrediction $win $nowEpoch
+        $previous = $State.windowObservations[$key]
+        # Existing schema-3 installations already have a previous snapshot.
+        if (-not $previous -and $hasPreviousAt -and $previousMap.ContainsKey($key)) {
+            $oldWindow = $previousMap[$key]
+            $previous = @{
+                observedAt = $previousAt.ToUnixTimeSeconds(); resetsAt = $oldWindow.resetsAt
+                idleCandidate = (Test-WindowIdlePrediction $oldWindow $previousAt.ToUnixTimeSeconds())
+            }
+        }
+        $confirmed = $false
+        if ($candidate -and $previous -and $previous.idleCandidate -eq $true) {
+            $elapsed = $nowEpoch - [long]$previous.observedAt
+            $shift = [long]$win.resetsAt - [long]$previous.resetsAt
+            $confirmed = ($elapsed -gt 0 -and $shift -gt 0 -and
+                [Math]::Abs($shift - $elapsed) -le $script:CQK_IDLE_PREDICTION_TOLERANCE_SECONDS)
+            # Re-reading the same confirmed snapshot in the same second is safe.
+            if ($elapsed -eq 0 -and $shift -eq 0 -and $previous.idleConfirmed -eq $true) { $confirmed = $true }
+        }
+        $observations[$key] = @{
+            observedAt = $nowEpoch; resetsAt = $win.resetsAt
+            idleCandidate = $candidate; idleConfirmed = $confirmed
+        }
+        if (-not $candidate -and $null -ne $win.resetsAt -and [long]$win.resetsAt -gt 0) {
             $State.expiryTrack[$key] = [long]$win.resetsAt
+        } elseif (-not $State.expiryTrack.ContainsKey($key)) {
+            $State.expiryTrack[$key] = [long]0
         }
     }
+    $State.windowObservations = $observations
 }
 
 function Get-LastNonEmptyResetsAt {
@@ -246,8 +308,38 @@ function Get-StateEvents {
             continue
         }
         $resetObserved = $false
+        $usageDecreased = ($null -ne $prev.usedPercent -and $null -ne $cur.usedPercent -and
+            [double]$cur.usedPercent -lt [double]$prev.usedPercent)
+        $boundaryChanged = ($null -ne $prev.resetsAt -and $null -ne $cur.resetsAt -and
+            [long]$cur.resetsAt -ne [long]$prev.resetsAt)
+        # Record what was observed; quota snapshots do not identify who reset it.
+        # Idle predictions moving forward are not a recovery or a new cycle.
+        $previousReadAt = [DateTimeOffset]::MinValue
+        $previousEpoch = $nowEpoch
+        if ([DateTimeOffset]::TryParse([string]$Previous.lastGoodReadAt, [ref]$previousReadAt)) {
+            $previousEpoch = $previousReadAt.ToUnixTimeSeconds()
+        }
+        if ($null -ne $prev.resetsAt -and [long]$prev.resetsAt -gt $nowEpoch -and
+            $prev.usable -ne $false -and $cur.usable -ne $false -and
+            ($usageDecreased -or $boundaryChanged) -and
+            -not (Test-WindowIdlePrediction $prev $previousEpoch) -and
+            ($usageDecreased -or -not (Test-WindowIdlePrediction $cur $nowEpoch))) {
+            $change = @{
+                bucketId = [string]$cur.bucketId; windowType = [string]$cur.windowType
+                windowDurationMins = $cur.windowDurationMins
+                previousUsedPercent = $prev.usedPercent; usedPercent = $cur.usedPercent
+                previousResetsAt = $prev.resetsAt; resetsAt = $cur.resetsAt; reason = 'unknown'
+            }
+            $identity = @($cur.bucketId, $cur.windowType, $prev.resetsAt, $cur.resetsAt, $prev.usedPercent, $cur.usedPercent)
+            $events += ,@{
+                event = $script:CQK_EV_EARLY_RECOVERY
+                eventId = (Get-Sha256Hex ('early-recovery|' + (ConvertTo-Json -InputObject $identity -Compress)))
+                quotaChange = $change
+            }
+        }
         if ($null -ne $prev.resetsAt -and $null -ne $cur.resetsAt -and
-            [long]$prev.resetsAt -lt $nowEpoch -and [long]$cur.resetsAt -gt [long]$prev.resetsAt) {
+            [long]$prev.resetsAt -lt $nowEpoch -and [long]$cur.resetsAt -gt [long]$prev.resetsAt -and
+            -not (Test-WindowIdlePrediction $prev $previousEpoch)) {
             # Old window expired and a fresh window started: reset observed.
             $eventId = Get-AnchorEventId -BucketId ([string]$cur.bucketId) -WindowType ([string]$cur.windowType) `
                 -WindowDuration $cur.windowDurationMins -PreviousResetsAt ([long]$prev.resetsAt)
@@ -380,6 +472,7 @@ function Test-ShouldAnchor {
     # model call. If the primary window is already running, the slot has already
     # achieved its purpose and is also consumed without a call.
     $scheduleIds = @()
+    $skipReasons = @()
     foreach ($slot in @($anchorCfg.schedule)) {
         if ([string]::IsNullOrWhiteSpace([string]$slot)) { continue }
         $slotTime = [datetime]::MinValue
@@ -387,18 +480,30 @@ function Test-ShouldAnchor {
         $dueAt = $Now.Date.Add($slotTime.TimeOfDay)
         if ($Now -lt $dueAt) { continue }
         $sid = Get-ScheduleEventId -Day $today -Slot ([string]$slot)
-        if (@($State.processedEventIds) -contains $sid) { continue }
+        if (@($State.processedEventIds) -contains $sid) { $skipReasons += "schedule ${slot}: already processed"; continue }
         if (($Now - $dueAt).TotalMinutes -gt [double](Get-PollConfig $Config).intervalMinutes) {
             Add-ProcessedEvent -State $State -EventId $sid
+            $skipReasons += "schedule ${slot}: outside catch-up interval"
             continue
         }
         $primaryWindows = @($curMap.Values | Where-Object { [string]$_.windowType -eq 'primary' })
-        if ($primaryWindows.Count -eq 0) { continue }
-        $primaryRunning = @($primaryWindows | Where-Object { $null -ne $_.resetsAt -and [long]$_.resetsAt -gt $nowEpoch }).Count -gt 0
+        if ($primaryWindows.Count -eq 0) { $skipReasons += "schedule ${slot}: primary unavailable"; continue }
+        $primaryRunning = $false
+        $uncertain = $false
+        foreach ($primary in $primaryWindows) {
+            $key = Get-WindowKey ([string]$primary.bucketId) 'primary'
+            $observation = if ($State.windowObservations) { $State.windowObservations[$key] } else { $null }
+            if (Test-WindowRunning -Window $primary -NowEpoch $nowEpoch -Observation $observation) {
+                if (Test-WindowIdlePrediction $primary $nowEpoch) { $uncertain = $true }
+                else { $primaryRunning = $true }
+            }
+        }
         if ($primaryRunning) {
             Add-ProcessedEvent -State $State -EventId $sid
+            $skipReasons += "schedule ${slot}: primary running"
             continue
         }
+        if ($uncertain) { $skipReasons += "schedule ${slot}: awaiting idle confirmation"; continue }
         $scheduleIds += $sid
     }
     if ($scheduleIds.Count -gt 0) {
@@ -418,7 +523,8 @@ function Test-ShouldAnchor {
         }
         foreach ($key in @($keys | Select-Object -Unique)) {
             $win = if ($curMap.ContainsKey($key)) { $curMap[$key] } else { $null }
-            if ($win -and $null -ne $win.resetsAt -and [long]$win.resetsAt -gt $nowEpoch) { continue }
+            $observation = if ($State.windowObservations) { $State.windowObservations[$key] } else { $null }
+            if ($win -and (Test-WindowRunning -Window $win -NowEpoch $nowEpoch -Observation $observation)) { continue }
             $bucketId = if ($win) { [string]$win.bucketId } else { ([string]$key).Substring(0, ([string]$key).Length - $suffix.Length) }
             $lastResetsAt = Get-LastNonEmptyResetsAt -State $State -BucketId $bucketId -WindowType ([string]$windowType)
             $eid = Get-ExpiryAnchorEventId -BucketId $bucketId -WindowType ([string]$windowType) -LastNonEmptyResetsAt $lastResetsAt
@@ -431,7 +537,10 @@ function Test-ShouldAnchor {
     }
 
     $pending = @($pending | Select-Object -Unique)
-    if ($pending.Count -eq 0) { return & $deny 'no due schedule slot and no expired tracked window' }
+    if ($pending.Count -eq 0) {
+        if ($skipReasons.Count -gt 0) { return & $deny ($skipReasons -join '; ') }
+        return & $deny 'no due schedule slot and no expired tracked window'
+    }
 
     # Schedule is an explicit time request and bypasses the gap. Expiry-only
     # calls retain the global gap as a secondary safety brake.

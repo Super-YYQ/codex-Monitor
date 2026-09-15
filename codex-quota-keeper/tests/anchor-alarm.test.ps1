@@ -21,11 +21,13 @@ function New-AlarmConfig {
 }
 
 function New-AlarmState {
-    param($Primary = ($nowEpoch + 18000), $Secondary = ($nowEpoch + 604800))
+    # usedPercent > 0 makes these real open windows: a window with no usage whose
+    # resetsAt sits at exactly now + duration is an idle prediction, not a boundary.
+    param($Primary = ($nowEpoch + 18000), $Secondary = ($nowEpoch + 604800), $Used = 20)
     $state = New-KeeperState
     $state.buckets = @(@{ bucketId = 'default'; windows = @(
-        @{ windowType = 'primary'; resetsAt = $Primary; usedPercent = 0; windowDurationMins = 300 },
-        @{ windowType = 'secondary'; resetsAt = $Secondary; usedPercent = 0; windowDurationMins = 10080 }
+        @{ windowType = 'primary'; resetsAt = $Primary; usedPercent = $Used; windowDurationMins = 300 },
+        @{ windowType = 'secondary'; resetsAt = $Secondary; usedPercent = $Used; windowDurationMins = 10080 }
     ) })
     return $state
 }
@@ -90,6 +92,21 @@ try {
     Assert-Equal 'ANCHOR_ALARM_CLEARED' $cleared.event 'clear event returned'
     Assert-Equal 'CQK.Test.AnchorAlarm' $script:MockAlarmRemoved 'same task is removed, no task proliferation'
 } finally { Remove-TestWorkspace $ws }
+
+Start-TestGroup 'alarm plan: an idle prediction is not a boundary worth waking for'
+
+# An idle window reports resetsAt = now + duration every poll, so treating that as a
+# real expiry pushes the alarm forward forever and it never fires.
+$idleState = New-AlarmState -Secondary ($nowEpoch + 10080 * 60) -Used 0
+$previousIdle = New-AlarmState -Primary ($nowEpoch + 18000 - 60) -Secondary ($nowEpoch + 10080 * 60 - 60) -Used 0
+Update-ExpiryTrack -State $idleState -Buckets $previousIdle.buckets -Now $now.AddMinutes(-1)
+Update-ExpiryTrack -State $idleState -Buckets $idleState.buckets -Now $now
+$idlePlan = Get-AnchorAlarmPlan -Config (New-AlarmConfig) -State $idleState -Now $now
+Assert-Equal 'clear' $idlePlan.action 'idle secondary prediction carries no alarm target'
+
+$realPlan = Get-AnchorAlarmPlan -Config (New-AlarmConfig) -State (New-AlarmState -Secondary ($nowEpoch + 3600)) -Now $now
+Assert-Equal 'set' $realPlan.action 'a real boundary inside the duration still arms the alarm'
+Assert-Equal ($nowEpoch + 3660) $realPlan.targetEpoch 'real boundary plus 60 seconds selected'
 
 $result = Get-TestResult
 if ($result.failures -gt 0) { Write-Host "anchor-alarm.test.ps1: $($result.failures) failure(s)" -ForegroundColor Red; exit 1 }

@@ -28,7 +28,12 @@ function Get-AnchorAlarmPlan {
     $targets = @()
     foreach ($win in @((Get-BucketWindowMap @($State.buckets)).Values)) {
         if ([string]$win.windowType -notin @($aa.anchorOnExpiry)) { continue }
-        if ($null -ne $win.resetsAt -and [long]$win.resetsAt -gt $nowEpoch) { $targets += [long]$win.resetsAt }
+        # Only a real boundary is worth waking for. An idle window predicts
+        # now + duration on every poll, so arming that would push the alarm
+        # forward forever and it would never fire.
+        $key = Get-WindowKey ([string]$win.bucketId) ([string]$win.windowType)
+        $observation = if ($State.windowObservations) { $State.windowObservations[$key] } else { $null }
+        if (Test-WindowRunning -Window $win -NowEpoch $nowEpoch -Observation $observation) { $targets += [long]$win.resetsAt }
     }
     if ($targets.Count -eq 0) {
         return @{ action = 'clear'; taskName = $name; targetEpoch = $null; targetAt = $null; reason = 'no future tracked expiry' }
