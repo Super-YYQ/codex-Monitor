@@ -39,14 +39,14 @@ $script:CqkRunId = [guid]::NewGuid().ToString('N').Substring(0, 12)
 $script:CqkLogging = @{ retentionDays = 90; includeMachineLabel = $false }
 
 function Write-RunnerLog {
-    param([string]$Event, [string]$Level = 'INFO', $ErrorText = $null, [string]$ErrorKind = $null, $Windows = $null, $Anchor = $null)
+    param([string]$Event, [string]$Level = 'INFO', $ErrorText = $null, [string]$ErrorKind = $null, $Windows = $null, $Anchor = $null, $QuotaChange = $null)
     $machine = $script:CqkMachine
     $label = if ($machine -and $machine.label) { [string]$machine.label } else { '' }
     Write-KeeperLog -Root $KeeperRoot -Event $Event -Level $Level -RunId $script:CqkRunId `
         -MachineId ($(if ($machine) { [string]$machine.machineId } else { '' })) -MachineLabel $label `
         -Role ($(if ($script:CqkRole) { $script:CqkRole } else { '' })) `
         -Mode ($(if ($script:CqkMode) { $script:CqkMode } else { '' })) `
-        -Windows $Windows -Anchor $Anchor -ErrorText $ErrorText -ErrorKind $ErrorKind `
+        -Windows $Windows -Anchor $Anchor -QuotaChange $QuotaChange -ErrorText $ErrorText -ErrorKind $ErrorKind `
         -LoggingConfig $script:CqkLogging
 }
 
@@ -165,11 +165,11 @@ try {
 
     if ($read.ok) {
         $events = Get-StateEvents -Previous $state -Current $read -Now (Get-Date)
+        Update-ExpiryTrack -State $state -Buckets $read.buckets -Now (Get-Date)
         $state.stale = $false
         $state.lastGoodReadAt = Get-IsoTimestamp
         $state.consecutiveReadFailures = 0
         $state.buckets = $read.buckets
-        Update-ExpiryTrack -State $state -Buckets $read.buckets
         $state.rateLimitReachedType = $read.rateLimitReachedType
         $state.schemaUnknown = $read.schemaUnknown
         $state.lastError = $null
@@ -249,12 +249,12 @@ try {
         $text = $(if ($ev.message) { $ev.message } elseif ($ev.reason) { $ev.reason } else { $null })
         Write-RunnerLog -Event ([string]$ev.event) -Level $Level -ErrorText $text `
             -ErrorKind ([string]$(if ($ev.kind) { $ev.kind } else { $ev.errorKind })) `
-            -Windows $(if ($ev.windows) { $ev.windows } else { $null }) -Anchor $ev.anchor
+            -Windows $(if ($ev.windows) { $ev.windows } else { $null }) -Anchor $ev.anchor -QuotaChange $ev.quotaChange
     }
 
     # ---- sanitized history records (significant events only, doc 03 §12) ----
     $significant = @($events | Where-Object {
-            $_ -and $_.event -in @('WINDOW_RESET_OBSERVED', 'LIMIT_REACHED', 'AUTH_ERROR', 'SCHEMA_UNKNOWN', 'LEADER_CHANGED', 'ANCHOR_EXECUTED', 'ANCHOR_ABORTED')
+            $_ -and $_.event -in @('WINDOW_RESET_OBSERVED', 'QUOTA_RECOVERED_EARLY', 'LIMIT_REACHED', 'AUTH_ERROR', 'SCHEMA_UNKNOWN', 'LEADER_CHANGED', 'ANCHOR_EXECUTED', 'ANCHOR_ABORTED')
         })
     foreach ($ev in $significant) {
         $record = @{
@@ -269,6 +269,7 @@ try {
             # everything else is stamped with this tick's read.
             windows      = $(if ($ev.windows) { $ev.windows } else { $read.windows })
             anchor       = $ev.anchor
+            quotaChange  = $ev.quotaChange
             errorKind    = $(if ($ev.kind) { $ev.kind } else { $ev.errorKind })
             error        = $(if ($ev.message) { $ev.message } else { $ev.reason })
         }

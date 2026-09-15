@@ -2,7 +2,11 @@
 
 当前开发分支的修复、验证范围和未关闭的发布门禁见 [产品就绪审查](docs/production-readiness.md)。
 
-用户级 Codex（ChatGPT 套餐）额度监控与多机互斥工具。按固定周期通过官方 `codex app-server` 读取额度状态，用专用 Private Git 仓库实现跨机器单 Leader 协调，并把净化后的额度/事件日志写入本地 JSONL + 可选的远程不可变 history 用于审计。
+用户级 Codex（ChatGPT 套餐）额度监控与多机互斥工具。
+
+- 按固定周期通过官方 `codex app-server` 读取额度。
+- 可使用专用 Private Git 仓库，让多台电脑由一个 Leader 执行。
+- 本地保存额度和事件日志，可选同步净化后的历史记录。
 
 [![PowerShell 7 unit + integration tests](https://github.com/Super-YYQ/codex-Monitor/actions/workflows/test-windows.yml/badge.svg)](https://github.com/Super-YYQ/codex-Monitor/actions/workflows/test-windows.yml)
 [![security](https://github.com/Super-YYQ/codex-Monitor/actions/workflows/security.yml/badge.svg)](https://github.com/Super-YYQ/codex-Monitor/actions/workflows/security.yml)
@@ -42,32 +46,59 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
 
 ## 快速开始
 
-1. 需要 Windows 10/11、PowerShell 7（入口兼容 Windows PowerShell 5.1）、
-   可运行的 Codex CLI 或 Desktop 且当前用户已登录。
-   **建议先把 `codex-quota-keeper` 整个目录复制到当前用户私有的固定部署目录**
-   （如 `$env:LOCALAPPDATA\CodexQuotaKeeper`）
-   再继续——计划任务绑定安装路径，且 `runtime/` 数据与机器身份随部署目录走；
-   不要在源码 Git 仓库里直接运行（虽然 `runtime/`、`config.json`、`history/` 已被
-   `.gitignore` 忽略不会污染仓库，但源码更新/回退仍会干扰运行中的副本）。
-2. 打开部署目录，复制 `config.example.jsonc` 为 `config.json`——模板是 JSONC（带中文注释，
-   编辑器按 JSONC 渲染无报错），取消注释即可自定义，未配置的字段使用内置默认值（完整字段表见下方「配置」章节）。
-3. 双击 `install.cmd`（安装前先做一次只读 quota probe，通过后注册当前用户计划任务，**无需管理员**）。
-4. 双击 `status.cmd`，确认 `Task installed=YES`、`Enabled=YES`、`Codex CLI=READY`。
-5. 改完配置后双击 `apply-config.cmd` 生效；卸载双击 `uninstall.cmd`（本地历史默认保留）。
-6. 多机模式：准备一个专用 Private Git 仓库，在每台机器执行
-   `pwsh scripts/setup-log-repo.ps1 -RepoPath <日志仓库路径>` 完成绑定，再把
-   `config.json` 的 `github.coordination.enabled` 与 `github.historySync.enabled` 置为 `true`（默认关闭）。
+**准备环境**：Windows 10/11、PowerShell 7，以及已登录的 Codex CLI 或 Desktop。
+入口兼容 Windows PowerShell 5.1。
+
+1. **放置工具**：把 `codex-quota-keeper` 目录复制到固定部署目录，
+   例如 `$env:LOCALAPPDATA\CodexQuotaKeeper`。
+2. **创建配置**：复制 `config.example.jsonc` 为 `config.json`。
+   模板带中文注释；未配置字段使用内置默认值。
+3. **安装**：双击 `install.cmd`。只读额度探测通过后，注册当前用户计划任务，**无需管理员**。
+4. **检查**：双击 `status.cmd` 查看任务、认证和额度状态。
+
+> **部署目录要保持固定**：计划任务绑定安装路径，`runtime/` 保存机器身份和运行状态。
+> 请使用源码仓库之外的目录，避免源码更新或回退影响正在运行的副本。
+
+### 日常操作
+
+| 操作 | 入口 |
+|---|---|
+| 查看状态 | `status.cmd` |
+| 修改配置后生效 | `apply-config.cmd` |
+| 卸载（默认保留本地历史） | `uninstall.cmd` |
+
+### 可选：多机模式
+
+准备专用 Private Git 仓库，在每台电脑的部署目录执行：
+
+```powershell
+pwsh scripts/setup-log-repo.ps1 -RepoPath <日志仓库路径>
+```
+
+绑定完成后，在 `config.json` 中开启 `github.coordination.enabled` 和
+`github.historySync.enabled`，再运行 `apply-config.cmd`。
 
 ---
 
+## 按场景了解触发规则
+
+[运行场景详解](codex-quota-keeper/docs/scenarios.md) 用具体日期、时间和额度数值说明程序行为。
+
+| 常见问题 | 对应场景 |
+|---|---|
+| 不开 AutoAnchor，或开启但不设置触发器 | [模式与配置组合](codex-quota-keeper/docs/scenarios.md#s01) |
+| 设置 09:00，提前用过／没用过 | [每日定时](codex-quota-keeper/docs/scenarios.md#s02) |
+| secondary 正常到期／提前重置 | [正常到期](codex-quota-keeper/docs/scenarios.md#s04) · [提前重置](codex-quota-keeper/docs/scenarios.md#s05) |
+| 上游统一重置后，程序多久会发现 | [统一重置时间线](codex-quota-keeper/docs/scenarios.md#s06) |
+| 关机、迟到、退避、每日上限、多机并发 | [查看场景导航](codex-quota-keeper/docs/scenarios.md) |
+
 ## 配置（`config.json` 在哪改、怎么改）
 
-配置文件是 `codex-quota-keeper/config.json`（从 `config.example.jsonc` 复制而来）。
-**模板与运行时配置都支持 JSONC**（`//` 行注释与 `/* */` 块注释；字符串里的 `//` 如代理 URL 不受影响），
-模板中每个字段都附中文说明，取消注释即可自定义。注意：`config.json` 是 `.json` 后缀，
-部分编辑器会按严格 JSON 把注释标红——可删除注释行，或把该文件的语言关联改为 JSONC/JSON with Comments。
-**改完任意字段后双击 `apply-config.cmd`**，它会校验配置并更新 Windows 计划任务
-（轮询周期与启动条件）。幂等，可反复执行。
+编辑部署目录中的 `config.json`，模板来自 `config.example.jsonc`。
+
+- **支持注释**：`//` 行注释与 `/* */` 块注释均可；代理 URL 中的 `//` 不受影响。
+- **编辑器提示**：如果注释被标红，将语言模式切换为 JSONC / JSON with Comments。
+- **应用修改**：保存后双击 `apply-config.cmd`，校验配置并更新计划任务；可重复执行。
 
 ### 定时 / 轮询
 
@@ -79,13 +110,23 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
 | `task.startWithWindows` | `true` | 开机自启 |
 | `task.runIfNetworkAvailable` | `true` | 仅在有网络时运行 |
 | `task.wakeToRun` | `false` | 请求 Windows 从睡眠/休眠唤醒；不能从关机唤醒，实际能力还受硬件与电源策略限制 |
-| `task.alarmName` | `""` | 到期一次性闹钟任务名；空值自动使用 `<task.name>.AnchorAlarm` |
+| `task.alarmName` | `""` | 一次性到期检查任务名；空值使用 `<task.name>.AnchorAlarm` |
 
-> **触发节奏**：任务以「安装时刻 +1 分钟」为锚点（`-Once` 触发器），按 `poll.intervalMinutes`
-> 重复；`startWithWindows=true`（默认）另加登录触发；关机错过的周期由 `StartWhenAvailable`
-> 在可运行时补跑。改配置执行 `apply-config.cmd` 会重注册任务，锚点重置为当时 +1 分钟。
-> 安装时的一次性只读 quota probe 不算轮询（不保存状态），首次正式运行是 first observation，
-> 空历史下不产生 reset 事件。schedule 使用独立原生每日触发器；expiry 使用单独的一次性闹钟。
+**后台任务如何运行**
+
+| 触发方式 | 执行时间 |
+|---|---|
+| 周期轮询 | 安装时刻 +1 分钟首次执行，之后按 `poll.intervalMinutes` 重复 |
+| 登录触发 | `startWithWindows=true` 时启用 |
+| 每日定时 | 按 `schedule` 中的时间执行 |
+| 到期检查 | 单独的一次性计划任务，在选定额度窗口到期后检查 |
+
+> **到期检查任务在后台静默执行，不弹窗、不播放铃声。**
+> 配置键 `task.alarmName` 和任务名后缀 `.AnchorAlarm` 保留兼容。
+
+- 关机期间错过的周期，由 `StartWhenAvailable` 在可运行时补跑。
+- `apply-config.cmd` 会重注册任务，将周期起点重置为当时 +1 分钟。
+- 安装探测不保存状态；首次正式轮询建立基线，不产生窗口重置事件。
 
 ### 多机协调（Leader 租约）
 
@@ -141,19 +182,17 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
 | `codex.autoAnchor.maxPerDay` | `6` | 每日最大执行次数 |
 | `codex.autoAnchor.minimumGapMinutes` | `300` | 「静默期」：两次锚定的最小间隔（分钟）；一次 CLI 调用后至少等这么久才会再触发（anchorOnApply 强制触发除外） |
 | `codex.autoAnchor.anchorOnApply` | `false` | 安装或应用配置时请求立即锚定；每日本地最多实际尝试一次，不等静默期，仍受每日总上限与运行期校验约束 |
-| `codex.autoAnchor.schedule` | `[]` | 独立的每日 `"HH:mm"` 触发器；安装为原生计划任务触发器。到点时若 primary 已在运行则只消费槽位、不调用模型；否则同一槽位每天最多一次。可与 `anchorOnExpiry` 同开 |
-| `codex.autoAnchor.anchorOnExpiry` | `[]` | 窗口到期补空档，可选 `"primary"` / `"secondary"`。窗口仍在运行时不调用；到期事件持久去重。配置后另建一个一次性闹钟任务指向最近到期时间 +1 分钟 |
+| `codex.autoAnchor.schedule` | `[]` | 每日 `"HH:mm"` 时间点；每个槽位每天最多一次，详见下方触发规则 |
+| `codex.autoAnchor.anchorOnExpiry` | `[]` | 到期补空档窗口：`"primary"` / `"secondary"`；另建一次性到期检查任务 |
 | `codex.autoAnchor.model` | `""` | **锚定执行的模型**：配置后传 `codex exec -m <model>`（如 `gpt-5-codex`）；留空 = 不传，沿用本机 `~/.codex/config.toml` 默认。仅允许字母/数字/`.`/`_`/`-`，1–100 字符 |
 | `codex.autoAnchor.reasoningEffort` | `""` | **锚定执行的思考等级**：配置后传 `-c model_reasoning_effort=<值>` 覆盖（如 `low`）；留空 = 不覆盖，沿用 CLI 默认。小写字母开头，仅小写字母/数字/`-`，1–30 字符；合法档位随 CLI/模型演进，填错在执行时按 fail-closed 记 ABORTED |
 
-> **关于模型与思考等级**：额度读取是 app-server 的 `account/rateLimits/read` 协议方法，**不调用模型**、
-> 不涉及模型/推理等级。AutoAnchor 的 `codex exec` 默认不带 `--model` / 推理等级参数，沿用你本机
-> Codex CLI 的默认配置（`~/.codex/config.toml` 的 `model` / `model_reasoning_effort`）；
-> 若需为锚定单独指定更轻量的模型或最低思考等级以省资源，可配置上方
-> `codex.autoAnchor.model` / `codex.autoAnchor.reasoningEffort`，两个参数仅在锚定执行时透传给 CLI
-> （其余一切行为不变）。每次锚定的 history 审计记录会写入实际使用的 `model` / `reasoningEffort`
-> （未配置时省略），便于事后查证。
-> 若 codex CLI 默认模型指向 gpt-5 类主力模型，AutoAnchor 即按该模型发送（除非配置覆盖）。
+**模型与思考等级**
+
+- 额度读取使用 `account/rateLimits/read`，不调用模型。
+- AutoAnchor 未指定模型时，沿用本机 `~/.codex/config.toml` 的配置。
+- `codex.autoAnchor.model` / `reasoningEffort` 只覆盖锚定执行的配置。
+- 执行前校验模型和思考等级，审计日志记录实际生效值，便于查证。
 
 > 配置 schema 标注为 v2；旧版平铺键（如 `pollIntervalMinutes`、`github.repoPath`）会
 > 在加载时自动迁移，无需手工改写。
@@ -162,7 +201,7 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
 
 ## 多机协调（单 Leader）
 
-> 租约抢占/接管、集群退避、history 推送的逐分钟模拟数据见 **[docs/scenarios.md](docs/scenarios.md)**。
+> 两台电脑接管、退避与并发的时间线见 **[多机与故障场景](codex-quota-keeper/docs/scenarios.md#s11)**。
 
 - 每台机器一个随机 `machineId`（不用 MAC / 序列号）。
 - 租约在 Private 仓库的 `cqk/coordination` 分支；Git push 冲突作为 CAS，
@@ -173,25 +212,54 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
 
 ## AutoAnchor（实验，默认关闭）
 
-> 每种触发场景的完整时间线模拟（真实格式的状态快照、事件文件、守卫拒绝原因、Mermaid 图）
-> 见 **[docs/scenarios.md](docs/scenarios.md)**。
+> 配置组合、具体时间、额度数值与触发结果见 **[运行场景详解](codex-quota-keeper/docs/scenarios.md)**。
 
 真正调用模型的自动触发器有两个，彼此独立、可以同时启用：
 
 1. **每日定时（schedule）**：例如 `["08:55","13:55"]`，用于把 primary 的 5h 窗口
    对齐工作时间。计划任务到点后 runner 会重新读取额度；primary 已在运行时不会调用模型，
    该槽位仍会被消费，避免稍后补打。
+
 2. **到期补空档（anchorOnExpiry）**：例如 `["secondary"]`，仅当选定窗口没有运行
-   （当前 `resetsAt` 为空/已过期，或上次已知窗口到期后消失）时触发一次。安装器维护一个
-   独立的一次性闹钟任务，在最近到期时间 +1 分钟唤醒 runner；每次成功读取后重新指向下一次到期。
+   （到期、为空、消失或已确认空闲）时触发一次。
+   独立的一次性到期检查任务在最近到期时间 +1 分钟启动 runner，成功读取后更新执行时间。
+
+**空闲判断与去重**
+
+- `0%` 且到期时间接近「当前时间 + 完整窗口长度」时，先等待连续观测确认时间随查询后移。
+- 单次 `0%` 不足以判断空闲；定时槽位暂不消费，仍受一个轮询周期的补跑期限约束。
+- 同一空闲期保留上一真实到期点，跨轮询、跨重启去重；预测时间后移不会生成新到期事件。
+- 已确认空闲时不设置不断后移的到期检查任务；后续周期轮询继续检查。
 
 重置事件仍写入审计日志，但不再触发模型；旧 `keepaliveIntervalMinutes` 会被忽略并给出迁移提示，
 如需连续衔接 primary 窗口，改用 `anchorOnExpiry:["primary"]`。两个自动触发器均为空时，
 即使 AutoAnchor 已 armed 也只查询额度，不会自动调用模型。
 
-**立即触发（anchorOnApply）不属于模式，任何模式下都可用**：`codex.autoAnchor.anchorOnApply=true`
-时，运行 `install.cmd` / `apply-config.cmd` 会请求立即锚定；每个本地自然日最多实际尝试一次，
-不等静默期、不需要重置、也不需要你本人使用 Codex。
+**立即触发（anchorOnApply）**
+
+在 AutoAnchor 已启用且 `codex.autoAnchor.anchorOnApply=true` 时，运行
+`install.cmd` / `apply-config.cmd` 会请求立即锚定。
+每个本地自然日最多实际尝试一次，不受最小间隔限制，仍执行其他校验。
+
+### 手动重置后的记录
+
+旧窗口尚未到期时，如果已用比例下降或真实到期时间改变，记录
+**到期前额度恢复／窗口重置**（`QUOTA_RECOVERED_EARLY`）。
+
+| 记录内容 | 字段 |
+|---|---|
+| 额度桶与窗口 | `quotaChange.bucketId`、`windowType` |
+| 前后已用比例 | `previousUsedPercent`、`usedPercent` |
+| 前后到期时间 | `previousResetsAt`、`resetsAt` |
+| 恢复原因 | `reason=unknown`，额度快照本身不能证明使用了重置卡 |
+
+事件写入本地运行日志、历史记录和待同步记录，并计入每日汇总。
+工具采用新的额度状态和到期时间；恢复事件本身不会触发模型调用。
+
+> 每小时采样可能错过「用完 → 重置 → 继续使用」的中间瞬间。
+> 日志反映两次成功读取之间的变化，不会补造充值操作或精确发生时间。
+
+### 执行约束
 
 - **官方未明确背书该用途**；OpenAI《使用条款》对"规避限制"存在解释风险，本项目不承诺零风控。
 - 默认 `codex.autoAnchor.enabled=false`，安装器不会自动开启。
@@ -219,10 +287,10 @@ docs/                 设计交付文档（docs/design/*.docx）+ 架构 / 运�
 
 ```powershell
 # PowerShell 7
-pwsh tests/run-all.ps1
+pwsh codex-quota-keeper/tests/run-all.ps1
 
 # Windows PowerShell 5.1
-powershell -ExecutionPolicy Bypass -File tests/run-all.ps1
+powershell -ExecutionPolicy Bypass -File codex-quota-keeper/tests/run-all.ps1
 ```
 
 CI（GitHub Actions）在每次 push / PR 上运行：PS 7 与 PS 5.1 全量测试、官方 schema
@@ -247,7 +315,7 @@ CI（GitHub Actions）在每次 push / PR 上运行：PS 7 与 PS 5.1 全量测�
 ## 文档
 
 - [docs/design/](docs/design/) — 中文设计交付文档（合规调研、总体架构、详细设计、部署运维、仓库审查）
-- [docs/scenarios.md](docs/scenarios.md) — 场景详解：每个处理场景的真实模拟数据与图
+- [运行场景详解](codex-quota-keeper/docs/scenarios.md) — 12 类场景：配置组合、具体数值、处理时间与跳过原因
 - [docs/soak-runbook.md](docs/soak-runbook.md) — 双机 soak + 故障注入操作单（发布前 DoD）
 - [docs/architecture.md](docs/architecture.md) — 模块与数据流
 - [docs/operations.md](docs/operations.md) — 部署、多机与日常运维

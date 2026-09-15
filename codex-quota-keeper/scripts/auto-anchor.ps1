@@ -445,12 +445,12 @@ function Invoke-AutoAnchorIfNeeded {
         # persisted snapshot so expiry alarm reconciliation immediately tracks
         # the newly opened window instead of waiting for the next hourly poll.
         if ($verify.buckets) {
-            $State.buckets = $verify.buckets
             $State.rateLimitReachedType = $verify.rateLimitReachedType
             $State.schemaUnknown = $verify.schemaUnknown
             if (Get-Command Update-ExpiryTrack -ErrorAction SilentlyContinue) {
                 Update-ExpiryTrack -State $State -Buckets $verify.buckets
             }
+            $State.buckets = $verify.buckets
         }
     } else { $State.anchors.failedCount++ }
 

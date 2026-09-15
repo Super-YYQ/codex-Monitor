@@ -194,6 +194,53 @@ for ($i = 0; $i -lt 260; $i++) { Add-ProcessedEvent -State $bounded -EventId "id
 Assert-Equal 200 @($bounded.processedEventIds).Count 'id list capped at 200'
 Assert-Equal 'id-259' $bounded.processedEventIds[199] 'newest ids retained'
 
+Start-TestGroup 'window running detection separates an idle prediction from a real open window'
+
+# Observed app-server semantics (D:\codex-quota-keeper logs 2026-09-14/15):
+#   window open  -> resetsAt is a FIXED boundary and usedPercent climbs
+#   window idle  -> resetsAt is a PREDICTION of now + windowDuration and used is 0
+# A prediction is always in the future, so "resetsAt > now" alone cannot mean running.
+$fiveHours = 300 * 60
+
+Assert-False (Test-WindowRunning -Window $null -NowEpoch $nowEpoch) 'absent window is not running'
+Assert-False (Test-WindowRunning -Window (New-StateWindow 'primary' 300 0 $null) -NowEpoch $nowEpoch) 'empty resetsAt is not running'
+Assert-False (Test-WindowRunning -Window (New-StateWindow 'primary' 300 40 $expired) -NowEpoch $nowEpoch) 'past resetsAt is not running'
+
+$openWindow = New-StateWindow 'primary' 300 63 ($nowEpoch + 7606)
+Assert-True (Test-WindowRunning -Window $openWindow -NowEpoch $nowEpoch) 'used>0 with a fixed future boundary is running'
+
+$idleExact = New-StateWindow 'primary' 300 0 ($nowEpoch + $fiveHours)
+Assert-True (Test-WindowIdlePrediction -Window $idleExact -NowEpoch $nowEpoch) 'used=0 at exactly now+duration is a candidate prediction'
+Assert-True (Test-WindowRunning -Window $idleExact -NowEpoch $nowEpoch) 'one zero-usage read cannot prove idle'
+
+# Real reads land a few seconds short of the full duration because the query itself takes time.
+$idleLatency = New-StateWindow 'primary' 300 0 ($nowEpoch + $fiveHours - 4)
+Assert-True (Test-WindowIdlePrediction -Window $idleLatency -NowEpoch $nowEpoch) 'read latency still reads as a candidate prediction'
+
+$openNoUsage = New-StateWindow 'primary' 300 0 ($nowEpoch + 3600)
+Assert-True (Test-WindowRunning -Window $openNoUsage -NowEpoch $nowEpoch) 'boundary well inside the duration is a real open window'
+
+Assert-True (Test-WindowRunning -Window (New-StateWindow 'primary' $null 0 ($nowEpoch + $fiveHours)) -NowEpoch $nowEpoch) 'unknown duration cannot prove idle and stays running'
+Assert-True (Test-WindowRunning -Window (New-StateWindow 'primary' 300 $null ($nowEpoch + $fiveHours)) -NowEpoch $nowEpoch) 'unknown usage cannot prove idle and stays running'
+
+Start-TestGroup 'schedule: an idle primary at the slot is the case the slot exists for'
+
+# Reproduces the 2026-09-15 09:00 miss: used=0 and resetsAt=now+5h was consumed as "already running".
+$idleCfg = New-GuardConfig -Schedule @('09:30')
+$idleNow = [DateTime]::Parse('2026-08-30 09:31:00')
+$idleEpoch = ConvertTo-EpochSeconds $idleNow
+$idleState = New-GuardState
+$idleState.buckets[0].windows[0].usedPercent = 0
+$idleState.buckets[0].windows[0].resetsAt = $idleEpoch + $fiveHours - 4
+$previousIdle = New-GuardState -PrimaryResetsAt ($idleEpoch + $fiveHours - 64)
+$previousIdle.buckets[0].windows[0].usedPercent = 0
+Update-ExpiryTrack -State $idleState -Buckets $previousIdle.buckets -Now $idleNow.AddMinutes(-1)
+Update-ExpiryTrack -State $idleState -Buckets $idleState.buckets -Now $idleNow
+$idleSlotId = Get-ScheduleEventId '2026-08-30' '09:30'
+$idleDecision = Test-ShouldAnchor -Config $idleCfg -State $idleState -Events @() -IsLeader $true -Now $idleNow
+Assert-True $idleDecision.should 'idle primary at a due slot anchors instead of being skipped'
+Assert-Contains $idleDecision.eventIds $idleSlotId 'idle slot returns its schedule event id'
+
 $result = Get-TestResult
 if ($result.failures -gt 0) { Write-Host "state-machine.test.ps1: $($result.failures) failure(s)" -ForegroundColor Red; exit 1 }
 exit 0

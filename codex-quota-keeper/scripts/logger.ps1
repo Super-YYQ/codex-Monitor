@@ -27,6 +27,7 @@ function Write-KeeperLog {
         [string]$RunId = '',
         $Windows = $null,
         $Anchor = $null,
+        $QuotaChange = $null,
         $ErrorText = $null,
         [string]$ErrorKind = $null,
         [string]$Level = 'INFO',
@@ -49,6 +50,7 @@ function Write-KeeperLog {
         version    = $script:CQK_VERSION
     }
     if ($ErrorKind) { $entry.errorKind = $ErrorKind }
+    if ($QuotaChange) { $entry.quotaChange = ConvertTo-QuotaChangeAuditRecord $QuotaChange }
     if ($includeLabel -and $MachineLabel) { $entry.machineLabel = $MachineLabel }
     if ($entry.error -is [string]) { $entry.error = Hide-SensitiveText $entry.error }
     Write-JsonLine (Get-LogFilePath $Root $When) $entry

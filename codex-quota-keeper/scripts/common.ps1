@@ -275,7 +275,7 @@ function Hide-SensitiveText {
 $script:CQK_HISTORY_ALLOWED_KEYS = @(
     'ts', 'recordedAt', 'eventId', 'event', 'machineId', 'machineLabel',
     'role', 'mode', 'runId', 'windows', 'anchor', 'errorKind', 'error',
-    'summary', 'schema', 'version'
+    'summary', 'schema', 'version', 'quotaChange'
 )
 
 function Sanitize-Record {
@@ -294,7 +294,25 @@ function Sanitize-Record {
         }
     }
     if ($out.ContainsKey('anchor')) { $out.anchor = ConvertTo-AnchorAuditRecord $out.anchor }
+    if ($out.ContainsKey('quotaChange')) { $out.quotaChange = ConvertTo-QuotaChangeAuditRecord $out.quotaChange }
     return $out
+}
+
+function ConvertTo-QuotaChangeAuditRecord {
+    # Share a narrow, scalar-only projection across runtime, history and outbox.
+    param($Value)
+    if ($Value -isnot [hashtable]) { return $null }
+    $change = @{}
+    foreach ($key in @('bucketId', 'windowType', 'reason')) {
+        if ($Value[$key] -is [string]) { $change[$key] = Hide-SensitiveText $Value[$key] }
+    }
+    foreach ($key in @('windowDurationMins', 'previousUsedPercent', 'usedPercent', 'previousResetsAt', 'resetsAt')) {
+        $v = $Value[$key]
+        if ($null -eq $v -or $v -is [int] -or $v -is [long] -or $v -is [double] -or $v -is [decimal]) {
+            $change[$key] = $v
+        }
+    }
+    return $change
 }
 
 function ConvertTo-AnchorAuditRecord {
