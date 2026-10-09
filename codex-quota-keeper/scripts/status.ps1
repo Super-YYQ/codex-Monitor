@@ -212,7 +212,7 @@ function Get-KeeperStatus {
     # flatten buckets for display; only usable windows with a known reset time
     $flat = Get-FlattenedQuotaWindows (ConvertTo-StateBuckets $state)
     $status.quota.windows = @($flat | Where-Object { $_.usable -and $null -ne $_.resetsAt })
-    $recent = Get-RecentErrors -Root $KeeperRoot -Take 1
+    $recent = @(Get-RecentErrors -Root $KeeperRoot -Take 1)
     if ($recent.Count -gt 0) {
         $status.lastError = "$($recent[0].event): $($recent[0].error)"
     }
