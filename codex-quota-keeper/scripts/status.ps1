@@ -86,6 +86,12 @@ function Get-KeeperStatus {
         role      = @{ role = 'UNKNOWN'; leaderOwner = $null; leaderLabel = $null; leaseExpiresAt = $null; localOnly = $false }
         quota     = @{ lastReadAt = $null; stale = $false; windows = @() }
         lastError = $null
+        # Structured companions to lastError: the display layer turns the raw
+        # "EVENT: message" record into a sentence, which needs the event, the
+        # message and when it happened. lastError keeps its exact old shape.
+        lastErrorAt    = $null
+        lastErrorEvent = $null
+        lastErrorText  = $null
         git       = @{ enabled = $false; repoPath = $null; reachable = $null }
     }
 
@@ -215,6 +221,9 @@ function Get-KeeperStatus {
     $recent = @(Get-RecentErrors -Root $KeeperRoot -Take 1)
     if ($recent.Count -gt 0) {
         $status.lastError = "$($recent[0].event): $($recent[0].error)"
+        $status.lastErrorAt = [string]$recent[0].ts
+        $status.lastErrorEvent = [string]$recent[0].event
+        $status.lastErrorText = [string]$recent[0].error
     }
     return $status
 }

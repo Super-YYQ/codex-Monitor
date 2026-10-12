@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Status 文案可读性（2026-10-12）
+- `最近错误` 行不再直出原始日志：按事件译为可读中文（额度用满 / 无法连接读取额度 / 登录失效等），
+  并附错误发生时间；未识别的事件保持原文。原始记录仍可在 `-Detailed` 与运行日志中查看。
+- `执行模型校验结果已过期或尚不存在` 改为 `自动锚定模型检查结果已过期或尚不存在`（无效/不可用两条
+  同步改名），建议改为 `status.cmd -Live`（只读、不消耗额度）并说明锚定执行前会自动复查；
+  AutoAnchor 区 `执行配置校验` 行的缓存/过期措辞同步简化。
+- `status.ps1` 为 `最近错误` 增加 `lastErrorAt` / `lastErrorEvent` / `lastErrorText` 结构化字段；
+  原有 `lastError` 形状不变（纯附加，兼容旧消费方与既有快照）。
+
 ### AutoAnchor trigger redesign（2026-09-14）
 - `schedule` 与新增的 `anchorOnExpiry` 改为可并行的独立触发器；同轮多个事件合并为一次
   `codex exec`。schedule 到点时若 primary 已在运行则消费槽位但不执行，避免迟到补打。

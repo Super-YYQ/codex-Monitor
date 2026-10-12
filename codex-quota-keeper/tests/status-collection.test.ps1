@@ -28,6 +28,7 @@ try {
     $status = Get-KeeperStatus -KeeperRoot $ws
     Assert-True $status.configOk 'fixture config reaches normal status collection'
     Assert-Null $status.lastError 'missing logs leave lastError unset'
+    Assert-Null $status.lastErrorAt 'missing logs leave the error timestamp unset'
     Write-KeeperLog -Root $ws -Event 'RUNNER_OK'
     $status = Get-KeeperStatus -KeeperRoot $ws
     Assert-Null $status.lastError 'INFO logs do not become recent errors'
@@ -36,6 +37,9 @@ try {
     Write-KeeperLog -Root $ws -Event 'READ_FAILED' -Level 'ERROR' -ErrorText 'app-server initialization timed out'
     $status = Get-KeeperStatus -KeeperRoot $ws
     Assert-Equal 'READ_FAILED: app-server initialization timed out' $status.lastError 'singleton logger result is collected as an array'
+    Assert-Equal 'READ_FAILED' $status.lastErrorEvent 'the structured event rides along with the legacy string'
+    Assert-Equal 'app-server initialization timed out' $status.lastErrorText 'the raw message rides along with the legacy string'
+    Assert-True ([bool]$status.lastErrorAt) 'the timestamp rides along with the legacy string'
 
     Start-TestGroup 'status: the newest error is preserved'
     Write-KeeperLog -Root $ws -Event 'AUTH_ERROR' -Level 'ERROR' -ErrorText 'login required'

@@ -318,6 +318,34 @@ function Get-NextScheduleSlotZh {
     return "明日 $([string]$sorted[0].text)"
 }
 
+function Get-FriendlyLastErrorText {
+    # §10 最近错误: the row is read by users, but "READ_FAILED: app-server error
+    # (-32603): failed to fetch ..." is a log record, not a sentence. Translate the
+    # event into what it means for the user; the raw text stays reachable in
+    # -Detailed (the LAST_ERROR_RECENT finding carries it) and in the logs.
+    # Unknown events return '' so the caller falls back to the raw record - a wrong
+    # translation is worse than an untranslated fact.
+    param([string]$Event, [string]$Text)
+    switch ($Event) {
+        'LIMIT_REACHED'              { return '额度已用满（服务端限流），窗口重置后自动恢复' }
+        'AUTH_ERROR'                 { return 'Codex 登录失效，需要重新登录（运行 codex login）' }
+        'SCHEMA_UNKNOWN'             { return '额度数据格式无法识别（工具可能需要更新）' }
+        'READ_FAILED' {
+            if ($Text -match '(?i)timed?\s*out|timeout') { return '读取额度超时（网络或代理较慢）' }
+            if ($Text -match '(?i)failed to fetch codex rate limits|error sending request') { return '无法连接 ChatGPT 读取额度（网络或代理问题）' }
+            return '读取额度失败（网络或登录问题）'
+        }
+        'ANCHOR_PROFILE_INVALID'     { return '自动锚定模型配置校验未通过，锚定已暂停' }
+        'ANCHOR_PROFILE_UNAVAILABLE' { return '暂时无法校验自动锚定模型（网络或登录问题）' }
+        'CONFIG_INVALID'             { return '配置文件无效，请先修复配置' }
+        'PREFLIGHT_FAILED'           { return '启动前检查失败（网络或登录问题）' }
+        'ANCHOR_ALARM_FAILED'        { return '到期闹钟注册失败（到期触发可能不可用）' }
+        'RETENTION_FAILED'           { return '日志清理失败（不影响额度读取）' }
+        'RUNNER_ERROR'               { return '轮询进程异常退出（详见运行日志）' }
+        default                      { return '' }
+    }
+}
+
 function Get-StatusDisplayModel {
     # §15.2 derived fields. Pure computation over facts + assessment + config + state;
     # it adds no new probes and changes no verdict. Config/State are optional: like
@@ -484,8 +512,11 @@ function Get-StatusDisplayModel {
             running = [bool](Get-StatusValue -Map $s -Path 'process.runnerRunningNow')
             pid     = Get-StatusValue -Map $s -Path 'process.pid'
         }
-        lastError    = [string](Get-StatusValue -Map $s -Path 'lastError')
-        configOk     = [bool](Get-StatusValue -Map $s -Path 'configOk')
+        lastError      = [string](Get-StatusValue -Map $s -Path 'lastError')
+        lastErrorAt    = [string](Get-StatusValue -Map $s -Path 'lastErrorAt')
+        lastErrorEvent = [string](Get-StatusValue -Map $s -Path 'lastErrorEvent')
+        lastErrorText  = [string](Get-StatusValue -Map $s -Path 'lastErrorText')
+        configOk       = [bool](Get-StatusValue -Map $s -Path 'configOk')
     }
 }
 
@@ -618,8 +649,8 @@ function Get-StatusDisplayLines {
             Write-StatusRow $lines -Label '执行配置校验' -Value '尚无记录；运行 status.cmd -Live 校验' -Severity 'INFO'
         } else {
             $pv = $ep.value
-            $origin = if ($ep.source -eq 'live') { '本次实时校验' } else { '缓存；仅代表上次校验' }
-            if ($ep.stale) { $origin += '，已过期或配置已修改' }
+            $origin = if ($ep.source -eq 'live') { '本次实时校验' } else { '缓存结果' }
+            if ($ep.stale) { $origin += '；已过期' }
             $verdict = switch ($pv.validation) { 'VALID' { '通过' }; 'INVALID' { '不支持此配置' }; default { '暂时无法校验' } }
             $sev = if ($pv.validation -eq 'VALID' -and -not $ep.stale) { 'HEALTHY' } elseif ($pv.validation -eq 'INVALID') { 'ERROR' } else { 'WARNING' }
             Write-StatusRow $lines -Label '执行配置校验' -Value "$verdict（$origin）" -Severity $sev
@@ -709,7 +740,21 @@ function Get-StatusDisplayLines {
     }
     $le = [string]$Model.lastError
     if ($le) {
-        Write-StatusRow $lines -Label '最近错误' -Value (Hide-SensitiveText $le) `
+        # §10: the raw "EVENT: message" record is evidence, not a sentence. Show the
+        # translated meaning with the time it happened; the raw record stays in
+        # -Detailed and in the logs. Unknown shapes fall back to the record itself.
+        $ev = [string]$Model.lastErrorEvent
+        $raw = [string]$Model.lastErrorText
+        if (-not $ev) {
+            $idx = $le.IndexOf(': ')
+            if ($idx -gt 0) { $ev = $le.Substring(0, $idx); $raw = $le.Substring($idx + 2) }
+            else { $raw = $le }
+        }
+        $friendly = Get-FriendlyLastErrorText -Event $ev -Text $raw
+        $leText = $(if ($friendly) { $friendly } else { $le })
+        $at = Format-StatusDateTime ([string]$Model.lastErrorAt) 'yyyy-MM-dd HH:mm'
+        if ($at) { $leText = "$leText（$at）" }
+        Write-StatusRow $lines -Label '最近错误' -Value (Hide-SensitiveText $leText) `
             -Severity $(if (Get-StatusFinding -Assessment @{ findings = $findings } -Code 'LAST_ERROR_RECENT') {
                 if (Test-StatusOverallIs -Assessment @{ overall = $Model.overall } -Level 'ERROR') { 'ERROR' } else { 'INFO' }
             } else { 'INFO' })
