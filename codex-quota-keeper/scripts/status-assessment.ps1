@@ -74,9 +74,9 @@ $script:CqkStatusFindingCatalog = @{
     # ---- INFO: how it is running, not whether it is broken ---------------------
     LOCAL_ONLY                  = @{ severity = 'INFO'; title = '单机模式'; action = '单台电脑使用正常；多台电脑同时运行需启用 Git 协调'; titleEn = 'single-machine mode (LOCAL_ONLY)'; actionEn = 'normal for one machine; enable Git coordination for several' }
     AUTOANCHOR_ENABLED          = @{ severity = 'INFO'; title = '自动锚定已开启（实验功能）'; action = '该功能会主动调用 Codex 模型并消耗额度'; titleEn = 'auto-anchoring is ON (experimental)'; actionEn = 'this calls the Codex model on its own and consumes quota' }
-    PROFILE_INVALID            = @{ severity = 'ERROR'; title = '执行模型配置校验失败'; action = '修正模型或推理强度后运行 Status -Live'; titleEn = 'execution profile is invalid'; actionEn = 'correct model or reasoning effort, then run Status -Live' }
-    PROFILE_UNAVAILABLE        = @{ severity = 'WARNING'; title = '执行模型暂时无法校验'; action = '检查 Codex 登录和网络，再运行 Status -Live'; titleEn = 'execution profile is unavailable'; actionEn = 'check Codex login and network, then run Status -Live' }
-    PROFILE_STALE              = @{ severity = 'WARNING'; title = '执行模型校验结果已过期或尚不存在'; action = '运行 Status -Live 获取当前校验结果'; titleEn = 'execution profile is stale or missing'; actionEn = 'run Status -Live to validate the current profile' }
+    PROFILE_INVALID            = @{ severity = 'ERROR'; title = '自动锚定模型配置校验失败'; action = '修正模型或思考等级后运行 status.cmd -Live'; titleEn = 'execution profile is invalid'; actionEn = 'correct model or reasoning effort, then run Status -Live' }
+    PROFILE_UNAVAILABLE        = @{ severity = 'WARNING'; title = '自动锚定模型暂时无法校验'; action = '检查 Codex 登录和网络，再运行 status.cmd -Live'; titleEn = 'execution profile is unavailable'; actionEn = 'check Codex login and network, then run Status -Live' }
+    PROFILE_STALE              = @{ severity = 'WARNING'; title = '自动锚定模型检查结果已过期或尚不存在'; action = '运行 status.cmd -Live 可立即重新检查（只读，不消耗额度）；自动锚定执行前也会自行复查'; titleEn = 'execution profile is stale or missing'; actionEn = 'run Status -Live to validate the current profile' }
     AUTOANCHOR_OFF              = @{ severity = 'INFO'; title = '自动锚定未开启'; action = '当前只读取额度，不会自动调用模型'; titleEn = 'auto-anchoring is OFF'; actionEn = 'quota is read only; no model call is made' }
     ANCHOR_TRIGGERS_OFF         = @{ severity = 'INFO'; title = '自动锚定未配置触发器'; action = '当前仍只查询额度；配置 schedule 和/或 anchorOnExpiry 后才会自动调用模型'; titleEn = 'no auto-anchor trigger configured'; actionEn = 'quota remains read-only; configure schedule and/or anchorOnExpiry to call a model' }
     BACKOFF_ACTIVE_SINGLE       = @{ severity = 'INFO'; title = '本机退避中（单机模式）'; action = '不影响总体状态；到期自动恢复'; titleEn = 'local backoff active (single machine)'; actionEn = 'does not affect the overall verdict in single-machine mode' }
@@ -289,6 +289,7 @@ function Read-StatusLogTail {
                 level = [string]$entry.level
                 event = [string]$entry.event
                 error = [string]$entry.error
+                runId = [string]$entry.runId
             })
             if ($out.Count -ge $Take) { return @($out.ToArray()) }
         }
@@ -326,7 +327,7 @@ function Get-StatusVerdictFreshness {
     $verdictIndex = -1; $verdictEvent = ''; $verdictTs = $null; $verdictError = ''
     for ($i = 0; $i -lt $entries.Count; $i++) {
         $ev = [string]$entries[$i].event
-        if ($ev -eq 'RUNNER_OK' -or $ev -eq 'RUNNER_ERROR') {
+        if ($ev -in @('RUNNER_OK', 'RUNNER_ERROR', 'RUNNER_READ_FAILED')) {
             $verdictIndex = $i; $verdictEvent = $ev
             $verdictTs = ConvertTo-StatusDateTime $entries[$i].ts
             $verdictError = [string]$entries[$i].error
@@ -339,18 +340,22 @@ function Get-StatusVerdictFreshness {
     }
     $age = if ($null -ne $verdictTs) { [Math]::Max(0, ($Now - $verdictTs).TotalMinutes) } else { $null }
     $openVerdict = @{ fresh = $false; ageMinutes = $age; thresholdMinutes = $threshold; reason = ''; event = $verdictEvent; error = $verdictError }
-    if ($verdictEvent -eq 'RUNNER_ERROR') {
+    if ($verdictEvent -in @('RUNNER_ERROR', 'RUNNER_READ_FAILED')) {
         $openVerdict.reason = 'last-verdict-error'
         # Unparseable stamp: age unknown, so keep the escalation (fail-closed).
         if ($null -ne $age -and $age -gt $threshold) { $openVerdict.fresh = $true; $openVerdict.reason = 'stale-verdict' }
         return $openVerdict
     }
-    for ($i = $verdictIndex + 1; $i -lt $entries.Count; $i++) {
+    for ($i = 0; $i -lt $entries.Count; $i++) {
         if ([string]$entries[$i].level -ne 'ERROR') { continue }
+        $sameRun = ($entries[$verdictIndex].runId -and $entries[$verdictIndex].runId -eq $entries[$i].runId)
+        # Legacy runners also wrote OK after a failed read. A completion from
+        # that same run cannot prove recovery, even across a second boundary.
+        if (-not $sameRun -and $i -gt $verdictIndex -and $entries[$i].runId -and $entries[$verdictIndex].runId) { continue }
         $later = ConvertTo-StatusDateTime $entries[$i].ts
         # An unparseable stamp cannot be ordered; treat it as "still open"
         # (fail-closed) rather than dropping a real failure.
-        if ($null -ne $verdictTs -and $null -ne $later -and $later -lt $verdictTs) { continue }
+        if (-not $sameRun -and $null -ne $verdictTs -and $null -ne $later -and $later -lt $verdictTs) { continue }
         $openVerdict.reason = 'error-after-verdict'
         $openVerdict.event = [string]$entries[$i].event
         $openVerdict.error = [string]$entries[$i].error

@@ -85,6 +85,19 @@ try {
     Assert-True ($vbs -match '-FromAlarm') 'alarm action identifies its source'
     Assert-True ($vbs -match '-WaitLockSeconds 60') 'alarm runner waits for a colliding poll'
 
+    $script:MockAlarmExisting = @{
+        Actions = @($script:MockAlarmRegistered.Action)
+        Triggers = @(@{ StartBoundary = $plan.targetAt.ToString('s'); Enabled = $true })
+        Settings = $script:MockAlarmRegistered.Settings
+        Principal = $script:MockAlarmRegistered.Principal
+    }
+    $stamp = (Get-Item (Join-Path $keeper 'runtime\hidden-launch-anchor-alarm.vbs')).LastWriteTimeUtc
+    $unchanged = Sync-AnchorAlarmTask -Config $cfg -State $state -KeeperRoot $keeper -ConfigFile $cfgPath -Now $now
+    Assert-False $unchanged.changed 'identical task is not re-registered'
+    Assert-Equal $stamp (Get-Item (Join-Path $keeper 'runtime\hidden-launch-anchor-alarm.vbs')).LastWriteTimeUtc 'identical launcher is not rewritten'
+    $script:MockAlarmExisting.Settings.WakeToRun = $true
+    Assert-True (Sync-AnchorAlarmTask -Config $cfg -State $state -KeeperRoot $keeper -ConfigFile $cfgPath -Now $now).changed 'changed settings require registration'
+
     $script:MockAlarmExisting = @{ TaskName = 'CQK.Test.AnchorAlarm' }
     $clearCfg = New-AlarmConfig -Expiry @()
     $cleared = Sync-AnchorAlarmTask -Config $clearCfg -State $state -KeeperRoot $keeper -ConfigFile $cfgPath -Now $now
@@ -107,6 +120,18 @@ Assert-Equal 'clear' $idlePlan.action 'idle secondary prediction carries no alar
 $realPlan = Get-AnchorAlarmPlan -Config (New-AlarmConfig) -State (New-AlarmState -Secondary ($nowEpoch + 3600)) -Now $now
 Assert-Equal 'set' $realPlan.action 'a real boundary inside the duration still arms the alarm'
 Assert-Equal ($nowEpoch + 3660) $realPlan.targetEpoch 'real boundary plus 60 seconds selected'
+
+Start-TestGroup 'bounded read retry never retries a retry or bypasses typed backoff'
+$retryCfg = New-AlarmConfig
+$retryCfg.poll.intervalMinutes = 60
+$retry = Get-QuotaReadRetryPlan $retryCfg @{ ok = $false; errorKind = 'NETWORK_ERROR' } $false $now
+Assert-Equal 'set' $retry.action 'transient failure arms one read-only retry'
+Assert-True (($retry.targetAt - $now).TotalMinutes -gt 10) 'retry is strictly after network backoff'
+Assert-Equal 'clear' (Get-QuotaReadRetryPlan $retryCfg @{ ok = $false; errorKind = 'NETWORK_ERROR' } $true $now).action 'retry cannot chain'
+Assert-Equal 'clear' (Get-QuotaReadRetryPlan $retryCfg @{ ok = $false; errorKind = 'RATE_LIMITED' } $false $now).action '429 cannot use network retry'
+Assert-Equal 'clear' (Get-QuotaReadRetryPlan $retryCfg @{ ok = $true } $false $now).action 'success clears pending retry'
+$retryCfg.poll.intervalMinutes = 5
+Assert-Equal 'clear' (Get-QuotaReadRetryPlan $retryCfg @{ ok = $false; errorKind = 'TIMEOUT' } $false $now).action 'short poller needs no extra timer'
 
 $result = Get-TestResult
 if ($result.failures -gt 0) { Write-Host "anchor-alarm.test.ps1: $($result.failures) failure(s)" -ForegroundColor Red; exit 1 }

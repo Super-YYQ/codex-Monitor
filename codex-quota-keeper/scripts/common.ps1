@@ -43,7 +43,7 @@ $script:CQK_GIT_SYNC_BUDGET_SECONDS = 240
 # what must stay free between the end of one run and the next trigger.
 $script:CQK_MIN_TASK_LIMIT_MINUTES = 10
 $script:CQK_TASK_LIMIT_POLL_MARGIN_MINUTES = 2
-$script:CQK_VERSION = '0.9.0-beta'
+$script:CQK_VERSION = '0.9.1-beta'
 
 function Get-KeeperScriptDir {
     return $script:CqkCommonDir
@@ -327,7 +327,7 @@ function ConvertTo-AnchorAuditRecord {
                 'configuredReasoningEffort', 'effectiveModel',
                 'effectiveReasoningEffort', 'modelProvider', 'modelSource',
                 'reasoningEffortSource', 'profileValidation', 'validatedAt',
-                'supportedReasoningEfforts', 'model', 'reasoningEffort', 'reason')) {
+                'supportedReasoningEfforts', 'model', 'reasoningEffort', 'reason', 'errorKind')) {
             if (-not $Value.ContainsKey($key)) { continue }
             $v = $Value[$key]
             if ($v -is [string]) { $anchor[$key] = Hide-SensitiveText $v }
@@ -336,6 +336,20 @@ function ConvertTo-AnchorAuditRecord {
                 $anchor[$key] = @($v | Where-Object { $_ -is [string] } | ForEach-Object { Hide-SensitiveText $_ })
             }
         }
+    foreach ($key in @('beforeWindows', 'afterWindows')) {
+        if (-not $Value.ContainsKey($key)) { continue }
+        $anchor[$key] = @(foreach ($window in @($Value[$key])) {
+            if ($window -isnot [hashtable]) { continue }
+            $clean = @{}
+            foreach ($field in @('name', 'bucketId')) {
+                if ($window[$field] -is [string]) { $clean[$field] = Hide-SensitiveText $window[$field] }
+            }
+            foreach ($field in @('minutes', 'usedPercent', 'resetsAt', 'usable')) {
+                if ($null -eq $window[$field] -or $window[$field] -is [ValueType]) { $clean[$field] = $window[$field] }
+            }
+            $clean
+        })
+    }
     return $anchor
 }
 

@@ -33,7 +33,7 @@ $machine = @{ machineId = 'CLAIM-A'; label = 'Claim A' }
 
 function Invoke-RunnerSub {
     param([string]$KeeperRoot, [string]$ConfigFile, [switch]$ForceAnchor)
-    $subArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runnerPath, '-KeeperRoot', $KeeperRoot, '-ConfigFile', $ConfigFile)
+    $subArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runnerPath, '-KeeperRoot', $KeeperRoot, '-ConfigFile', $ConfigFile, '-NoTaskChanges')
     if ($ForceAnchor) { $subArgs += '-ForceAnchor' }
     $out = & $pwsh @subArgs 2>&1
     return @{ exitCode = $LASTEXITCODE; output = ($out | Out-String) }

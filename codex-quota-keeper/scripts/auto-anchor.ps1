@@ -291,7 +291,8 @@ function Invoke-AutoAnchorIfNeeded {
         [string]$CodexPath = '',
         [bool]$ForceAnchor = $false
     )
-    $out = @{ anchored = $false; events = @() }
+    $out = @{ anchored = $false; events = @(); verification = $null }
+    $beforeWindows = Get-FlattenedQuotaWindows @($State.buckets)
     $now = Get-Date
 
     $guard = Test-ShouldAnchor -Config $Config -State $State -Events $Events -IsLeader $IsLeader -Now $now -Force $ForceAnchor
@@ -410,6 +411,9 @@ function Invoke-AutoAnchorIfNeeded {
 
     # ---- VERIFY: second read; never retry the model call --------------------
     $verify = Invoke-CodexRateLimitsRead -Config $Config -CodexPath $CodexPath
+    # Runner owns snapshot transitions, typed errors and local/cluster backoff
+    # for both reads, including a failed post-exec verification.
+    $out.verification = $verify
     $verified = [bool]$verify.ok
     $endedAt = Get-IsoTimestamp
 
@@ -429,9 +433,12 @@ function Invoke-AutoAnchorIfNeeded {
         durationSecs      = [int]$sw.Elapsed.TotalSeconds
         execExitCode      = $exec.exitCode
         verified          = $verified
+        beforeWindows     = $beforeWindows
+        afterWindows      = $(if ($verified) { $verify.windows } else { $null })
+        errorKind         = $(if (-not $verified) { $verify.errorKind } else { $null })
         model             = $(if ([string]::IsNullOrWhiteSpace([string]$anchorCfgExec.model)) { $null } else { [string]$anchorCfgExec.model })
         reasoningEffort   = $(if ([string]::IsNullOrWhiteSpace([string]$anchorCfgExec.reasoningEffort)) { $null } else { [string]$anchorCfgExec.reasoningEffort })
-        reason            = $(if (-not $exec.ok) { "exec failed ($($exec.exitCode))" } elseif (-not $verified) { 'post-anchor verification failed; no retry' } else { $null })
+        reason            = $(if (-not $exec.ok) { "exec failed ($($exec.exitCode))" } elseif (-not $verified) { "post-anchor verification failed ($($verify.errorKind)): $($verify.message); no retry" } else { $null })
     }
 
     foreach ($k in @('configuredModel', 'configuredReasoningEffort', 'effectiveModel',
@@ -441,17 +448,6 @@ function Invoke-AutoAnchorIfNeeded {
     if ($verified -and $exec.ok) {
         $State.anchors.successCount++
         $State.anchors.lastSuccessAt = $endedAt
-        # The verification read is newer than the pre-anchor poll. Make it the
-        # persisted snapshot so expiry alarm reconciliation immediately tracks
-        # the newly opened window instead of waiting for the next hourly poll.
-        if ($verify.buckets) {
-            $State.rateLimitReachedType = $verify.rateLimitReachedType
-            $State.schemaUnknown = $verify.schemaUnknown
-            if (Get-Command Update-ExpiryTrack -ErrorAction SilentlyContinue) {
-                Update-ExpiryTrack -State $State -Buckets $verify.buckets
-            }
-            $State.buckets = $verify.buckets
-        }
     } else { $State.anchors.failedCount++ }
 
     foreach ($id in $claimed) { Add-ProcessedEvent -State $State -EventId $id }
@@ -472,7 +468,7 @@ function Invoke-AutoAnchorIfNeeded {
     } else {
         $out.events += ,@{ event = 'ANCHOR_ABORTED'; eventId = $invocationId
                            anchorInvocationId = $invocationId; triggerEventIds = $claimed
-                           reason = $anchorInfo.reason; anchor = $anchorInfo }
+                           errorKind = $anchorInfo.errorKind; reason = $anchorInfo.reason; anchor = $anchorInfo }
     }
 
     # Finalize every claimed event: COMPLETED on verified success, FAILED otherwise.

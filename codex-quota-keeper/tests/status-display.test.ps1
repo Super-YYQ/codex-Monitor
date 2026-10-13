@@ -661,6 +661,41 @@ try {
     } finally { Remove-TestWorkspace $wsE }
 
     # -----------------------------------------------------------------------
+    Start-TestGroup '§10 最近错误 reads as a sentence; the raw record stays in -Detailed'
+    # The row the user reads must not be a log line: the event is translated and
+    # stamped with when it happened. An unclassified record falls back to its raw
+    # text (the golden snapshot pins that fallback byte-for-byte), and pre-v1
+    # status objects - which carry only lastError - are parsed off the prefix.
+    Assert-Equal '额度已用满（服务端限流），窗口重置后自动恢复' (Get-FriendlyLastErrorText -Event 'LIMIT_REACHED' -Text '') 'limit reached'
+    Assert-Equal 'Codex 登录失效，需要重新登录（运行 codex login）' (Get-FriendlyLastErrorText -Event 'AUTH_ERROR' -Text 'login required') 'auth failure'
+    Assert-Equal '读取额度超时（网络或代理较慢）' (Get-FriendlyLastErrorText -Event 'READ_FAILED' -Text 'app-server initialization timed out') 'read timeout'
+    Assert-Equal '读取额度超时（网络或代理较慢）' (Get-FriendlyLastErrorText -Event 'RUNNER_READ_FAILED' -Text 'app-server initialization timed out') 'terminal read timeout'
+    Assert-Equal '无法连接 ChatGPT 读取额度（网络或代理问题）' (Get-FriendlyLastErrorText -Event 'READ_FAILED' -Text 'app-server error (-32603): failed to fetch codex rate limits: error sending request for url (https://chatgpt.com/backend-api/wham/usage)') 'network failure'
+    Assert-Equal '读取额度失败（网络或登录问题）' (Get-FriendlyLastErrorText -Event 'READ_FAILED' -Text 'something else') 'unrecognised read failure keeps the generic wording'
+    Assert-Equal '' (Get-FriendlyLastErrorText -Event 'WINDOW_RESET_OBSERVED' -Text 'x') 'unknown events have no translation'
+    $wsL = New-TestWorkspace
+    try {
+        $rootL = Join-Path $wsL 'keeper'
+        New-Item -ItemType Directory -Force -Path (Join-Path $rootL 'runtime\logs') | Out-Null
+        $cfgL = New-GoldenConfig -Coordination $false
+        $stN = New-GoldenStatus @{
+            lastError      = 'READ_FAILED: app-server error (-32603): failed to fetch codex rate limits: error sending request for url (https://chatgpt.com/backend-api/wham/usage)'
+            lastErrorEvent = 'READ_FAILED'
+            lastErrorText  = 'app-server error (-32603): failed to fetch codex rate limits: error sending request for url (https://chatgpt.com/backend-api/wham/usage)'
+            lastErrorAt    = '2026-09-09T11:55:36+08:00'
+        } -LocalOnly
+        $panelN = Get-StatusDisplayLines -Status $stN -Config $cfgL -KeeperRoot $rootL -Now $Now
+        $localErrorAt = [TimeZoneInfo]::ConvertTimeFromUtc([datetime]::new(2026, 9, 9, 3, 55, 36, [DateTimeKind]::Utc), [TimeZoneInfo]::Local).ToString('yyyy-MM-dd HH:mm')
+        Assert-RowValue $panelN '最近错误' "[信息] 无法连接 ChatGPT 读取额度（网络或代理问题）（$localErrorAt）" 'a network read failure renders as a sentence with its local time'
+        $verbN = (Get-RowText (Get-StatusDisplayLines -Status $stN -Config $cfgL -KeeperRoot $rootL -Now $Now -Detailed)) -join "`n"
+        Assert-True $verbN.Contains('failed to fetch codex rate limits') '-Detailed still carries the raw record'
+        $stOld = New-GoldenStatus @{ lastError = 'READ_FAILED: timed out' } -LocalOnly
+        Assert-RowValue (Get-StatusDisplayLines -Status $stOld -Config $cfgL -KeeperRoot $rootL -Now $Now) '最近错误' '[信息] 读取额度超时（网络或代理较慢）' 'the event is parsed from a legacy lastError'
+        $stRaw = New-GoldenStatus @{ lastError = 'auth failed for user bob: token=abcdef123456' } -LocalOnly
+        Assert-RowValue (Get-StatusDisplayLines -Status $stRaw -Config $cfgL -KeeperRoot $rootL -Now $Now) '最近错误' '[信息] auth failed for user bob: token=[REDACTED]' 'an unknown record keeps its raw text, still masked'
+    } finally { Remove-TestWorkspace $wsL }
+
+    # -----------------------------------------------------------------------
     Start-TestGroup '§17.2 golden snapshots'
     # Rebuilt from the shared fixtures and compared line by line, so a change in
     # padding, in a term, or in the newline convention has to be committed on

@@ -16,6 +16,8 @@ param(
     [switch]$NoSync,
     [switch]$ForceAnchor,
     [switch]$FromAlarm,
+    [switch]$ReadOnlyRetry,
+    [switch]$NoTaskChanges,
     [ValidateRange(0, 3600)][int]$WaitLockSeconds = 0
 )
 
@@ -37,9 +39,11 @@ if (-not $ConfigFile) { $ConfigFile = Get-ConfigPath $KeeperRoot }
 $script:CqkExitCode = 0
 $script:CqkRunId = [guid]::NewGuid().ToString('N').Substring(0, 12)
 $script:CqkLogging = @{ retentionDays = 90; includeMachineLabel = $false }
+$runClock = [Diagnostics.Stopwatch]::StartNew()
+$script:CqkRunContext = @{ trigger = $(if ($ReadOnlyRetry) { 'read-retry' } elseif ($ForceAnchor) { 'force' } elseif ($FromAlarm) { 'expiry' } else { 'poll-or-schedule' }); powerShellVersion = $PSVersionTable.PSVersion.ToString() }
 
 function Write-RunnerLog {
-    param([string]$Event, [string]$Level = 'INFO', $ErrorText = $null, [string]$ErrorKind = $null, $Windows = $null, $Anchor = $null, $QuotaChange = $null)
+    param([string]$Event, [string]$Level = 'INFO', $ErrorText = $null, [string]$ErrorKind = $null, $Windows = $null, $Anchor = $null, $QuotaChange = $null, $Diagnostics = $null, $EventDetails = $null)
     $machine = $script:CqkMachine
     $label = if ($machine -and $machine.label) { [string]$machine.label } else { '' }
     Write-KeeperLog -Root $KeeperRoot -Event $Event -Level $Level -RunId $script:CqkRunId `
@@ -47,7 +51,42 @@ function Write-RunnerLog {
         -Role ($(if ($script:CqkRole) { $script:CqkRole } else { '' })) `
         -Mode ($(if ($script:CqkMode) { $script:CqkMode } else { '' })) `
         -Windows $Windows -Anchor $Anchor -QuotaChange $QuotaChange -ErrorText $ErrorText -ErrorKind $ErrorKind `
-        -LoggingConfig $script:CqkLogging
+        -LoggingConfig $script:CqkLogging -Diagnostics $Diagnostics -Context $script:CqkRunContext -EventDetails $EventDetails
+}
+
+function Update-RunnerQuotaRead {
+    param([hashtable]$Read, [hashtable]$State)
+    $readEvents = Get-StateEvents -Previous $State -Current $Read -Now (Get-Date)
+    if ($Read.ok) {
+        Update-ExpiryTrack -State $State -Buckets $Read.buckets -Now (Get-Date)
+        $State.stale = $false
+        $State.lastGoodReadAt = Get-IsoTimestamp
+        $State.consecutiveReadFailures = 0
+        $State.buckets = $Read.buckets
+        $State.rateLimitReachedType = $Read.rateLimitReachedType
+        $State.schemaUnknown = $Read.schemaUnknown
+        $State.lastError = $null
+    } else {
+        $State.stale = $true
+        $State.consecutiveReadFailures = [int]$State.consecutiveReadFailures + 1
+        $State.lastError = [string]$Read.message
+        if ($Read.errorKind -eq 'AUTH_ERROR') {
+            Set-Backoff -Root $KeeperRoot -Minutes 120 -Reason 'auth error'
+            $null = Set-GlobalBackoff -Config $cfg -KeeperRoot $KeeperRoot -Minutes 120 -Reason 'auth_error' -Machine $machine
+        } elseif ($Read.errorKind -in @('NETWORK_ERROR', 'TIMEOUT', 'EOF')) {
+            Set-Backoff -Root $KeeperRoot -Minutes ([Math]::Max(10, (Get-PollConfig $cfg).minimumIntervalMinutes)) -Reason 'network'
+        } elseif ($Read.errorKind -eq 'RATE_LIMITED') {
+            Set-Backoff -Root $KeeperRoot -Minutes 60 -Reason '429'
+            $null = Set-GlobalBackoff -Config $cfg -KeeperRoot $KeeperRoot -Minutes 60 -Reason '429' -Machine $machine
+        }
+        # Exactly one READ_FAILED per failed request; auth/schema events remain
+        # distinct domain events. The event loop is the only persistence owner.
+        $readEvents = @($readEvents | Where-Object { $_.event -ne 'READ_FAILED' })
+        $readEvents += ,@{ event = 'READ_FAILED'; kind = $Read.errorKind
+            message = "$($Read.message) (consecutive failures: $($State.consecutiveReadFailures))"
+            diagnostics = $Read.attemptDetails }
+    }
+    return ,$readEvents
 }
 
 try {
@@ -61,6 +100,7 @@ try {
     $cfg = $loaded.config
     $script:CqkMode = [string]$cfg.mode
     $script:CqkLogging = Get-LoggingConfig $cfg
+    $script:CqkRunContext.buildId = Get-Sha256Hex ((Get-ChildItem -LiteralPath $scriptDir -Filter '*.ps1' -File | Sort-Object Name | ForEach-Object { (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }) -join '')
 
     # ---- local mutual exclusion (two layers, doc 03 §9) --------------------
     $lock = Enter-RunnerLock -Root $KeeperRoot -WaitSeconds $WaitLockSeconds
@@ -161,39 +201,10 @@ try {
 
     # LEADER or DEGRADED: perform the read-only quota poll.
     $read = Invoke-CodexRateLimitsRead -Config $cfg -CodexPath $pf.codexPath
-    $events = @()
-
-    if ($read.ok) {
-        $events = Get-StateEvents -Previous $state -Current $read -Now (Get-Date)
-        Update-ExpiryTrack -State $state -Buckets $read.buckets -Now (Get-Date)
-        $state.stale = $false
-        $state.lastGoodReadAt = Get-IsoTimestamp
-        $state.consecutiveReadFailures = 0
-        $state.buckets = $read.buckets
-        $state.rateLimitReachedType = $read.rateLimitReachedType
-        $state.schemaUnknown = $read.schemaUnknown
-        $state.lastError = $null
-    } else {
-        # Keep previous windows but mark them stale; never treat stale data as a reset.
-        $events = Get-StateEvents -Previous $state -Current $read -Now (Get-Date)
-        $state.stale = $true
-        $state.consecutiveReadFailures = [int]$state.consecutiveReadFailures + 1
-        $state.lastError = [string]$read.message
-        if ($read.errorKind -eq 'AUTH_ERROR') {
-            Set-Backoff -Root $KeeperRoot -Minutes 120 -Reason 'auth error'
-            $null = Set-GlobalBackoff -Config $cfg -KeeperRoot $KeeperRoot -Minutes 120 -Reason 'auth_error' -Machine $machine
-        } elseif ($read.errorKind -in @('NETWORK_ERROR', 'TIMEOUT', 'EOF')) {
-            Set-Backoff -Root $KeeperRoot -Minutes 10 -Reason 'network'
-        } elseif ($read.errorKind -eq 'RATE_LIMITED') {
-            Set-Backoff -Root $KeeperRoot -Minutes 60 -Reason '429'
-            $null = Set-GlobalBackoff -Config $cfg -KeeperRoot $KeeperRoot -Minutes 60 -Reason '429' -Machine $machine
-        }
-        # No -f here: the read message may contain '{' (e.g. the JSON-RPC line in
-        # a TIMEOUT diagnostic), which would break a String.Format template.
-        Write-RunnerLog -Event 'READ_FAILED' -Level 'ERROR' `
-            -ErrorText ("$($read.message) (consecutive failures: $($state.consecutiveReadFailures))") `
-            -ErrorKind ([string]$read.errorKind)
-    }
+    $latestWindows = Get-FlattenedQuotaWindows @($state.buckets)
+    if ($read.ok) { $latestWindows = $read.windows }
+    $readDiagnostics = @(foreach ($attempt in @($read.attemptDetails)) { @{} + $attempt + @{ phase = 'initial' } })
+    $events = Update-RunnerQuotaRead -Read $read -State $state
 
     # ---- leader changed ------------------------------------------------------
     $newOwnerId = $null
@@ -207,26 +218,42 @@ try {
     # -ForceAnchor = the explicit "anchor right now" request from install/apply
     # config (codex.autoAnchor.anchorOnApply).
     $isLeader = ($election.role -eq 'LEADER' -and ($null -ne $election.lease -or [bool]$election.localOnly))
-    if (Test-AutoAnchorArmed $cfg) {
+    if (-not $ReadOnlyRetry -and (Test-AutoAnchorArmed $cfg)) {
         if (Get-Command Invoke-AutoAnchorIfNeeded -ErrorAction SilentlyContinue) {
             $anchorOutcome = Invoke-AutoAnchorIfNeeded -Config $cfg -KeeperRoot $KeeperRoot `
                 -State $state -Events $events -IsLeader $isLeader -Machine $machine -Election $election `
                 -ForceAnchor:$ForceAnchor
             if ($anchorOutcome -and $anchorOutcome.events) { $events += @($anchorOutcome.events) }
+            if ($anchorOutcome -and $anchorOutcome.verification) {
+                $read = $anchorOutcome.verification
+                if ($read.ok) { $latestWindows = $read.windows }
+                $readDiagnostics += @(foreach ($attempt in @($read.attemptDetails)) { @{} + $attempt + @{ phase = 'verification' } })
+                $postEvents = Update-RunnerQuotaRead -Read $read -State $state
+                $events += $postEvents
+            }
         } else {
             Write-RunnerLog -Event 'ANCHOR_UNAVAILABLE' -Level 'ERROR' -ErrorText 'autoAnchor enabled but auto-anchor module missing'
         }
     }
     $state.lastReadAt = Get-IsoTimestamp
+    if (-not $NoTaskChanges -and (Get-Command Sync-KeeperOneShotTask -ErrorAction SilentlyContinue)) {
+        $retryPlan = Get-QuotaReadRetryPlan -Config $cfg -Read $read -IsRetry ([bool]$ReadOnlyRetry)
+        $retry = Sync-KeeperOneShotTask -Config $cfg -Plan $retryPlan -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile -ReadOnlyRetry
+        if ($retry.ok -and $retry.changed) {
+            $events += ,@{ event = $retry.event; message = "$($retry.reason); targetAt=$($retry.targetAt)" }
+        } elseif (-not $retry.ok) {
+            Write-RunnerLog -Event 'READ_RETRY_TASK_FAILED' -Level 'ERROR' -ErrorText $retry.reason
+        }
+    }
 
     # A successful observation reconciles the one-shot expiry alarm. The alarm
     # carries no decision; it only wakes this same runner at resetsAt + 1 minute.
     $aaForAlarm = Get-AutoAnchorConfig $cfg
-    if ($read.ok -and (Test-AutoAnchorArmed $cfg) -and @($aaForAlarm.anchorOnExpiry).Count -gt 0 -and
+    if (-not $NoTaskChanges -and $read.ok -and (Test-AutoAnchorArmed $cfg) -and @($aaForAlarm.anchorOnExpiry).Count -gt 0 -and
         (Get-Command Sync-AnchorAlarmTask -ErrorAction SilentlyContinue)) {
         $alarm = Sync-AnchorAlarmTask -Config $cfg -State $state -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile -Now (Get-Date)
         if ($alarm.ok -and $alarm.changed) {
-            $events += ,@{ event = $alarm.event; message = "$($alarm.taskName): $($alarm.reason)" }
+            $events += ,@{ event = $alarm.event; message = "$($alarm.taskName): $($alarm.reason); targetAt=$($alarm.targetAt)" }
         } elseif (-not $alarm.ok) {
             Write-RunnerLog -Event 'ANCHOR_ALARM_FAILED' -Level 'ERROR' -ErrorText $alarm.reason
         }
@@ -242,14 +269,14 @@ try {
     foreach ($ev in @($events)) {
         if (-not $ev) { continue }
         $level = 'INFO'
-        if ($ev.event -in @('AUTH_ERROR', 'SCHEMA_UNKNOWN', 'LIMIT_REACHED', 'READ_FAILED', 'ANCHOR_PROFILE_INVALID', 'ANCHOR_PROFILE_UNAVAILABLE')) { $level = 'ERROR' }
+        if ($ev.event -in @('AUTH_ERROR', 'SCHEMA_UNKNOWN', 'LIMIT_REACHED', 'READ_FAILED', 'ANCHOR_ABORTED', 'ANCHOR_PROFILE_INVALID', 'ANCHOR_PROFILE_UNAVAILABLE')) { $level = 'ERROR' }
         # Anchor events come back with `reason` + an `anchor` object instead of
         # `message`; doc v3.0 §9.1 requires the runtime log to carry the Anchor
         # object, so the three audit surfaces cannot drift.
         $text = $(if ($ev.message) { $ev.message } elseif ($ev.reason) { $ev.reason } else { $null })
         Write-RunnerLog -Event ([string]$ev.event) -Level $Level -ErrorText $text `
             -ErrorKind ([string]$(if ($ev.kind) { $ev.kind } else { $ev.errorKind })) `
-            -Windows $(if ($ev.windows) { $ev.windows } else { $null }) -Anchor $ev.anchor -QuotaChange $ev.quotaChange
+            -Windows $(if ($ev.windows) { $ev.windows } else { $latestWindows }) -Anchor $ev.anchor -QuotaChange $ev.quotaChange -Diagnostics $ev.diagnostics -EventDetails $ev
     }
 
     # ---- sanitized history records (significant events only, doc 03 §12) ----
@@ -274,8 +301,10 @@ try {
             error        = $(if ($ev.message) { $ev.message } else { $ev.reason })
         }
         # Durable outbox first: the event survives any later sync failure.
-        $null = Write-OutboxEvent -Root $KeeperRoot -Record $record -MachineId ([string]$machine.machineId) `
-            -RunId $script:CqkRunId -IncludeMachineLabel:([bool]$script:CqkLogging.includeMachineLabel) -When $now
+        if ((Get-HistorySyncConfig $cfg).enabled) {
+            $null = Write-OutboxEvent -Root $KeeperRoot -Record $record -MachineId ([string]$machine.machineId) `
+                -RunId $script:CqkRunId -IncludeMachineLabel:([bool]$script:CqkLogging.includeMachineLabel) -When $now
+        }
         # Local human-readable JSONL audit copy.
         $null = Write-HistoryEvent -Root $KeeperRoot -Record $record `
             -IncludeMachineLabel:([bool]$script:CqkLogging.includeMachineLabel) -When $now
@@ -289,9 +318,10 @@ try {
         $counts[$k] = $counts[$k] + 1
     }
     $summaryFiles = @()
-    if ($counts.Count -gt 0) {
+    $summaryNeedsRecovery = $read.ok -and (Read-JsonFile (Join-Path (Get-HistoryDir $KeeperRoot) ('summary-' + $now.ToString('yyyy-MM-dd') + '.json'))).stale -eq $true
+    if ($counts.Count -gt 0 -or $summaryNeedsRecovery) {
         $summaryFiles += (Update-DailySummary -Root $KeeperRoot -Date $now.ToString('yyyy-MM-dd') `
-                -EventCounts $counts -Windows $read.windows -MachineId ([string]$machine.machineId))
+                -EventCounts $counts -Windows $latestWindows -MachineId ([string]$machine.machineId) -Stale ([bool]$state.stale))
     }
 
     # ---- sync sanitized history (failure-isolated, doc 03 §12) ---------------
@@ -323,7 +353,13 @@ try {
         Write-RunnerLog -Event 'RETENTION_FAILED' -Level 'ERROR' -ErrorText $_.Exception.Message
     }
 
-    Write-RunnerLog -Event 'RUNNER_OK' -Windows $read.windows
+    $script:CqkRunContext.durationMs = [long]$runClock.Elapsed.TotalMilliseconds
+    $script:CqkRunContext.stale = [bool]$state.stale
+    if ($read.ok) {
+        Write-RunnerLog -Event 'RUNNER_OK' -Windows $latestWindows -Diagnostics $readDiagnostics
+    } else {
+        Write-RunnerLog -Event 'RUNNER_READ_FAILED' -Level 'ERROR' -ErrorKind $read.errorKind -ErrorText $read.message -Windows $latestWindows -Diagnostics $readDiagnostics
+    }
     exit 0
 } catch {
     try {

@@ -242,7 +242,10 @@ function Initialize-CodexAppServer {
     $checked = Read-CodexAppServerResponse -Response $handshake.response
     if (-not $checked.ok) { return $checked }
     Send-AppServerMessage -Session $Session -Message @{ jsonrpc = '2.0'; method = 'initialized' }
-    return @{ ok = $true; errorKind = $null; message = $null }
+    $cliVersion = $null
+    $agent = [string]$handshake.response.result.userAgent
+    if ($agent -match '\b(\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)') { $cliVersion = $Matches[1] }
+    return @{ ok = $true; errorKind = $null; message = $null; cliVersion = $cliVersion }
 }
 
 function Invoke-CodexAppServerRequest {
@@ -343,6 +346,7 @@ function Invoke-CodexAppServerSession {
             return Complete-CodexResult @{ ok = $false; errorKind = $handshake.errorKind; message = $handshake.message }
         }
         $result = & $Body $session $timeout $Options
+        if ($result -is [hashtable]) { $result.cliVersion = $handshake.cliVersion }
         return Complete-CodexResult $result
     } catch {
         return @{

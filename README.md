@@ -170,6 +170,22 @@ pwsh scripts/setup-log-repo.ps1 -RepoPath <日志仓库路径>
 | `logging.retentionDays` | `90` | 本地日志 / history 保留天数，runner 每轮自动清理 |
 | `logging.includeMachineLabel` | `false` | 隐私开关：`machineLabel` 是否写入 history |
 
+关闭 `github.historySync.enabled` 时，只写本地日志和 history，不再新增 outbox；已有待发送文件保留，
+重新开启同步后可继续发送，但不会自动补传关闭期间的本地历史。`historySync.enabled=true`、`push=false`
+仍会入队，适用于临时暂停推送；outbox 不受 `retentionDays` 自动清理，避免删除未发送记录。
+
+网络、超时或 EOF 读取失败后，若轮询周期长于网络退避时间，会创建 `<task.name>.ReadRetry` 一次性任务，
+在 `max(10, minimumIntervalMinutes)` 分钟退避结束后补做一次只读额度查询。补查不调用模型、不链式重试；
+429/认证错误不走这条补查路径。卸载时同时删除该任务。
+
+运行日志区分 `RUNNER_OK`（最新额度读取成功）和 `RUNNER_READ_FAILED`（流程结束但读取失败），
+并记录脚本构建指纹、PowerShell 版本、触发来源、耗时，以及各次代理/直连尝试的路线、耗时和错误类型。
+CLI 握手提供版本号时一并记录；未提供时不推测。`poll-or-schedule` 表示主任务触发，无法区分其周期和每日槽位。
+锚定审计保留 `beforeWindows` / `afterWindows`；最终日志和每日摘要采用最新成功快照。
+
+诊断时可为 `scripts/runner.ps1` 传 `-NoTaskChanges`，只禁止计划任务修改；它不禁止 AutoAnchor。
+`-ReadOnlyRetry` 则明确禁止模型调用，即使同时传入 `-ForceAnchor`。
+
 ### Codex 与 AutoAnchor
 
 | 字段 | 默认 | 说明 |

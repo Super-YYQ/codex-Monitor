@@ -13,7 +13,7 @@ $runnerPath = Join-Path $scriptDir 'runner.ps1'
 
 function Invoke-Runner {
     param([string]$KeeperRoot, [string]$ConfigFile, [switch]$NoSync)
-    $args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runnerPath, '-KeeperRoot', $KeeperRoot, '-ConfigFile', $ConfigFile)
+    $args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runnerPath, '-KeeperRoot', $KeeperRoot, '-ConfigFile', $ConfigFile, '-NoTaskChanges')
     if ($NoSync) { $args += '-NoSync' }
     $out = & $pwsh @args 2>&1
     return @{ exitCode = $LASTEXITCODE; output = ($out | Out-String) }

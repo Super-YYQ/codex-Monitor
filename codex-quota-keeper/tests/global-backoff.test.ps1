@@ -15,7 +15,7 @@ $now = Get-Date
 
 function Invoke-RunnerSub {
     param([string]$KeeperRoot, [string]$ConfigFile)
-    $out = & $pwsh -NoProfile -ExecutionPolicy Bypass -File $runnerPath -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile 2>&1
+    $out = & $pwsh -NoProfile -ExecutionPolicy Bypass -File $runnerPath -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile -NoTaskChanges 2>&1
     return @{ exitCode = $LASTEXITCODE; output = ($out | Out-String) }
 }
 

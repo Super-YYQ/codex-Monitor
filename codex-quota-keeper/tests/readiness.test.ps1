@@ -49,7 +49,7 @@ try {
     $env:CQK_MOCK_EXEC_ARGS_FILE = Join-Path $ws 'exec.txt'
     $env:CQK_MOCK_EXEC = 'ok'
     $env:CQK_MOCK_MODE = 'expiry-primary'
-    & $hostExe -NoProfile -File (Join-Path $scripts 'runner.ps1') -KeeperRoot $root -ConfigFile $configFile
+    & $hostExe -NoProfile -File (Join-Path $scripts 'runner.ps1') -KeeperRoot $root -ConfigFile $configFile -NoTaskChanges
     Assert-Equal 0 $LASTEXITCODE 'rejected-profile runner finishes'
     Assert-False (Test-Path $env:CQK_MOCK_EXEC_ARGS_FILE) 'invalid profile performs no exec'
     $claims = @(Get-ChildItem (Join-Path $root 'runtime/anchor-claims') -Filter '*.json' -ErrorAction SilentlyContinue)
@@ -59,7 +59,7 @@ try {
     $cfg.codex.autoAnchor.model = 'mock-model-alpha'
     $cfg.codex.autoAnchor.reasoningEffort = 'low'
     $null = Write-TestConfigFile $configFile $cfg
-    & $hostExe -NoProfile -File (Join-Path $scripts 'runner.ps1') -KeeperRoot $root -ConfigFile $configFile
+    & $hostExe -NoProfile -File (Join-Path $scripts 'runner.ps1') -KeeperRoot $root -ConfigFile $configFile -NoTaskChanges
     Assert-Equal 0 $LASTEXITCODE 'corrected-profile runner finishes'
     Assert-True (Test-Path $env:CQK_MOCK_EXEC_ARGS_FILE) 'same expiry executes after profile correction'
     $after = Load-KeeperState $root

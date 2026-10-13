@@ -373,6 +373,9 @@ while ($true) {
         }
         'account/rateLimits/read' {
             $id = $msg.id
+            if ($env:CQK_MOCK_POST_EXEC_MODE -and $env:CQK_MOCK_EXEC_ARGS_FILE -and (Test-Path -LiteralPath $env:CQK_MOCK_EXEC_ARGS_FILE)) {
+                $mode = $env:CQK_MOCK_POST_EXEC_MODE
+            }
             if ($script:FailReads) {
                 Send-MockResponse @{
                     jsonrpc = '2.0'; id = $id

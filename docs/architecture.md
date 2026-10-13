@@ -5,7 +5,8 @@
 ```text
 Windows Task Scheduler
   ├─ CodexQuotaKeeper.Check：周期、登录与 schedule 原生触发器
-  └─ CodexQuotaKeeper.Check.AnchorAlarm：最近窗口到期时间 +1 分钟的一次性触发器
+  ├─ CodexQuotaKeeper.Check.AnchorAlarm：最近窗口到期时间 +1 分钟的一次性触发器
+  └─ CodexQuotaKeeper.Check.ReadRetry：网络退避后的单次只读补查，不执行模型、不链式重试
                     │
                     ▼
 scripts/runner.ps1（单次运行，无常驻进程）
@@ -26,8 +27,8 @@ runtime/（state schema 3、expiryTrack、claims、logs、lock、machine）
 
 - `state-machine.ps1` 是触发决策的唯一入口。它接收配置、当前快照和持久状态，返回零个或多个
   确定性事件；reset 事件只用于审计，不驱动模型调用。
-- `anchor-alarm.ps1` 把“选哪个到期时刻”与“如何注册 Windows 任务”分开。前者是纯函数，后者只维护
-  一个稳定任务名；每次成功读取额度或应用配置后重算。
+- `anchor-alarm.ps1` 把“选哪个触发时刻”与“如何注册 Windows 任务”分开。纯函数分别计算到期闹钟与只读补查计划；
+  共用适配器维护 `.AnchorAlarm`、`.ReadRetry` 两个稳定任务名，配置与时刻均相同时跳过注册。
 - `auto-anchor.ps1` 只处理副作用协议：合并事件、Claim、执行前重验证、一次模型调用、二次额度验证和
   终态落盘。LOCAL_ONLY 使用本地持久 Claim，多机模式使用远程 CAS Claim。
 - `app-server-client.ps1` 统一拥有 transport 错误分类；上层不再重复猜测 DNS/TLS/429/认证错误。

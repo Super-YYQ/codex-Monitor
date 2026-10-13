@@ -146,6 +146,17 @@ $current.buckets = New-RecoveryBucket ($epoch + 39596)
 $longIdle = Get-StateEvents -Previous $before -Current $current -Now $now.AddHours(6)
 Assert-Equal 0 @($longIdle | Where-Object { $_.event -in @('QUOTA_RECOVERED_EARLY', 'WINDOW_RESET_OBSERVED') }).Count 'a long gap between idle reads does not manufacture a reset'
 
+Start-TestGroup 'runtime regression: boundary jitter is neither recovery nor idle motion'
+$jitterState = New-KeeperState
+$jitterState.buckets = New-RecoveryBucket ($epoch + 7200) 100
+$jitterRead = @{ ok = $true; buckets = (New-RecoveryBucket ($epoch + 7199) 100) }
+Assert-Equal 0 @(Get-StateEvents $jitterState $jitterRead $now | ForEach-Object { $_ } | Where-Object { $_.event -eq 'QUOTA_RECOVERED_EARLY' }).Count 'one second jitter at 100 percent is not recovery'
+$jitterState = New-KeeperState
+Set-RecoveryObservation $jitterState (New-RecoveryBucket ($epoch + 17996)) $now
+Set-RecoveryObservation $jitterState (New-RecoveryBucket ($epoch + 17997)) $now.AddSeconds(30)
+Assert-False $jitterState.windowObservations['codex|primary'].idleConfirmed 'one second movement over thirty seconds does not prove idle'
+Assert-False (Test-ShouldAnchor -Config $cfg -State $jitterState -Events @() -IsLeader $true -Now $now.AddSeconds(30)).should 'jitter cannot release a scheduled model call'
+
 $result = Get-TestResult
 Write-Host "quota-recovery: $($result.checks) checks, $($result.failures) failures"
 if ($result.failures -gt 0) { exit 1 }

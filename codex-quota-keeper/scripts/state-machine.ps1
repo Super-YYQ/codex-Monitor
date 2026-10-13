@@ -117,6 +117,9 @@ function Get-WindowKey {
 # Tolerance for treating resetsAt as "now + full duration". A read costs a few
 # seconds, so an idle prediction lands slightly short of the exact boundary.
 $script:CQK_IDLE_PREDICTION_TOLERANCE_SECONDS = 120
+# Rounding jitter is not a reset. Motion confirmation also needs observations
+# far enough apart to distinguish a rolling prediction from a fixed deadline.
+$script:CQK_BOUNDARY_JITTER_SECONDS = 5
 
 function Test-WindowIdlePrediction {
     # Candidate only: a newly opened window may also report rounded zero usage.
@@ -202,8 +205,9 @@ function Update-ExpiryTrack {
         if ($candidate -and $previous -and $previous.idleCandidate -eq $true) {
             $elapsed = $nowEpoch - [long]$previous.observedAt
             $shift = [long]$win.resetsAt - [long]$previous.resetsAt
-            $confirmed = ($elapsed -gt 0 -and $shift -gt 0 -and
-                [Math]::Abs($shift - $elapsed) -le $script:CQK_IDLE_PREDICTION_TOLERANCE_SECONDS)
+            $motionTolerance = [Math]::Min($script:CQK_IDLE_PREDICTION_TOLERANCE_SECONDS, $elapsed / 4.0)
+            $confirmed = ($elapsed -ge 30 -and $shift -gt $script:CQK_BOUNDARY_JITTER_SECONDS -and
+                [Math]::Abs($shift - $elapsed) -le $motionTolerance)
             # Re-reading the same confirmed snapshot in the same second is safe.
             if ($elapsed -eq 0 -and $shift -eq 0 -and $previous.idleConfirmed -eq $true) { $confirmed = $true }
         }
@@ -311,7 +315,7 @@ function Get-StateEvents {
         $usageDecreased = ($null -ne $prev.usedPercent -and $null -ne $cur.usedPercent -and
             [double]$cur.usedPercent -lt [double]$prev.usedPercent)
         $boundaryChanged = ($null -ne $prev.resetsAt -and $null -ne $cur.resetsAt -and
-            [long]$cur.resetsAt -ne [long]$prev.resetsAt)
+            [Math]::Abs([long]$cur.resetsAt - [long]$prev.resetsAt) -gt $script:CQK_BOUNDARY_JITTER_SECONDS)
         # Record what was observed; quota snapshots do not identify who reset it.
         # Idle predictions moving forward are not a recovery or a new cycle.
         $previousReadAt = [DateTimeOffset]::MinValue
