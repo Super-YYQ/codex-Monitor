@@ -330,7 +330,7 @@ function Get-FriendlyLastErrorText {
         'LIMIT_REACHED'              { return '额度已用满（服务端限流），窗口重置后自动恢复' }
         'AUTH_ERROR'                 { return 'Codex 登录失效，需要重新登录（运行 codex login）' }
         'SCHEMA_UNKNOWN'             { return '额度数据格式无法识别（工具可能需要更新）' }
-        'READ_FAILED' {
+        { $_ -in @('READ_FAILED', 'RUNNER_READ_FAILED') } {
             if ($Text -match '(?i)timed?\s*out|timeout') { return '读取额度超时（网络或代理较慢）' }
             if ($Text -match '(?i)failed to fetch codex rate limits|error sending request') { return '无法连接 ChatGPT 读取额度（网络或代理问题）' }
             return '读取额度失败（网络或登录问题）'

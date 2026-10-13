@@ -12,7 +12,7 @@ $savedMode = $env:CQK_MOCK_MODE
 try {
     $config = New-TestConfig @{
         mode = 'MonitorOnly'
-        github = @{ coordination = @{ enabled = $false }; historySync = @{ enabled = $false } }
+        github = @{ coordination = @{ enabled = $false }; historySync = @{ enabled = $true; push = $false } }
         codex = @{ command = (Join-Path $testsDir 'fixtures\mock-appserver.cmd') }
     }
     $configFile = Write-TestConfigFile (Join-Path $ws 'config.json') $config
@@ -26,7 +26,7 @@ try {
     Save-KeeperState -Root $ws -State $state
     $env:CQK_MOCK_MODE = 'reset'
     Start-TestGroup 'runner: early recovery reaches runtime, history, outbox and summary'
-    $output = & $pwsh -NoProfile -ExecutionPolicy Bypass -File (Join-Path $scriptDir 'runner.ps1') -KeeperRoot $ws -ConfigFile $configFile -NoSync 2>&1
+    $output = & $pwsh -NoProfile -ExecutionPolicy Bypass -File (Join-Path $scriptDir 'runner.ps1') -KeeperRoot $ws -ConfigFile $configFile -NoSync -NoTaskChanges 2>&1
     Assert-Equal 0 $LASTEXITCODE "runner exits successfully ($output)"
     $runtime = @(Get-ChildItem -LiteralPath (Get-LogsDir $ws) -Filter '*.jsonl' | ForEach-Object {
         Get-Content -LiteralPath $_.FullName | ForEach-Object { ConvertFrom-JsonSafe $_ }
@@ -50,7 +50,7 @@ try {
     $summaryFile = Get-ChildItem -LiteralPath (Get-HistoryDir $ws) -Filter 'summary-*.json' | Select-Object -First 1
     Assert-Equal 1 (Read-JsonFile $summaryFile.FullName).counts.QUOTA_RECOVERED_EARLY 'daily summary counts recovery'
 
-    $output = & $pwsh -NoProfile -ExecutionPolicy Bypass -File (Join-Path $scriptDir 'runner.ps1') -KeeperRoot $ws -ConfigFile $configFile -NoSync 2>&1
+    $output = & $pwsh -NoProfile -ExecutionPolicy Bypass -File (Join-Path $scriptDir 'runner.ps1') -KeeperRoot $ws -ConfigFile $configFile -NoSync -NoTaskChanges 2>&1
     Assert-Equal 0 $LASTEXITCODE "unchanged second runner succeeds ($output)"
     $historyAgain = @(Get-ChildItem -LiteralPath (Get-HistoryDir $ws) -Filter 'events-*.jsonl' | ForEach-Object {
         Get-Content -LiteralPath $_.FullName | ForEach-Object { ConvertFrom-JsonSafe $_ }

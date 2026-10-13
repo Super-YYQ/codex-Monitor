@@ -35,6 +35,10 @@ function Invoke-KeeperUninstall {
         }
     }
     $removedAlarmTask = $false
+    if ($taskName) {
+        $retryTask = Get-ScheduledTask -TaskName "$taskName.ReadRetry" -ErrorAction SilentlyContinue
+        if ($retryTask) { Unregister-ScheduledTask -TaskName "$taskName.ReadRetry" -Confirm:$false }
+    }
     if ($alarmTaskName) {
         $existingAlarm = Get-ScheduledTask -TaskName $alarmTaskName -ErrorAction SilentlyContinue
         if ($existingAlarm) {

@@ -293,9 +293,12 @@ function Invoke-CodexRateLimitsRead {
         [int]$TimeoutSeconds = 0
     )
     $envMap = Get-CodexProxyEnvironment $Config
+    $clock = [Diagnostics.Stopwatch]::StartNew()
     $out = Invoke-CodexRateLimitsAttempt -Config $Config -CodexPath $CodexPath `
         -TimeoutSeconds $TimeoutSeconds -Environment $envMap
     $out = Complete-CodexResult $out
+    $details = @(@{ route = $(if ($envMap.Count) { 'proxy' } else { 'direct' }); durationMs = [long]$clock.Elapsed.TotalMilliseconds; ok = [bool]$out.ok; errorKind = $out.errorKind; cliVersion = $out.cliVersion })
+    $out.attemptDetails = $details
     if (@($envMap.Keys).Count -eq 0) {
         $out.proxy = 'off'
         $out.attempts = 1
@@ -308,10 +311,12 @@ function Invoke-CodexRateLimitsRead {
     }
     # Proxy path failed: exactly one fallback attempt without the keeper-set
     # proxy env vars. (System-level proxy vars, if any, stay inherited.)
+    $clock.Restart()
     $direct = Invoke-CodexRateLimitsAttempt -Config $Config -CodexPath $CodexPath -TimeoutSeconds $TimeoutSeconds
     $direct = Complete-CodexResult $direct
     $direct.proxy = 'fallback'
     $direct.attempts = 2
+    $direct.attemptDetails = @($details) + @(@{ route = 'fallback'; durationMs = [long]$clock.Elapsed.TotalMilliseconds; ok = [bool]$direct.ok; errorKind = $direct.errorKind; cliVersion = $direct.cliVersion })
     if ($direct.ok) { return $direct }
     $direct.message = "$($direct.message) (proxy attempt also failed: $($out.message))"
     return $direct

@@ -279,11 +279,14 @@ anchorOnApply 为显式强制触发；reset 只审计，不进入锚定决策。
 
 ## 重试与代理
 
-- **不无限重试**：每次运行至多一次 quota 读取（计划任务每个周期运行一次，周期由
-  `poll.intervalMinutes` 决定）。未配置代理时，失败后本周期内不再重试。
+- **不无限重试**：每个正常周期先读取额度，锚定执行后额外验证一次（计划任务周期由
+  `poll.intervalMinutes` 决定）。未配置代理时，单次读取不立即重试。
+  网络/TIMEOUT/EOF 失败且轮询周期长于退避时间时，另设 `<task.name>.ReadRetry`，在
+  `max(10, minimumIntervalMinutes)` 分钟后补做一次只读查询；补查不调用模型、不链式重试，
+  429/认证失败不使用这条路径。成功读取清除待补查任务，卸载也会移除它。
 - **代理**：`codex.proxy` 配置后，codex 子进程以 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` 走代理。
   支持 `http(s)://` 与 `socks5://`/`socks5h://`（socks scheme 是否被 codex 识别取决于其自身 HTTP 栈）。
-  若代理路径读取失败（任意错误类型），**自动退回直连再试一次**；两次都失败则停止，下个周期再试。
+  若代理路径因网络、超时或 EOF 失败，**自动退回直连再试一次**；两次都失败则结束本次读取并退避。
   AutoAnchor 的模型调用同样走代理，但绝不重试（at-most-once）。
 - 连续失败计数（所有失败类型）记录在 `runtime/state.json` 的 `consecutiveReadFailures`，成功后清零，
   出现在 `READ_FAILED` 日志中便于观察。
@@ -294,6 +297,17 @@ anchorOnApply 为显式强制触发；reset 只审计，不进入锚定决策。
 - GitHub 仓库建议 Private，只写净化后的额度/事件/租约数据。
 - 日志 machineId 用随机 ID + 用户 label，不上传 Windows 用户名/序列号。
 - 所有自动 push 只针对配置指定的专用日志仓库，绝不对用户代码仓库 push。
+
+### 运行记录与待发送队列（0.9.1-beta）
+
+- `RUNNER_READ_FAILED` 表示流程完成但最新额度读取失败；只有成功读取才产生 `RUNNER_OK`。
+  同一次失败只记录一条 `READ_FAILED`。锚定后验证失败也更新 stale 和本地/全局退避。
+- 锚定记录包含 `beforeWindows` / `afterWindows`，最终日志和每日摘要使用最新成功快照。
+- 日志包含脚本构建指纹、PowerShell 版本、触发来源和耗时；每次额度尝试记录路线、耗时、错误类型，
+  CLI 握手返回版本号时也会记录。主任务的 `poll-or-schedule` 不区分周期轮询与每日槽位。
+- `historySync.enabled=false` 不再新增 outbox，已有待发送文件保留；开启后不自动补传关闭期间的本地历史。
+  `enabled=true,push=false` 仍入队。outbox 不受日志保留期清理，以免丢失未发送记录。
+- `runner.ps1 -NoTaskChanges` 可用于隔离计划任务修改，但不阻止模型调用；`-ReadOnlyRetry` 明确禁止模型调用。
 - Git 认证复用系统 Git Credential Manager / SSH；PAT 不写入 `config.json`。
 
 ## 测试

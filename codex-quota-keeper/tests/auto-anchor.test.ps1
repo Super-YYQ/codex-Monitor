@@ -25,7 +25,7 @@ function New-AutoAnchorConfig {
 
 function Invoke-RunnerSub {
     param([string]$KeeperRoot, [string]$ConfigFile, [switch]$ForceAnchor)
-    $runnerArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runnerPath, '-KeeperRoot', $KeeperRoot, '-ConfigFile', $ConfigFile, '-NoSync')
+    $runnerArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runnerPath, '-KeeperRoot', $KeeperRoot, '-ConfigFile', $ConfigFile, '-NoSync', '-NoTaskChanges')
     if ($ForceAnchor) { $runnerArgs += @('-ForceAnchor', '-WaitLockSeconds', '2') }
     $output = & $pwsh @runnerArgs 2>&1
     return @{ exitCode = $LASTEXITCODE; output = ($output | Out-String) }

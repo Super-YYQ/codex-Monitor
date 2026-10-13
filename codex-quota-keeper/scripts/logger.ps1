@@ -32,6 +32,9 @@ function Write-KeeperLog {
         [string]$ErrorKind = $null,
         [string]$Level = 'INFO',
         [hashtable]$LoggingConfig = $null,
+        [hashtable]$Context = $null,
+        $Diagnostics = $null,
+        $EventDetails = $null,
         [DateTime]$When = (Get-Date)
     )
     $includeLabel = $false
@@ -50,6 +53,25 @@ function Write-KeeperLog {
         version    = $script:CQK_VERSION
     }
     if ($ErrorKind) { $entry.errorKind = $ErrorKind }
+    if ($Context) { $entry.context = @{} + $Context }
+    if ($Diagnostics) {
+        $entry.attempts = @(foreach ($attempt in @($Diagnostics)) {
+            $clean = @{}
+            foreach ($key in @('route', 'errorKind', 'durationMs', 'ok', 'cliVersion', 'phase')) {
+                if ($attempt[$key] -is [string]) { $clean[$key] = Hide-SensitiveText $attempt[$key] }
+                elseif ($attempt[$key] -is [ValueType]) { $clean[$key] = $attempt[$key] }
+            }
+            $clean
+        })
+    }
+    if ($EventDetails) {
+        $entry.eventDetails = @{}
+        foreach ($key in @('rateLimitReachedType', 'bucketId', 'windowType', 'minutes', 'windowDuration', 'previousResetsAt', 'resetsAt', 'usedPercent')) {
+            if ($EventDetails[$key] -is [string]) { $entry.eventDetails[$key] = Hide-SensitiveText $EventDetails[$key] }
+            elseif ($EventDetails[$key] -is [ValueType]) { $entry.eventDetails[$key] = $EventDetails[$key] }
+        }
+        if ($EventDetails.details) { $entry.eventDetails.changes = @($EventDetails.details | ForEach-Object { Hide-SensitiveText ([string]$_) }) }
+    }
     if ($QuotaChange) { $entry.quotaChange = ConvertTo-QuotaChangeAuditRecord $QuotaChange }
     if ($includeLabel -and $MachineLabel) { $entry.machineLabel = $MachineLabel }
     if ($entry.error -is [string]) { $entry.error = Hide-SensitiveText $entry.error }
@@ -83,7 +105,8 @@ function Update-DailySummary {
         $Windows = $null,
         [int]$AnchorCount = 0,
         [int]$ErrorCount = 0,
-        [string]$MachineId = ''
+        [string]$MachineId = '',
+        [bool]$Stale = $false
     )
     $path = Join-Path (Get-HistoryDir $Root) ("summary-" + $Date + ".json")
     $existing = Read-JsonFile $path
@@ -97,6 +120,7 @@ function Update-DailySummary {
         $existing.counts[$k] = $prev + [int]$EventCounts[$k]
     }
     if ($Windows) { $existing.windows = $Windows }
+    $existing.stale = $Stale
     if ($AnchorCount -gt 0) {
         if (-not $existing.anchors) { $existing.anchors = 0 }
         $existing.anchors = [int]$existing.anchors + $AnchorCount

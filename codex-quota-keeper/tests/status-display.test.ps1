@@ -669,6 +669,7 @@ try {
     Assert-Equal '额度已用满（服务端限流），窗口重置后自动恢复' (Get-FriendlyLastErrorText -Event 'LIMIT_REACHED' -Text '') 'limit reached'
     Assert-Equal 'Codex 登录失效，需要重新登录（运行 codex login）' (Get-FriendlyLastErrorText -Event 'AUTH_ERROR' -Text 'login required') 'auth failure'
     Assert-Equal '读取额度超时（网络或代理较慢）' (Get-FriendlyLastErrorText -Event 'READ_FAILED' -Text 'app-server initialization timed out') 'read timeout'
+    Assert-Equal '读取额度超时（网络或代理较慢）' (Get-FriendlyLastErrorText -Event 'RUNNER_READ_FAILED' -Text 'app-server initialization timed out') 'terminal read timeout'
     Assert-Equal '无法连接 ChatGPT 读取额度（网络或代理问题）' (Get-FriendlyLastErrorText -Event 'READ_FAILED' -Text 'app-server error (-32603): failed to fetch codex rate limits: error sending request for url (https://chatgpt.com/backend-api/wham/usage)') 'network failure'
     Assert-Equal '读取额度失败（网络或登录问题）' (Get-FriendlyLastErrorText -Event 'READ_FAILED' -Text 'something else') 'unrecognised read failure keeps the generic wording'
     Assert-Equal '' (Get-FriendlyLastErrorText -Event 'WINDOW_RESET_OBSERVED' -Text 'x') 'unknown events have no translation'
