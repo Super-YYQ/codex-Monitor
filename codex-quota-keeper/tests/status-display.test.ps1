@@ -685,7 +685,8 @@ try {
             lastErrorAt    = '2026-09-09T11:55:36+08:00'
         } -LocalOnly
         $panelN = Get-StatusDisplayLines -Status $stN -Config $cfgL -KeeperRoot $rootL -Now $Now
-        Assert-RowValue $panelN '最近错误' '[信息] 无法连接 ChatGPT 读取额度（网络或代理问题）（2026-09-09 11:55）' 'a network read failure renders as a sentence with its time'
+        $localErrorAt = [TimeZoneInfo]::ConvertTimeFromUtc([datetime]::new(2026, 9, 9, 3, 55, 36, [DateTimeKind]::Utc), [TimeZoneInfo]::Local).ToString('yyyy-MM-dd HH:mm')
+        Assert-RowValue $panelN '最近错误' "[信息] 无法连接 ChatGPT 读取额度（网络或代理问题）（$localErrorAt）" 'a network read failure renders as a sentence with its local time'
         $verbN = (Get-RowText (Get-StatusDisplayLines -Status $stN -Config $cfgL -KeeperRoot $rootL -Now $Now -Detailed)) -join "`n"
         Assert-True $verbN.Contains('failed to fetch codex rate limits') '-Detailed still carries the raw record'
         $stOld = New-GoldenStatus @{ lastError = 'READ_FAILED: timed out' } -LocalOnly
