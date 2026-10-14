@@ -17,6 +17,7 @@ param(
     [switch]$ForceAnchor,
     [switch]$FromAlarm,
     [switch]$ReadOnlyRetry,
+    [switch]$ScheduleRecovery,
     [switch]$NoTaskChanges,
     [ValidateRange(0, 3600)][int]$WaitLockSeconds = 0
 )
@@ -40,7 +41,7 @@ $script:CqkExitCode = 0
 $script:CqkRunId = [guid]::NewGuid().ToString('N').Substring(0, 12)
 $script:CqkLogging = @{ retentionDays = 90; includeMachineLabel = $false }
 $runClock = [Diagnostics.Stopwatch]::StartNew()
-$script:CqkRunContext = @{ trigger = $(if ($ReadOnlyRetry) { 'read-retry' } elseif ($ForceAnchor) { 'force' } elseif ($FromAlarm) { 'expiry' } else { 'poll-or-schedule' }); powerShellVersion = $PSVersionTable.PSVersion.ToString() }
+$script:CqkRunContext = @{ trigger = $(if ($ReadOnlyRetry) { 'read-retry' } elseif ($ScheduleRecovery) { 'schedule-recovery' } elseif ($ForceAnchor) { 'force' } elseif ($FromAlarm) { 'expiry' } else { 'poll-or-schedule' }); powerShellVersion = $PSVersionTable.PSVersion.ToString() }
 
 function Write-RunnerLog {
     param([string]$Event, [string]$Level = 'INFO', $ErrorText = $null, [string]$ErrorKind = $null, $Windows = $null, $Anchor = $null, $QuotaChange = $null, $Diagnostics = $null, $EventDetails = $null)
@@ -236,7 +237,9 @@ try {
         }
     }
     $state.lastReadAt = Get-IsoTimestamp
-    if (-not $NoTaskChanges -and (Get-Command Sync-KeeperOneShotTask -ErrorAction SilentlyContinue)) {
+    # A recovery wakeup is one normal check, not the beginning of another retry
+    # chain. Existing unrelated read-retry tasks are left untouched.
+    if (-not $NoTaskChanges -and -not $ScheduleRecovery -and (Get-Command Sync-KeeperOneShotTask -ErrorAction SilentlyContinue)) {
         $retryPlan = Get-QuotaReadRetryPlan -Config $cfg -Read $read -IsRetry ([bool]$ReadOnlyRetry)
         $retry = Sync-KeeperOneShotTask -Config $cfg -Plan $retryPlan -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile -ReadOnlyRetry
         if ($retry.ok -and $retry.changed) {
@@ -246,12 +249,12 @@ try {
         }
     }
 
-    # A successful observation reconciles the one-shot expiry alarm. The alarm
-    # carries no decision; it only wakes this same runner at resetsAt + 1 minute.
-    $aaForAlarm = Get-AutoAnchorConfig $cfg
-    if (-not $NoTaskChanges -and $read.ok -and (Test-AutoAnchorArmed $cfg) -and @($aaForAlarm.anchorOnExpiry).Count -gt 0 -and
+    # Reconcile the existing alarm for expiry or a recovered pending schedule.
+    # It only wakes this same runner; fresh quota and normal guards decide.
+    if (-not $NoTaskChanges -and $read.ok -and (Test-AutoAnchorArmed $cfg) -and
         (Get-Command Sync-AnchorAlarmTask -ErrorAction SilentlyContinue)) {
-        $alarm = Sync-AnchorAlarmTask -Config $cfg -State $state -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile -Now (Get-Date)
+        $alarm = Sync-AnchorAlarmTask -Config $cfg -State $state -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile -Now (Get-Date) `
+            -RecoverPendingSchedule:($ReadOnlyRetry -and $isLeader)
         if ($alarm.ok -and $alarm.changed) {
             $events += ,@{ event = $alarm.event; message = "$($alarm.taskName): $($alarm.reason); targetAt=$($alarm.targetAt)" }
         } elseif (-not $alarm.ok) {
