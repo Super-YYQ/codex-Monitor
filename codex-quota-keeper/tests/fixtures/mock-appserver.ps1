@@ -26,6 +26,7 @@
 #   rate-limit    error response mentioning 429/usage limit (backoff path)
 #   network-error transport failure wording ("error sending request", must NOT be classified 429)
 #   idle          legacy zero-usage fixture retained for snapshot/read tests
+#   rolling-idle  unused primary returns a moving now+5h prediction
 #   reset         primary window renewed: old resetsAt past, new resetsAt future
 #   expiry-active / expiry-primary / expiry-secondary / multi-expired
 #                 deterministic fixtures for the v1 expiry trigger model
@@ -490,6 +491,10 @@ while ($true) {
                     # input the real server gives a fresh, unused ChatGPT plan.
                     $windows.primary = Get-MockWindow 300 0 1788062400
                     $windows.secondary = Get-MockWindow 10080 0 1788667200
+                    $extra.limitId = 'codex-default'
+                }
+                'rolling-idle' {
+                    $windows.primary = Get-MockWindow 300 0 ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() + 17996)
                     $extra.limitId = 'codex-default'
                 }
                 'reset' {

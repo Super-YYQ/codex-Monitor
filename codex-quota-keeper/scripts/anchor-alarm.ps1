@@ -1,4 +1,4 @@
-# Codex Quota Keeper - one-shot expiry alarm adapter for Windows Task Scheduler.
+# Codex Quota Keeper - one-shot anchor alarm adapter for Windows Task Scheduler.
 # The pure plan function is the test surface; the adapter only wakes runner.ps1.
 
 $script:CqkAnchorAlarmDir = Split-Path -Parent $PSCommandPath
@@ -18,10 +18,10 @@ function Get-AnchorAlarmTaskName {
 }
 
 function Get-AnchorAlarmPlan {
-    param([hashtable]$Config, [hashtable]$State, [DateTime]$Now = (Get-Date))
+    param([hashtable]$Config, [hashtable]$State, [DateTime]$Now = (Get-Date), [switch]$RecoverPendingSchedule)
     $name = Get-AnchorAlarmTaskName $Config
     $aa = Get-AutoAnchorConfig $Config
-    if (-not (Test-AutoAnchorArmed $Config) -or @($aa.anchorOnExpiry).Count -eq 0) {
+    if (-not (Test-AutoAnchorArmed $Config)) {
         return @{ action = 'clear'; taskName = $name; targetEpoch = $null; targetAt = $null; reason = 'expiry anchoring is not armed' }
     }
     $nowEpoch = ConvertTo-EpochSeconds $Now
@@ -33,21 +33,41 @@ function Get-AnchorAlarmPlan {
         # forward forever and it would never fire.
         $key = Get-WindowKey ([string]$win.bucketId) ([string]$win.windowType)
         $observation = if ($State.windowObservations) { $State.windowObservations[$key] } else { $null }
-        if (Test-WindowRunning -Window $win -NowEpoch $nowEpoch -Observation $observation) { $targets += [long]$win.resetsAt }
+        if (Test-WindowRunning -Window $win -NowEpoch $nowEpoch -Observation $observation) { $targets += ([long]$win.resetsAt + 60) }
+    }
+    # The idle guard needs observations at least 30 seconds apart. A minute
+    # leaves room for task registration and preserves the confirmation on read.
+    $recoveryAt = $Now.AddMinutes(1)
+    $recoveryEpoch = ConvertTo-EpochSeconds $recoveryAt
+    if ($RecoverPendingSchedule -and @($aa.schedule).Count -gt 0) {
+        # Reuse the normal guards on copies: planning must neither consume a
+        # slot nor revive an expired one. Only pending daily schedules qualify;
+        # the normal runner will read again and enforce leadership/Claim guards.
+        $scheduleConfig = ConvertTo-HashtableDeep $Config
+        $scheduleConfig.codex.autoAnchor.anchorOnExpiry = @()
+        $scheduleState = ConvertTo-HashtableDeep $State
+        $decision = Test-ShouldAnchor -Config $scheduleConfig -State $scheduleState -Events @() -IsLeader $true -Now $Now
+        if ($decision.should) {
+            $atTarget = Test-ShouldAnchor -Config $scheduleConfig -State $scheduleState -Events @() -IsLeader $true -Now $recoveryAt
+            $stillDue = @($decision.eventIds | Where-Object { $_ -in @($atTarget.eventIds) })
+            if ($stillDue.Count -gt 0) { $targets += $recoveryEpoch }
+        }
     }
     if ($targets.Count -eq 0) {
         return @{ action = 'clear'; taskName = $name; targetEpoch = $null; targetAt = $null; reason = 'no future tracked expiry' }
     }
-    $targetEpoch = [long](($targets | Measure-Object -Minimum).Minimum) + 60
+    $targetEpoch = [long](($targets | Measure-Object -Minimum).Minimum)
+    $scheduleRecovery = ($RecoverPendingSchedule -and $targetEpoch -eq $recoveryEpoch)
     return @{
         action = 'set'; taskName = $name; targetEpoch = $targetEpoch
         targetAt = ConvertFrom-EpochSeconds $targetEpoch
-        reason = 'earliest tracked expiry plus one minute'
+        reason = $(if ($scheduleRecovery) { 'pending schedule after quota read recovery' } else { 'earliest tracked expiry plus one minute' })
+        scheduleRecovery = [bool]$scheduleRecovery
     }
 }
 
 function Get-AnchorAlarmLauncherSpec {
-    param([string]$KeeperRoot, [string]$ConfigFile, [switch]$ReadOnlyRetry, [switch]$NoWrite)
+    param([string]$KeeperRoot, [string]$ConfigFile, [switch]$ReadOnlyRetry, [switch]$ScheduleRecovery, [switch]$NoWrite)
     $root = Get-KeeperRoot $KeeperRoot
     if (-not $ConfigFile) { $ConfigFile = Get-ConfigPath $root }
     $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
@@ -58,6 +78,7 @@ function Get-AnchorAlarmLauncherSpec {
     $inner = ('"{0}" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{1}" -KeeperRoot "{2}" -ConfigFile "{3}" -FromAlarm -WaitLockSeconds 60' -f `
         $pwsh.Source, $runner, $root, [System.IO.Path]::GetFullPath($ConfigFile))
     if ($ReadOnlyRetry) { $inner = $inner.Replace('-FromAlarm', '-ReadOnlyRetry') }
+    elseif ($ScheduleRecovery) { $inner = $inner.Replace('-FromAlarm', '-ScheduleRecovery') }
     $runtimeDir = Join-Path $root 'runtime'
     $vbsPath = Join-Path $runtimeDir $(if ($ReadOnlyRetry) { 'hidden-launch-read-retry.vbs' } else { 'hidden-launch-anchor-alarm.vbs' })
     $lines = @(
@@ -73,8 +94,8 @@ function Get-AnchorAlarmLauncherSpec {
 }
 
 function Sync-AnchorAlarmTask {
-    param([hashtable]$Config, [hashtable]$State, [string]$KeeperRoot, [string]$ConfigFile, [DateTime]$Now = (Get-Date))
-    $plan = Get-AnchorAlarmPlan -Config $Config -State $State -Now $Now
+    param([hashtable]$Config, [hashtable]$State, [string]$KeeperRoot, [string]$ConfigFile, [DateTime]$Now = (Get-Date), [switch]$RecoverPendingSchedule)
+    $plan = Get-AnchorAlarmPlan -Config $Config -State $State -Now $Now -RecoverPendingSchedule:$RecoverPendingSchedule
     return Sync-KeeperOneShotTask -Config $Config -Plan $plan -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile
 }
 
@@ -134,7 +155,7 @@ function Sync-KeeperOneShotTask {
             return @{ ok = $true; changed = $false; event = $null; taskName = $plan.taskName; targetAt = $null; reason = $plan.reason }
         }
 
-        $launcher = Get-AnchorAlarmLauncherSpec -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile -ReadOnlyRetry:$ReadOnlyRetry -NoWrite
+        $launcher = Get-AnchorAlarmLauncherSpec -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile -ReadOnlyRetry:$ReadOnlyRetry -ScheduleRecovery:([bool]$plan.scheduleRecovery) -NoWrite
         $action = New-ScheduledTaskAction -Execute $launcher.exe -Argument $launcher.arguments -WorkingDirectory (Get-KeeperRoot $KeeperRoot)
         $trigger = New-ScheduledTaskTrigger -Once -At $plan.targetAt
         $settingsParams = @{
@@ -148,7 +169,7 @@ function Sync-KeeperOneShotTask {
         if (Test-OneShotTaskMatches $existing $plan $launcher $action $settings $principal) {
             return @{ ok = $true; changed = $false; event = $null; taskName = $plan.taskName; targetAt = $plan.targetAt; reason = 'task already matches' }
         }
-        $null = Get-AnchorAlarmLauncherSpec -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile -ReadOnlyRetry:$ReadOnlyRetry
+        $null = Get-AnchorAlarmLauncherSpec -KeeperRoot $KeeperRoot -ConfigFile $ConfigFile -ReadOnlyRetry:$ReadOnlyRetry -ScheduleRecovery:([bool]$plan.scheduleRecovery)
         Register-ScheduledTask -TaskName $plan.taskName -Action $action -Trigger $trigger -Settings $settings `
             -Principal $principal -Description "Codex Quota Keeper: $($plan.reason)." -Force | Out-Null
         return @{ ok = $true; changed = $true; event = "${eventPrefix}_SET"; taskName = $plan.taskName; targetAt = $plan.targetAt; reason = $plan.reason }

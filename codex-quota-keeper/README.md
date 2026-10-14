@@ -284,6 +284,9 @@ anchorOnApply 为显式强制触发；reset 只审计，不进入锚定决策。
   网络/TIMEOUT/EOF 失败且轮询周期长于退避时间时，另设 `<task.name>.ReadRetry`，在
   `max(10, minimumIntervalMinutes)` 分钟后补做一次只读查询；补查不调用模型、不链式重试，
   429/认证失败不使用这条路径。成功读取清除待补查任务，卸载也会移除它。
+- **定时锚定恢复**：AutoAnchor 的只读补查成功后，期限内尚未执行且符合条件的定时槽位会通过现有
+  到期闹钟任务，约一分钟后补做一次正常检查。检查重新读取额度，沿用窗口状态、Leader、每日上限
+  和 Claim 去重；不延长补跑期限，不继续创建读取重试。只读补查本身仍不调用模型。
 - **代理**：`codex.proxy` 配置后，codex 子进程以 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` 走代理。
   支持 `http(s)://` 与 `socks5://`/`socks5h://`（socks scheme 是否被 codex 识别取决于其自身 HTTP 栈）。
   若代理路径因网络、超时或 EOF 失败，**自动退回直连再试一次**；两次都失败则结束本次读取并退避。
