@@ -78,6 +78,26 @@ function Get-AnchorClaimPath {
 # (doc v3.0 §23). The default status panel reads this file instead of going online.
 function Get-ExecutionProfilePath { param([string]$Root) Join-Path (Get-RuntimeDir $Root) 'execution-profile.json' }
 
+function Get-KeeperPowerShellPath {
+    $pwsh = Get-Command pwsh -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($pwsh) {
+        # Store package directories include the version and disappear on update.
+        # A PS7 process can resolve its own package binary before the PATH alias.
+        if ($pwsh.Source -notmatch '[\\/]WindowsApps[\\/]Microsoft\.PowerShell_\d[^\\/]*__[^\\/]+[\\/]pwsh\.exe$') {
+            return $pwsh.Source
+        }
+        if ($env:LOCALAPPDATA) {
+            foreach ($relative in @('Microsoft\WindowsApps\Microsoft.PowerShell_8wekyb3d8bbwe\pwsh.exe', 'Microsoft\WindowsApps\pwsh.exe')) {
+                $alias = Join-Path $env:LOCALAPPDATA $relative
+                if (Test-Path -LiteralPath $alias -PathType Leaf) { return $alias }
+            }
+        }
+        # An unavailable/disabled Store alias must not pin another package path.
+        # The runner also supports the stable Windows PowerShell installation.
+    }
+    return (Get-Command powershell -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+}
+
 function Ensure-Directory {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) {
