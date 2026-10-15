@@ -99,6 +99,10 @@ pwsh scripts/status.ps1 -Detailed
 > `task.name` 不变时会替换同名任务。修改任务名称会留下旧任务，需要单独处理。
 > 未添加的新配置项使用默认值。
 
+后台启动器使用稳定的 PowerShell 路径，避免 Microsoft Store 自动更新后旧版本目录被移除。
+若旧版弹出 Windows Script Host `80070002`，覆盖新版程序后运行 `apply-config.cmd` 重新生成启动器。
+这一步会遵守 `codex.autoAnchor.anchorOnApply`；设为 `true` 时会立即请求强制锚定。
+
 ## 按场景了解触发规则
 
 [运行场景详解](docs/scenarios.md) 用具体日期、时间和额度数值说明程序行为。
