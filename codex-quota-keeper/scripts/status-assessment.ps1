@@ -52,7 +52,7 @@ $script:CqkStatusFindingCatalog = @{
     CODEX_NOT_FOUND             = @{ severity = 'ERROR';   title = 'Codex CLI 未找到'; action = '设置 codex.command 或检查 Codex 安装与 PATH'; titleEn = 'Codex CLI not found'; actionEn = 'set codex.command or check the Codex install and PATH' }
     COORDINATION_UNREACHABLE    = @{ severity = 'ERROR';   title = '多机协调仓库不可达'; action = '检查网络、Git 凭证与 github.coordination.repoPath 后重试；协调不可达期间自动锚定会失败关闭'; titleEn = 'multi-machine coordination repository unreachable'; actionEn = 'check the network, Git credentials and github.coordination.repoPath; auto-anchoring fails closed while unreachable' }
     ANCHOR_CAP_REACHED          = @{ severity = 'WARNING'; title = '今日锚定已达上限'; action = '确认每日上限是否合理；如需更多可调整 codex.autoAnchor.maxPerDay'; titleEn = 'daily anchor cap reached'; actionEn = 'review the daily cap; raise codex.autoAnchor.maxPerDay if intended' }
-    AUTOANCHOR_BLOCKED          = @{ severity = 'ERROR';   title = '当前自动锚定被安全阻止'; action = '按下述原因解除阻止；这是保护机制，不是锚定功能故障'; titleEn = 'auto-anchoring is currently safety-blocked'; actionEn = 'remove the blocking condition below; this is the fail-closed guard working, not an anchor bug' }
+    AUTOANCHOR_BLOCKED          = @{ severity = 'ERROR';   title = '自动锚定暂缓'; action = '后台检查确认条件恢复后自动继续，无需手动解除'; titleEn = 'auto-anchoring is paused'; actionEn = 'background checks resume anchoring automatically when its prerequisites recover; no manual unblock is required' }
 
     # ---- WARNING: running, but something needs attention -----------------------
     TASK_LAST_RESULT            = @{ severity = 'WARNING'; title = '最近任务执行失败'; action = '查看最近错误与 -Live 检测结果；下个周期会自动重试'; titleEn = 'last task run failed'; actionEn = 'check the recent error and -Live output; the next cycle retries' }
@@ -60,23 +60,23 @@ $script:CqkStatusFindingCatalog = @{
     TASK_INTERVAL_MISMATCH      = @{ severity = 'WARNING'; title = '计划任务周期与配置不一致'; action = '执行 apply-config.cmd 重新注册计划任务'; titleEn = 'task interval does not match config'; actionEn = 'run apply-config.cmd to re-register the scheduled task' }
     TASK_TIME_LIMIT_TIGHT       = @{ severity = 'WARNING'; title = '单次运行时间余量偏紧'; action = '提高 poll.intervalMinutes，或降低 codex.queryTimeoutSeconds / 关闭远程同步；否则上一次未跑完会被下个周期忽略'; titleEn = 'one run barely fits its poll slot'; actionEn = 'raise poll.intervalMinutes, or lower codex.queryTimeoutSeconds / disable remote sync; otherwise a still-running tick is ignored by the next trigger' }
     QUOTA_NEVER_READ            = @{ severity = 'WARNING'; title = '尚未读取过额度数据'; action = '等待计划任务至少完成一次轮询，或手动运行 runner.ps1'; titleEn = 'no quota data has ever been read'; actionEn = 'wait for one scheduled poll, or run runner.ps1 once' }
-    QUOTA_STALE                 = @{ severity = 'WARNING'; title = '额度数据已过期'; action = '查看最近错误，或运行 status.ps1 -Live'; titleEn = 'quota data is stale'; actionEn = 'check the recent error, or run status.ps1 -Live' }
+    QUOTA_STALE                 = @{ severity = 'WARNING'; title = '额度数据已过期'; action = '后台读取成功后会自动恢复，无需手动清理状态'; titleEn = 'quota data is stale'; actionEn = 'a successful background read restores fresh data automatically; no manual state cleanup is required' }
     QUOTA_TOO_OLD               = @{ severity = 'WARNING'; title = '额度数据长时间未更新'; action = '确认计划任务仍在运行；可用 status.ps1 -Live 立即复查'; titleEn = 'quota data is overdue for a refresh'; actionEn = 'confirm the task still runs; status.ps1 -Live re-checks immediately' }
-    QUOTA_READ_FAILED           = @{ severity = 'WARNING'; title = '最近一次额度读取失败且未恢复'; action = '运行 status.ps1 -Live 定位认证或网络问题'; titleEn = 'last quota read failed and has not recovered'; actionEn = 'run status.ps1 -Live to isolate an auth or network problem' }
+    QUOTA_READ_FAILED           = @{ severity = 'WARNING'; title = '最近一次额度读取失败，等待后台重试'; action = '后台读取成功后自动恢复，无需手动清理状态'; titleEn = 'last quota read failed; awaiting a background retry'; actionEn = 'a successful background quota read clears this condition automatically; no manual state cleanup is required' }
     AUTH_PROBE_FAILED           = @{ severity = 'WARNING'; title = '实时连接检测未通过'; action = '确认已登录 Codex；必要时运行 codex login 重新认证'; titleEn = 'live connection probe failed'; actionEn = 'confirm the Codex sign-in; run codex login to re-authenticate' }
     LEASE_TTL_TOO_SHORT         = @{ severity = 'WARNING'; title = 'Leader 租约短于轮询周期'; action = '将 leader.leaseTtlMinutes 提高到至少 max(2×轮询周期, 轮询周期+grace+抖动)'; titleEn = 'leader lease shorter than the poll interval'; actionEn = 'raise leader.leaseTtlMinutes to at least max(2*poll, poll+grace+jitter)' }
     LEASE_TTL_LOW_MARGIN        = @{ severity = 'WARNING'; title = 'Leader 租约余量偏低'; action = '建议将 leader.leaseTtlMinutes 设为轮询周期的 3 倍（默认 180 分钟）'; titleEn = 'leader lease margin is low'; actionEn = 'prefer leader.leaseTtlMinutes at 3x the poll interval (180 by default)' }
     BACKOFF_ACTIVE              = @{ severity = 'WARNING'; title = '处于退避中'; action = '退避期间不会访问 Codex，到期自动恢复；频繁退避请检查额度与网络'; titleEn = 'in backoff'; actionEn = 'no Codex access until it lifts; if it recurs often, check quota and network' }
     ROLE_UNKNOWN                = @{ severity = 'WARNING'; title = '本机角色未知'; action = '等待一次完整轮询；仍未知时执行 apply-config.cmd 重新注册任务'; titleEn = 'machine role unknown'; actionEn = 'wait for one full poll; if it persists, run apply-config.cmd' }
-    LAST_ERROR_RECENT           = @{ severity = 'WARNING'; title = '最近曾出现错误'; action = '确认该错误是否仍在发生；可用 status.ps1 -Live 复查'; titleEn = 'a recent error was recorded'; actionEn = 'confirm whether it still happens; status.ps1 -Live re-checks now' }
+    LAST_ERROR_RECENT           = @{ severity = 'WARNING'; title = '最近错误记录'; action = '当前状态已恢复时无需手动处理，历史错误保留供排查'; titleEn = 'most recent error record'; actionEn = 'no manual repair is needed when the current status has recovered; the historical error is retained for diagnosis' }
     GIT_UNREACHABLE             = @{ severity = 'WARNING'; title = '日志仓库不可达'; action = '检查网络与 Git 凭证；本地日志仍会正常写入'; titleEn = 'log repository unreachable'; actionEn = 'check the network and Git credentials; local logs are still written' }
 
     # ---- INFO: how it is running, not whether it is broken ---------------------
     LOCAL_ONLY                  = @{ severity = 'INFO'; title = '单机模式'; action = '单台电脑使用正常；多台电脑同时运行需启用 Git 协调'; titleEn = 'single-machine mode (LOCAL_ONLY)'; actionEn = 'normal for one machine; enable Git coordination for several' }
     AUTOANCHOR_ENABLED          = @{ severity = 'INFO'; title = '自动锚定已开启（实验功能）'; action = '该功能会主动调用 Codex 模型并消耗额度'; titleEn = 'auto-anchoring is ON (experimental)'; actionEn = 'this calls the Codex model on its own and consumes quota' }
     PROFILE_INVALID            = @{ severity = 'ERROR'; title = '自动锚定模型配置校验失败'; action = '修正模型或思考等级后运行 status.cmd -Live'; titleEn = 'execution profile is invalid'; actionEn = 'correct model or reasoning effort, then run Status -Live' }
-    PROFILE_UNAVAILABLE        = @{ severity = 'WARNING'; title = '自动锚定模型暂时无法校验'; action = '检查 Codex 登录和网络，再运行 status.cmd -Live'; titleEn = 'execution profile is unavailable'; actionEn = 'check Codex login and network, then run Status -Live' }
-    PROFILE_STALE              = @{ severity = 'WARNING'; title = '自动锚定模型检查结果已过期或尚不存在'; action = '运行 status.cmd -Live 可立即重新检查（只读，不消耗额度）；自动锚定执行前也会自行复查'; titleEn = 'execution profile is stale or missing'; actionEn = 'run Status -Live to validate the current profile' }
+    PROFILE_UNAVAILABLE        = @{ severity = 'WARNING'; title = '自动锚定模型暂时无法校验'; action = '程序会在下次锚定前自动重试校验；校验通过前暂不调用模型'; titleEn = 'execution profile is unavailable'; actionEn = 'the next anchor automatically retries validation; no model is called before validation succeeds' }
+    PROFILE_STALE              = @{ severity = 'INFO';    title = '模型校验缓存待自动刷新'; action = '程序会在下次锚定前自动重新校验，无需手动处理'; titleEn = 'execution profile awaits automatic revalidation'; actionEn = 'the next anchor automatically revalidates the profile before any model call; no manual repair is required' }
     AUTOANCHOR_OFF              = @{ severity = 'INFO'; title = '自动锚定未开启'; action = '当前只读取额度，不会自动调用模型'; titleEn = 'auto-anchoring is OFF'; actionEn = 'quota is read only; no model call is made' }
     ANCHOR_TRIGGERS_OFF         = @{ severity = 'INFO'; title = '自动锚定未配置触发器'; action = '当前仍只查询额度；配置 schedule 和/或 anchorOnExpiry 后才会自动调用模型'; titleEn = 'no auto-anchor trigger configured'; actionEn = 'quota remains read-only; configure schedule and/or anchorOnExpiry to call a model' }
     BACKOFF_ACTIVE_SINGLE       = @{ severity = 'INFO'; title = '本机退避中（单机模式）'; action = '不影响总体状态；到期自动恢复'; titleEn = 'local backoff active (single machine)'; actionEn = 'does not affect the overall verdict in single-machine mode' }
@@ -144,6 +144,8 @@ function Add-StatusFinding {
         [ValidateSet('', 'ERROR', 'WARNING', 'INFO')] [string]$Severity = '',
         [string]$Title = '',
         [string]$Action = '',
+        [string]$TitleEn = '',
+        [string]$ActionEn = '',
         [datetime]$Now = (Get-Date)
     )
     $cat = Get-StatusFindingCatalog $Code
@@ -152,8 +154,8 @@ function Add-StatusFinding {
         severity   = $(if ($Severity) { $Severity } else { [string]$cat.severity })
         title      = $(if ($Title)   { $Title }   else { [string]$cat.title })
         action     = $(if ($Action)  { $Action }  else { [string]$cat.action })
-        titleEn    = [string]$cat.titleEn
-        actionEn   = [string]$cat.actionEn
+        titleEn    = $(if ($TitleEn) { $TitleEn } else { [string]$cat.titleEn })
+        actionEn   = $(if ($ActionEn) { $ActionEn } else { [string]$cat.actionEn })
         observedAt = $Now.ToString('yyyy-MM-ddTHH:mm:sszzz')
     }
     # Absent detail drops the key entirely (see the text contract above).
@@ -407,13 +409,25 @@ function Get-StatusAnchorBlock {
         # Guard step "machine does not hold the leader lease" - also ahead of every
         # snapshot-quality check, since a non-leader has no snapshot of its own.
         # PASSIVE / UNKNOWN / BACKOFF / DEGRADED all mean "this machine may not anchor".
-        return @{ code = 'AUTOANCHOR_BLOCKED'; severity = 'ERROR'; detail = "machine does not hold the leader lease (role=$Role)" }
+        return @{
+            code = 'AUTOANCHOR_BLOCKED'; severity = 'ERROR'; detail = "machine does not hold the leader lease (role=$Role)"
+            title = '本机尚未取得负责人租约，自动锚定暂缓'; action = '程序会自动检查租约，本机接管后继续；无需手动解除'
+            titleEn = 'auto-anchoring paused: this machine does not hold the leader lease'; actionEn = 'lease checks continue automatically; anchoring resumes when this machine takes over'
+        }
     }
     if ($RateLimitReachedType) {
-        return @{ code = 'AUTOANCHOR_BLOCKED'; severity = 'ERROR'; detail = "usage limit reached ($RateLimitReachedType) is still open" }
+        return @{
+            code = 'AUTOANCHOR_BLOCKED'; severity = 'ERROR'; detail = "usage limit reached ($RateLimitReachedType) is still open"
+            title = '额度已用尽，自动锚定暂缓'; action = '后台会继续检查额度，确认额度恢复后自动继续；无需手动解除'
+            titleEn = 'auto-anchoring paused: a quota limit is still reached'; actionEn = 'background quota checks resume anchoring automatically after the limit clears'
+        }
     }
     if ($SchemaUnknown) {
-        return @{ code = 'AUTOANCHOR_BLOCKED'; severity = 'ERROR'; detail = 'unknown rate-limit schema in the last read' }
+        return @{
+            code = 'AUTOANCHOR_BLOCKED'; severity = 'ERROR'; detail = 'unknown rate-limit schema in the last read'
+            title = '额度返回格式无法识别，自动锚定暂缓'; action = '程序会在后续检查重新读取，格式恢复可识别后自动继续'
+            titleEn = 'auto-anchoring paused: quota response format is not recognized'; actionEn = 'background checks retry automatically; anchoring resumes when a supported response is available'
+        }
     }
     if ($MaxPerDay -gt 0 -and $AnchorTodayCount -ge $MaxPerDay) {
         # WARNING, not ERROR: a capped day is the guard doing what the user
@@ -424,7 +438,11 @@ function Get-StatusAnchorBlock {
         return @{ code = 'ANCHOR_CAP_REACHED'; severity = 'WARNING'; detail = "daily anchor cap reached ($AnchorTodayCount/$MaxPerDay)" }
     }
     if ($QuotaStale) {
-        return @{ code = 'AUTOANCHOR_BLOCKED'; severity = 'ERROR'; detail = 'quota read failed last cycle; the guard fails closed on a snapshot it cannot trust' }
+        return @{
+            code = 'AUTOANCHOR_BLOCKED'; severity = 'ERROR'; detail = 'quota read failed last cycle; the guard fails closed on a snapshot it cannot trust'
+            title = '额度读取失败，自动锚定暂缓'; action = '后台读取成功后会自动恢复，无需手动解除'
+            titleEn = 'auto-anchoring paused: the last quota read failed'; actionEn = 'a successful background quota read resumes anchoring automatically; no manual unblock is required'
+        }
     }
     # In schedule mode the minimum gap does not apply (Test-ShouldAnchor checks it
     # only for judgment triggers), so quoting it there would be a false alarm.
@@ -676,7 +694,8 @@ function Get-StatusAssessment {
         if ($null -ne $ep) {
             $validation = [string](Get-StatusValue -Map $ep -Path 'value.validation')
             $profileCode = ''
-            if ([bool]$ep.stale) { $profileCode = 'PROFILE_STALE' }
+            if ($validation -eq 'INVALID') { $profileCode = 'PROFILE_INVALID' }
+            elseif ([bool]$ep.stale) { $profileCode = 'PROFILE_STALE' }
             elseif ($validation -in @('INVALID', 'UNAVAILABLE')) { $profileCode = "PROFILE_$validation" }
             # A failed runtime probe does not overwrite the usable profile cache.
             # A later RUNNER_OK only proves quota polling, not profile recovery.
@@ -712,7 +731,17 @@ function Get-StatusAssessment {
             -ScheduleMode ($nonEmptySlots.Count -gt 0) `
             -LastAnchorAt (Get-StatusValue -Map $state -Path 'anchors.lastAnchorAt') -Now $Now
         if ($block) {
-            Add-StatusFinding -Assessment $a -Code $block.code -Severity $block.severity -Detail $block.detail -Now $Now
+            $blockArgs = @{ Assessment = $a; Code = $block.code; Severity = $block.severity; Detail = $block.detail; Now = $Now }
+            foreach ($field in @('Title', 'Action', 'TitleEn', 'ActionEn')) {
+                if ($block[$field]) { $blockArgs[$field] = $block[$field] }
+            }
+            $nextCheck = ConvertTo-StatusDateTime (& $gv 'task.nextRunTime')
+            if ($block.code -eq 'AUTOANCHOR_BLOCKED' -and [bool](& $gv 'task.installed') -and [bool](& $gv 'task.enabled') -and $null -ne $nextCheck -and $nextCheck -gt $Now) {
+                $nextText = $nextCheck.ToString('yyyy-MM-dd HH:mm:ss')
+                $blockArgs.Action = "$($block.action)；下一次常规检查：$nextText"
+                $blockArgs.ActionEn = "$($block.actionEn); next regular check: $nextText"
+            }
+            Add-StatusFinding @blockArgs
         }
     } else {
         # §11 gives the AutoAnchor section an entry either way: "off" is a fact the
