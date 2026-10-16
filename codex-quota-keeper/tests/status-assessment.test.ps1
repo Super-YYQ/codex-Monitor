@@ -335,7 +335,7 @@ try {
     Assert-True (Test-HasCode $qs 'QUOTA_STALE') 'QUOTA_STALE'
     $qsFind = Get-CodeFinding $qs 'QUOTA_STALE'
     Assert-True ("$($qsFind.detail)" -match '22 min') '§17.1: shows the last read time/age'
-    Assert-True ("$($qsFind.action)" -match 'Live') '§10 row 6: action mentions -Live'
+    Assert-True ("$($qsFind.action)" -match '自动恢复') 'stale quota explains automatic background recovery'
 
     $qo = Get-StatusAssessment -Status (New-StubStatus @{ quota = @{ stale = $false; lastReadAt = (ConvertTo-IsoString $Now.AddMinutes(-400)) } }) `
         -Config (New-StubConfig) -KeeperRoot $emptyRoot -Now $Now
@@ -720,7 +720,8 @@ try {
         $ps.executionProfile.stale = $true
         $pa = Get-StatusAssessment -Status $ps -Config $pc -KeeperRoot $profileWs -Now $Now
         Assert-True (Test-HasCode $pa 'PROFILE_STALE') 'stale profile is explicitly reported'
-        Assert-Equal 'WARNING' $pa.overall 'stale profile cannot be healthy'
+        Assert-Equal 'INFO' (Get-CodeFinding $pa 'PROFILE_STALE').severity 'routine cache expiry is informational'
+        Assert-Equal 'HEALTHY' $pa.overall 'automatic revalidation does not make an otherwise healthy installation faulty'
     } finally { Remove-TestWorkspace $profileWs }
 
     # ---- sensitive text never reaches the panel ---------------------------

@@ -460,8 +460,8 @@ try {
     $panelBad = Get-StatusDisplayLines -Status $c4.Status -Config $c4.Config -KeeperRoot $rootBase -Now $Now
     $badTexts = Get-RowText $panelBad
     Assert-Contains $badTexts '  当前状态        : [异常] 运行异常' 'overall follows the assessment'
-    Assert-Contains $badTexts '  当前锚定        : [异常] 当前自动锚定被安全阻止' '§16.5 block is stated in the AutoAnchor section, not only at the bottom'
-    Assert-Contains $badTexts '                    建议：按下述原因解除阻止；这是保护机制，不是锚定功能故障' 'advice sits under the row it applies to, at the value column'
+    Assert-Contains $badTexts '  当前锚定        : [异常] 本机尚未取得负责人租约，自动锚定暂缓' 'the unmet prerequisite is stated in the AutoAnchor section'
+    Assert-True (@($badTexts | Where-Object { $_ -like '                    建议：程序会自动检查租约，本机接管后继续；无需手动解除*' }).Count -gt 0) 'recovery advice sits under the row at the value column'
     Assert-Contains $badTexts '  数据状态        : [注意] 已过期' 'stale quota label follows the finding'
     # At the cap the count itself is the news (§16.5), so that one row is tagged.
     $wsCap = New-TestWorkspace
@@ -479,7 +479,7 @@ try {
         $capTexts = Get-RowText (Get-StatusDisplayLines -Status $stCap -Config (New-GoldenConfig -Coordination $false -AutoAnchor $true -AnchorOnExpiry @('secondary')) -KeeperRoot $rootCap -Now $Now)
         Assert-Contains $capTexts '  今日已执行      : [注意] 6 / 6' 'a capped day is tagged'
         Assert-Contains $capTexts '  当前锚定        : [注意] 今日锚定已达上限' 'and the guard reason is shown in the same section'
-        Assert-False (@($capTexts | Where-Object { $_.Contains('[异常] 当前自动锚定被安全阻止') }).Count -gt 0) 'a configured cap is not reported as a block'
+        Assert-False (@($capTexts | Where-Object { $_.Contains('自动锚定暂缓') }).Count -gt 0) 'a configured cap is not reported as an unrelated prerequisite failure'
     } finally { Remove-TestWorkspace $wsCap }
 
     # -----------------------------------------------------------------------
@@ -757,7 +757,7 @@ try {
         Assert-True $byName['multi-pc-error'].Contains('[异常] 多机协调仓库不可达') 'case 4 pins the unreachable-repo ERROR'
         Assert-True $byName['multi-pc-error'].Contains('token=[REDACTED]') 'case 4 pins end-to-end sanitisation'
         Assert-False $byName['multi-pc-error'].Contains('sk-fake-') 'and the fake secret itself is gone'
-        Assert-True $byName['multi-pc-error'].Contains('[异常] 当前自动锚定被安全阻止') 'case 4 pins fail-closed anchoring'
+        Assert-True $byName['multi-pc-error'].Contains('[异常] 本机尚未取得负责人租约，自动锚定暂缓') 'case 4 names the fail-closed prerequisite'
         Assert-True $byName['multi-pc-error'].Contains('本机角色        : [注意] 未知（UNKNOWN）') 'case 4 pins an unmapped role'
         # ERROR rows must be listed before WARNING rows: the panel is read top-down
         # and a red line under a yellow one reads as "already handled".

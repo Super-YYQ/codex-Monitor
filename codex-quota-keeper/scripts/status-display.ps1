@@ -646,13 +646,14 @@ function Get-StatusDisplayLines {
         if ($aa.stats.lastSuccessAt) { Write-StatusRow $lines -Label '上次成功' -Value (Format-StatusDateTime $aa.stats.lastSuccessAt) }
         $ep = $aa.profile
         if (-not $ep -or -not $ep.value) {
-            Write-StatusRow $lines -Label '执行配置校验' -Value '尚无记录；运行 status.cmd -Live 校验' -Severity 'INFO'
+            Write-StatusRow $lines -Label '执行配置校验' -Value '尚无记录；下次锚定前会自动校验' -Severity 'INFO'
         } else {
             $pv = $ep.value
             $origin = if ($ep.source -eq 'live') { '本次实时校验' } else { '缓存结果' }
             if ($ep.stale) { $origin += '；已过期' }
             $verdict = switch ($pv.validation) { 'VALID' { '通过' }; 'INVALID' { '不支持此配置' }; default { '暂时无法校验' } }
-            $sev = if ($pv.validation -eq 'VALID' -and -not $ep.stale) { 'HEALTHY' } elseif ($pv.validation -eq 'INVALID') { 'ERROR' } else { 'WARNING' }
+            if ($ep.stale -and $pv.validation -eq 'VALID') { $verdict = '待自动复查' }
+            $sev = if ($pv.validation -eq 'VALID') { if ($ep.stale) { 'INFO' } else { 'HEALTHY' } } elseif ($pv.validation -eq 'INVALID') { 'ERROR' } else { 'WARNING' }
             Write-StatusRow $lines -Label '执行配置校验' -Value "$verdict（$origin）" -Severity $sev
             Write-StatusRow $lines -Label '有效模型' -Value $(if ($pv.effectiveModel) { $pv.effectiveModel } else { '未知' })
             Write-StatusRow $lines -Label '有效思考等级' -Value $(if ($pv.effectiveReasoningEffort) { $pv.effectiveReasoningEffort } else { '沿用 CLI 默认' })
@@ -671,8 +672,8 @@ function Get-StatusDisplayLines {
             if ($block) { break }
         }
         if ($block) {
-            # §16.5 "当前自动锚定被安全阻止": say it in the section the user is reading,
-            # not only in the finding list at the bottom.
+            # Show the concrete unmet prerequisite and recovery in both places;
+            # ordinary output must not rely on hidden Detailed evidence.
             Write-StatusRow $lines -Label '当前锚定' -Value ([string]$block.title) -Severity ([string]$block.severity) `
                 -Continuation @($(if ([string]$block.severity -ne 'INFO') { "建议：$([string]$block.action)" } else { '' }))
         }
