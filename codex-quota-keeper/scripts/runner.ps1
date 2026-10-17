@@ -223,7 +223,7 @@ try {
         if (Get-Command Invoke-AutoAnchorIfNeeded -ErrorAction SilentlyContinue) {
             $anchorOutcome = Invoke-AutoAnchorIfNeeded -Config $cfg -KeeperRoot $KeeperRoot `
                 -State $state -Events $events -IsLeader $isLeader -Machine $machine -Election $election `
-                -ForceAnchor:$ForceAnchor
+                -ForceAnchor:$ForceAnchor -QuotaRead $read
             if ($anchorOutcome -and $anchorOutcome.events) { $events += @($anchorOutcome.events) }
             if ($anchorOutcome -and $anchorOutcome.verification) {
                 $read = $anchorOutcome.verification

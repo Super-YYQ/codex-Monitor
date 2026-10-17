@@ -99,8 +99,8 @@ try {
     Assert-Equal 80 $bProxy.seconds 'proxy: the direct fallback doubles the budget'
     Assert-Equal 2 $bProxy.attempts 'proxy: two attempts (CQK-020 never a third)'
 
-    # Anchor exec budget mirrors auto-anchor.ps1 Max(60, timeout*3).
-    Assert-Equal 60 (Get-AnchorExecBudgetSeconds (New-TestConfig @{ codex = @{ queryTimeoutSeconds = 20 } })) 'anchor exec floor 60 s'
+    # The whole CLI lifecycle gets headroom even when quota RPC waits are short.
+    Assert-Equal 180 (Get-AnchorExecBudgetSeconds (New-TestConfig @{ codex = @{ queryTimeoutSeconds = 20 } })) 'anchor lifecycle floor 180 s'
     Assert-Equal 300 (Get-AnchorExecBudgetSeconds (New-TestConfig @{ codex = @{ queryTimeoutSeconds = 100 } })) 'anchor exec scales with the timeout'
 
     # Tick budget composition: read, plus (armed AutoAnchor) the LIVE profile
@@ -112,7 +112,7 @@ try {
         github = $noCoordCqk
         codex  = @{ queryTimeoutSeconds = 20; autoAnchor = @{ enabled = $true; prompt = 'Reply exactly OK.'; maxPerDay = 6; minimumGapMinutes = 60; keepaliveIntervalMinutes = 0 } }
     })
-    Assert-Equal 300 $tickAa 'armed AutoAnchor: read + profile (20x8) + exec + verify read'
+    Assert-Equal 420 $tickAa 'armed AutoAnchor: read + profile (20x8) + full CLI lifecycle + verify read'
     $tickAaOff = Get-CodexTickBudgetSeconds (New-TestConfig @{
         mode   = 'AutoAnchor'
         github = $noCoordCqk

@@ -297,7 +297,11 @@ anchorOnApply 为显式强制触发；reset 只审计，不进入锚定决策。
 - **代理**：`codex.proxy` 配置后，codex 子进程以 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` 走代理。
   支持 `http(s)://` 与 `socks5://`/`socks5h://`（socks scheme 是否被 codex 识别取决于其自身 HTTP 栈）。
   若代理路径因网络、超时或 EOF 失败，**自动退回直连再试一次**；两次都失败则结束本次读取并退避。
-  AutoAnchor 的模型调用同样走代理，但绝不重试（at-most-once）。
+  AutoAnchor 的模型校验和唯一一次模型调用沿用本轮成功的额度读取连接：若额度读取回退成功，
+  本次锚定也使用同样的回退环境；配置文件保持原样。模型调用绝不重试（at-most-once）。
+  调用超时保留 `TIMEOUT`、连接类型和已捕获的脱敏诊断；后续额度读取成功不代表模型调用成功，
+  也不会覆盖它的失败原因。模型命令的总超时为 `max(180, 3 × queryTimeoutSeconds)` 秒，
+  包含 CLI 初始化、生成与退出收尾；租约和计划任务时限同步计入这段预算。超时不会再次调用模型。
 - 连续失败计数（所有失败类型）记录在 `runtime/state.json` 的 `consecutiveReadFailures`，成功后清零，
   出现在 `READ_FAILED` 日志中便于观察。
 

@@ -343,7 +343,7 @@ function ConvertTo-AnchorAuditRecord {
         $anchor = @{}
         foreach ($key in @('phase', 'trigger', 'localOnly', 'anchorInvocationId',
                 'triggerEventIds', 'eventId', 'startedAt', 'endedAt', 'durationSecs',
-                'execExitCode', 'verified', 'configuredModel',
+                'execExitCode', 'execRoute', 'verified', 'configuredModel',
                 'configuredReasoningEffort', 'effectiveModel',
                 'effectiveReasoningEffort', 'modelProvider', 'modelSource',
                 'reasoningEffortSource', 'profileValidation', 'validatedAt',
@@ -539,15 +539,14 @@ function Get-CodexProfileBudgetSeconds {
 }
 
 function Get-AnchorExecBudgetSeconds {
-    # The anchor model call's own ceiling: auto-anchor.ps1 passes
-    # Max(60, queryTimeoutSeconds * 3) to Invoke-External. One function so the
-    # installer's task limit and the anchor module cannot disagree about how long
-    # the most expensive step of a tick may take.
+    # The full CLI lifecycle includes initialization and shutdown, not just the
+    # model response. Keep a three-minute floor for that overhead, independent
+    # of short quota-RPC waits. Execution, lease and task budgets share this value.
     param([hashtable]$Config)
     $timeout = 20
     if ($null -ne $Config -and $null -ne $Config.codex) { $timeout = [int]$Config.codex.queryTimeoutSeconds }
     if ($timeout -le 0) { $timeout = 20 }
-    return [Math]::Max(60, $timeout * 3)
+    return [Math]::Max(180, $timeout * 3)
 }
 
 function Get-CodexTickBudgetSeconds {
@@ -1244,7 +1243,14 @@ function Invoke-External {
         $stderrTask = $proc.StandardError.ReadToEndAsync()
         if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
             $null = Stop-ProcessTree -Process $proc
-            return @{ ok = $false; started = $true; exitCode = -1; stdout = ''; stderr = 'process timed out'; timedOut = $true }
+            # Drain already captured diagnostics after killing the process tree.
+            # A bounded wait also covers descendants that retain a pipe handle.
+            $partialOut = ''; $partialErr = ''
+            try { if ($stdoutTask.Wait(1000)) { $partialOut = $stdoutTask.GetAwaiter().GetResult() } } catch { }
+            try { if ($stderrTask.Wait(1000)) { $partialErr = $stderrTask.GetAwaiter().GetResult() } } catch { }
+            $timeoutMessage = "process timed out after $($TimeoutSeconds)s"
+            if ($partialErr) { $timeoutMessage += ': ' + (Hide-SensitiveText $partialErr) }
+            return @{ ok = $false; started = $true; exitCode = -1; stdout = $partialOut; stderr = $timeoutMessage; timedOut = $true }
         }
         $stdout = $stdoutTask.GetAwaiter().GetResult()
         $stderr = $stderrTask.GetAwaiter().GetResult()

@@ -289,7 +289,8 @@ function Invoke-AutoAnchorIfNeeded {
         [hashtable]$Machine,
         [hashtable]$Election,
         [string]$CodexPath = '',
-        [bool]$ForceAnchor = $false
+        [bool]$ForceAnchor = $false,
+        [hashtable]$QuotaRead = $null
     )
     $out = @{ anchored = $false; events = @(); verification = $null }
     $beforeWindows = Get-FlattenedQuotaWindows @($State.buckets)
@@ -302,7 +303,20 @@ function Invoke-AutoAnchorIfNeeded {
         return $out
     }
 
-    $execWindowMinutes = [Math]::Max(2, [int][Math]::Ceiling([int]$Config.codex.queryTimeoutSeconds * 3 / 60.0) + 1)
+    # Reuse the route proven by this poll before profile validation and the
+    # sole model call. Copy only the overridden map; never mutate user config.
+    $executionConfig = $Config
+    $execRoute = $(if ((Get-ProxyConfig $Config).enabled) { 'proxy' } else { 'direct' })
+    if ($QuotaRead -and $QuotaRead.ok -and $QuotaRead.proxy -eq 'fallback') {
+        $executionConfig = @{} + $Config
+        $executionConfig.codex = @{} + $Config.codex
+        $executionConfig.codex.proxy = ''
+        $execRoute = 'fallback'
+    }
+    $execTimeout = Get-AnchorExecBudgetSeconds $Config
+    # A distributed lease must also survive the bounded verification read.
+    $verificationBudget = (Get-CodexAttemptBudgetSeconds $Config).seconds
+    $execWindowMinutes = [Math]::Max(2, [int][Math]::Ceiling(($execTimeout + $verificationBudget) / 60.0) + 1)
     $localOnly = ($null -ne $Election -and [bool]$Election.localOnly)
 
     # ---- CQK-040 (§8): prove the Execution Profile BEFORE the Claim ----------
@@ -310,7 +324,7 @@ function Invoke-AutoAnchorIfNeeded {
     # point: resolving after the Claim would burn a deterministic schedule/expiry
     # event on a model call that never happens. A refusal here claims nothing, so
     # the next poll re-resolves and can still anchor.
-    $gate = Get-AnchorProfileGate -Config $Config -KeeperRoot $KeeperRoot -CodexPath $CodexPath `
+    $gate = Get-AnchorProfileGate -Config $executionConfig -KeeperRoot $KeeperRoot -CodexPath $CodexPath `
         -Guard $guard -LocalOnly $localOnly
     $CodexPath = $gate.codexPath
     if (-not $gate.allowed) {
@@ -388,10 +402,10 @@ function Invoke-AutoAnchorIfNeeded {
     Save-KeeperState -Root $KeeperRoot -State $State
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     try {
-    $exec = Invoke-External -FilePath $execInfo.exe -ArgumentList $execInfo.args -RawArguments "$($execInfo.rawArgs)" `
-        -TimeoutSeconds ([Math]::Max(60, [int]$Config.codex.queryTimeoutSeconds * 3)) -WorkingDirectory $workDir `
-        -Environment (Get-CodexProxyEnvironment $Config)
-    } catch { $exec = @{ ok = $false; exitCode = -1 } }
+        $exec = Invoke-External -FilePath $execInfo.exe -ArgumentList $execInfo.args -RawArguments "$($execInfo.rawArgs)" `
+            -TimeoutSeconds $execTimeout -WorkingDirectory $workDir `
+            -Environment (Get-CodexProxyEnvironment $executionConfig)
+    } catch { $exec = @{ ok = $false; exitCode = -1; timedOut = $false; stderr = (Hide-SensitiveText $_.Exception.Message) } }
     $sw.Stop()
 
     if ($exec.ContainsKey('started') -and -not $exec.started) {
@@ -422,6 +436,19 @@ function Invoke-AutoAnchorIfNeeded {
     $invocationId = New-AnchorInvocationId -TriggerEventIds $claimed -StartedAt $startedAt `
         -MachineId ([string]$Machine.machineId)
 
+    $execFailureKind = $null; $execFailureReason = $null
+    if (-not $exec.ok) {
+        $detail = Hide-SensitiveText ([string]$exec.stderr)
+        if ($detail.Length -gt 2048) { $detail = $detail.Substring($detail.Length - 2048) }
+        if ($exec.timedOut) {
+            $execFailureKind = 'TIMEOUT'
+            $execFailureReason = "exec timed out after $($execTimeout)s"
+        } else {
+            $execFailureKind = Get-CodexAppServerErrorKind -Message $detail
+            $execFailureReason = "exec failed ($($exec.exitCode))"
+        }
+        if ($detail) { $execFailureReason += ': ' + $detail }
+    }
     $anchorInfo = @{
         phase             = $(if ($verified -and $exec.ok) { 'ANCHORED' } else { 'ABORTED' })
         trigger           = [string]$guard.triggerKind
@@ -432,13 +459,14 @@ function Invoke-AutoAnchorIfNeeded {
         endedAt           = $endedAt
         durationSecs      = [int]$sw.Elapsed.TotalSeconds
         execExitCode      = $exec.exitCode
+        execRoute         = $execRoute
         verified          = $verified
         beforeWindows     = $beforeWindows
         afterWindows      = $(if ($verified) { $verify.windows } else { $null })
-        errorKind         = $(if (-not $verified) { $verify.errorKind } else { $null })
+        errorKind         = $(if (-not $exec.ok) { $execFailureKind } elseif (-not $verified) { $verify.errorKind } else { $null })
         model             = $(if ([string]::IsNullOrWhiteSpace([string]$anchorCfgExec.model)) { $null } else { [string]$anchorCfgExec.model })
         reasoningEffort   = $(if ([string]::IsNullOrWhiteSpace([string]$anchorCfgExec.reasoningEffort)) { $null } else { [string]$anchorCfgExec.reasoningEffort })
-        reason            = $(if (-not $exec.ok) { "exec failed ($($exec.exitCode))" } elseif (-not $verified) { "post-anchor verification failed ($($verify.errorKind)): $($verify.message); no retry" } else { $null })
+        reason            = $(if (-not $exec.ok) { $execFailureReason } elseif (-not $verified) { "post-anchor verification failed ($($verify.errorKind)): $($verify.message); no retry" } else { $null })
     }
 
     foreach ($k in @('configuredModel', 'configuredReasoningEffort', 'effectiveModel',
