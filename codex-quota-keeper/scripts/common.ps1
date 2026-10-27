@@ -43,7 +43,7 @@ $script:CQK_GIT_SYNC_BUDGET_SECONDS = 240
 # what must stay free between the end of one run and the next trigger.
 $script:CQK_MIN_TASK_LIMIT_MINUTES = 10
 $script:CQK_TASK_LIMIT_POLL_MARGIN_MINUTES = 2
-$script:CQK_VERSION = '0.9.2-beta'
+$script:CQK_VERSION = '0.9.3-beta'
 
 function Get-KeeperScriptDir {
     return $script:CqkCommonDir

@@ -32,25 +32,29 @@ $cfg = New-TestConfig @{
     codex = @{ autoAnchor = @{ enabled = $true; maxPerDay = 6; minimumGapMinutes = 300; schedule = @('09:00'); anchorOnExpiry = @() } }
 }
 $now = New-RecoveryTime '2026-09-15 09:00:08'
+$expiryCfg = Merge-ConfigDefaults $cfg @{ codex = @{ autoAnchor = @{ schedule = @(); anchorOnExpiry = @('primary') } } }
 $epoch = ConvertTo-EpochSeconds $now
 $slot = Get-ScheduleEventId '2026-09-15' '09:00'
 
-Start-TestGroup 'schedule: a single zero-percent read stays pending; moving predictions confirm idle'
+Start-TestGroup 'schedule executes on the first zero-percent read; expiry still confirms idle'
 $state = New-KeeperState
 Set-RecoveryObservation $state (New-RecoveryBucket ($epoch + 17996)) $now
 $first = Test-ShouldAnchor -Config $cfg -State $state -Events @() -IsLeader $true -Now $now
-Assert-False $first.should 'one rounded zero-percent read is insufficient to call'
-Assert-False (@($state.processedEventIds) -contains $slot) 'uncertain slot is not consumed'
+Assert-True $first.should 'a fixed schedule executes on the first zero-percent read'
+Assert-False (Test-ShouldAnchor $expiryCfg $state @() $true $now).should 'expiry still requires idle confirmation'
+Assert-False (@($state.processedEventIds) -contains $slot) 'schedule selection does not consume the slot before a claim'
 $later = $now.AddMinutes(1)
 Set-RecoveryObservation $state (New-RecoveryBucket ($epoch + 18056)) $later
 $second = Test-ShouldAnchor -Config $cfg -State $state -Events @() -IsLeader $true -Now $later
 Assert-True $second.should 'moving idle prediction allows the still-due schedule'
 Assert-Contains $second.eventIds $slot 'scheduled event is retained'
+Assert-True (Test-ShouldAnchor $expiryCfg $state @() $true $later).should 'moving predictions still confirm an expiry window is idle'
 
 $fixed = New-KeeperState
 Set-RecoveryObservation $fixed (New-RecoveryBucket ($epoch + 17996)) $now
 Set-RecoveryObservation $fixed (New-RecoveryBucket ($epoch + 17996)) $later
-Assert-False (Test-ShouldAnchor -Config $cfg -State $fixed -Events @() -IsLeader $true -Now $later).should 'fixed boundary at zero usage remains running'
+Assert-True (Test-ShouldAnchor $cfg $fixed @() $true $later).should 'a fixed boundary does not cancel a scheduled invocation'
+Assert-False (Test-ShouldAnchor $expiryCfg $fixed @() $true $later).should 'fixed boundary at zero usage still blocks expiry anchoring'
 
 Start-TestGroup 'upgrade: use the previous schema-3 snapshot without clearing processed slots'
 $legacy = New-KeeperState
@@ -59,12 +63,12 @@ $legacy.buckets = New-RecoveryBucket ($epoch + 17936)
 $legacy.lastGoodReadAt = $now.AddMinutes(-1).ToString('o')
 $legacy.expiryTrack['codex|primary'] = $epoch + 17936
 Set-RecoveryObservation $legacy (New-RecoveryBucket ($epoch + 17996)) $now
-Assert-True (Test-ShouldAnchor -Config $cfg -State $legacy -Events @() -IsLeader $true -Now $now).should 'old snapshot can confirm idle on the first upgraded poll'
+Assert-True $legacy.windowObservations['codex|primary'].idleConfirmed 'old snapshot can confirm idle on the first upgraded poll'
+Assert-True (Test-ShouldAnchor -Config $cfg -State $legacy -Events @() -IsLeader $true -Now $now).should 'a due schedule remains eligible after an upgrade'
 Add-ProcessedEvent -State $legacy -EventId $slot
 Assert-False (Test-ShouldAnchor -Config $cfg -State $legacy -Events @() -IsLeader $true -Now $now).should 'upgrade preserves previously consumed daily slots'
 
 Start-TestGroup 'expiry: replay the same idle period across polls and a state reload'
-$expiryCfg = Merge-ConfigDefaults $cfg @{ codex = @{ autoAnchor = @{ schedule = @(); anchorOnExpiry = @('primary') } } }
 $state = New-KeeperState
 $oldAt = New-RecoveryTime '2026-09-15 02:56:53'
 $oldBoundary = ConvertTo-EpochSeconds (New-RecoveryTime '2026-09-15 03:06:48')
@@ -155,7 +159,7 @@ $jitterState = New-KeeperState
 Set-RecoveryObservation $jitterState (New-RecoveryBucket ($epoch + 17996)) $now
 Set-RecoveryObservation $jitterState (New-RecoveryBucket ($epoch + 17997)) $now.AddSeconds(30)
 Assert-False $jitterState.windowObservations['codex|primary'].idleConfirmed 'one second movement over thirty seconds does not prove idle'
-Assert-False (Test-ShouldAnchor -Config $cfg -State $jitterState -Events @() -IsLeader $true -Now $now.AddSeconds(30)).should 'jitter cannot release a scheduled model call'
+Assert-False (Test-ShouldAnchor -Config $expiryCfg -State $jitterState -Events @() -IsLeader $true -Now $now.AddSeconds(30)).should 'jitter cannot release an expiry model call'
 
 $result = Get-TestResult
 Write-Host "quota-recovery: $($result.checks) checks, $($result.failures) failures"

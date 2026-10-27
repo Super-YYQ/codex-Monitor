@@ -47,16 +47,25 @@ Assert-Equal $before (ConvertTo-Json $state -Depth 14 -Compress) 'planning does 
 Assert-Equal 'clear' (Get-AnchorAlarmPlan -Config $cfg -State $state -Now $now).action 'ordinary reads do not repeatedly arm recovery'
 Assert-Equal 'clear' (Get-AnchorAlarmPlan (New-ScheduleRecoveryConfig '11:22') $state $now -RecoverPendingSchedule).action 'a future slot is not a pending recovered schedule'
 
-Start-TestGroup 'recovery preserves schedule deadlines and active/processed/error guards'
+Start-TestGroup 'recovery preserves schedule deadlines and processed/error guards'
 $processed = ConvertTo-HashtableDeep $state
 Add-ProcessedEvent -State $processed -EventId (Get-ScheduleEventId '2026-10-14' '11:00')
 Assert-Equal 'clear' (Get-AnchorAlarmPlan $cfg $processed $now -RecoverPendingSchedule).action 'attempted schedules stay deduplicated'
 $active = ConvertTo-HashtableDeep $state
 $active.buckets[0].windows[0].usedPercent = 1
-Assert-Equal 'clear' (Get-AnchorAlarmPlan $cfg $active $now -RecoverPendingSchedule).action 'user activity prevents another model call'
+Assert-Equal 'set' (Get-AnchorAlarmPlan $cfg $active $now -RecoverPendingSchedule).action 'user activity does not cancel an explicit schedule'
 $uncertain = ConvertTo-HashtableDeep $state
 $uncertain.windowObservations['codex-default|primary'].idleConfirmed = $false
-Assert-Equal 'clear' (Get-AnchorAlarmPlan $cfg $uncertain $now -RecoverPendingSchedule).action 'uncertain zero usage still fails closed'
+$uncertainBefore = ConvertTo-Json $uncertain -Depth 14 -Compress
+$confirmation = Get-AnchorAlarmPlan $cfg $uncertain $now -RecoverPendingSchedule
+Assert-Equal 'set' $confirmation.action 'a pending schedule can recover without idle confirmation'
+Assert-Equal ((ConvertTo-EpochSeconds $now) + 60) $confirmation.targetEpoch 'the model-free read retry hands off to a normal check after one minute'
+Assert-True ([bool]$confirmation.scheduleRecovery) 'read recovery uses the bounded normal recovery path'
+Assert-Equal $uncertainBefore (ConvertTo-Json $uncertain -Depth 14 -Compress) 'planning does not consume the live slot'
+Assert-True (Test-ShouldAnchor $cfg (ConvertTo-HashtableDeep $uncertain) @() $true $now).should 'the schedule itself does not wait for a second idle observation'
+$nearTolerance = ConvertTo-HashtableDeep $uncertain
+$nearTolerance.buckets[0].windows[0].resetsAt = (ConvertTo-EpochSeconds $now) + 18000 - 110
+Assert-Equal 'set' (Get-AnchorAlarmPlan $cfg $nearTolerance $now -RecoverPendingSchedule).action 'a scheduled recovery is independent of prediction tolerance'
 foreach ($field in @('stale', 'schemaUnknown', 'rateLimitReachedType')) {
     $blocked = ConvertTo-HashtableDeep $state
     $blocked[$field] = $(if ($field -eq 'rateLimitReachedType') { 'primary' } else { $true })
@@ -79,6 +88,8 @@ $weekReset = (ConvertTo-EpochSeconds $now) + 3600
 $weekly.buckets[0].windows += @{ windowType = 'secondary'; windowDurationMins = 10080; usedPercent = 6; resetsAt = $weekReset }
 Assert-Equal ((ConvertTo-EpochSeconds $now) + 60) (Get-AnchorAlarmPlan $weeklyCfg $weekly $now -RecoverPendingSchedule).targetEpoch 'recovery runs before the later weekly boundary'
 Assert-Equal ($weekReset + 60) (Get-AnchorAlarmPlan $weeklyCfg $weekly $now).targetEpoch 'normal reconciliation keeps the weekly alarm'
+$weekly.windowObservations['codex-default|primary'].idleConfirmed = $false
+Assert-Equal ((ConvertTo-EpochSeconds $now) + 60) (Get-AnchorAlarmPlan $weeklyCfg $weekly $now -RecoverPendingSchedule).targetEpoch 'a first idle candidate also takes priority over the later weekly boundary'
 
 $ws = New-TestWorkspace
 $hostExe = (Get-Process -Id $PID).Path
@@ -129,6 +140,30 @@ exit $LASTEXITCODE
         }
     }
 
+    Start-TestGroup 'real runner: first zero-usage schedule executes immediately once'
+    $firstIdleRoot = Join-Path $ws 'first-idle'
+    Ensure-Directory $firstIdleRoot | Out-Null
+    $firstIdleCfg = New-ScheduleRecoveryConfig (Get-Date).ToString('HH:mm')
+    Write-TestConfigFile (Join-Path $firstIdleRoot 'config.json') $firstIdleCfg | Out-Null
+    $env:CQK_MOCK_MODE = 'rolling-idle'; $env:CQK_MOCK_EXEC = 'ok'; $env:CQK_MOCK_POST_EXEC_MODE = 'reset'
+    $env:CQK_MOCK_EXEC_ARGS_FILE = Join-Path $firstIdleRoot 'model-calls.txt'
+    Invoke-ScheduleRecoveryRunner $firstIdleRoot
+    Assert-Equal 1 @(Get-Content $env:CQK_MOCK_EXEC_ARGS_FILE -ErrorAction SilentlyContinue).Count 'the first zero-usage read allows the scheduled model call immediately'
+    Assert-False (Test-Path (Join-Path $firstIdleRoot 'task-writes.jsonl')) 'a fixed schedule does not create an idle-confirmation task'
+    Invoke-ScheduleRecoveryRunner $firstIdleRoot -Recovery
+    Assert-Equal 1 @(Get-Content $env:CQK_MOCK_EXEC_ARGS_FILE -ErrorAction SilentlyContinue).Count 'a recovery wakeup does not repeat an executed slot'
+    Invoke-ScheduleRecoveryRunner $firstIdleRoot -Recovery
+    Assert-Equal 1 @(Get-Content $env:CQK_MOCK_EXEC_ARGS_FILE -ErrorAction SilentlyContinue).Count 'repeated wakeups cannot execute the slot again'
+
+    Start-TestGroup 'real runner: a recovery also executes without prior idle history'
+    $unresolvedRoot = Join-Path $ws 'unresolved-idle'
+    Ensure-Directory $unresolvedRoot | Out-Null
+    Write-TestConfigFile (Join-Path $unresolvedRoot 'config.json') $firstIdleCfg | Out-Null
+    $env:CQK_MOCK_EXEC_ARGS_FILE = Join-Path $unresolvedRoot 'model-calls.txt'
+    Invoke-ScheduleRecoveryRunner $unresolvedRoot -Recovery
+    Assert-Equal 1 @(Get-Content $env:CQK_MOCK_EXEC_ARGS_FILE -ErrorAction SilentlyContinue).Count 'a pending fixed schedule needs no idle history'
+    Assert-False (Test-Path (Join-Path $unresolvedRoot 'task-writes.jsonl')) 'a recovery cannot schedule another recovery'
+
     Start-TestGroup 'real runner: retry is model-free; recovery rechecks and executes the slot once'
     $root = Join-Path $ws 'pending'
     Ensure-Directory $root | Out-Null
@@ -152,28 +187,20 @@ exit $LASTEXITCODE
         Assert-True ($launcher -match '-ScheduleRecovery') 'scheduled action runs the normal recovery path'
         Assert-False ($launcher -match '-ReadOnlyRetry|-ForceAnchor') 'normal recovery cannot force or remain read-only'
     }
-    # Advance the prior observation by the scheduled minute without sleeping.
-    # The next real runner read still exercises the rolling-prediction guard.
-    $recovered = Load-KeeperState $root
-    Assert-True $recovered.windowObservations['codex-default|primary'].idleConfirmed 'retry confirms the 11:00-style idle candidate'
-    $recovered.windowObservations['codex-default|primary'].observedAt -= 60
-    $recovered.windowObservations['codex-default|primary'].resetsAt -= 60
-    $recovered.buckets[0].windows[0].resetsAt -= 60
-    $recovered.lastGoodReadAt = (Get-Date).AddMinutes(-1).ToString('o')
-    Save-KeeperState -Root $root -State $recovered
+    # Schedule recovery is independent of idle-observation age or confirmation.
     Invoke-ScheduleRecoveryRunner $root -Recovery
     Assert-Equal 1 @(Get-Content $env:CQK_MOCK_EXEC_ARGS_FILE -ErrorAction SilentlyContinue).Count 'the previously unattempted slot executes once'
     Invoke-ScheduleRecoveryRunner $root -Recovery
     Assert-Equal 1 @(Get-Content $env:CQK_MOCK_EXEC_ARGS_FILE -ErrorAction SilentlyContinue).Count 'repeated wakeups do not retry the processed slot'
 
-    Start-TestGroup 'real runner: user activity before recovery prevents the pending call'
+    Start-TestGroup 'real runner: user activity before recovery does not cancel the fixed schedule'
     $activeRoot = Join-Path $ws 'user-active'
     Ensure-Directory $activeRoot | Out-Null
     Write-TestConfigFile (Join-Path $activeRoot 'config.json') $liveCfg | Out-Null
     $env:CQK_MOCK_EXEC_ARGS_FILE = Join-Path $activeRoot 'model-calls.txt'
     $env:CQK_MOCK_MODE = 'expiry-active'; $env:CQK_MOCK_POST_EXEC_MODE = ''
     Invoke-ScheduleRecoveryRunner $activeRoot -Recovery
-    Assert-False (Test-Path $env:CQK_MOCK_EXEC_ARGS_FILE) 'fresh running window blocks anchoring'
+    Assert-Equal 1 @(Get-Content $env:CQK_MOCK_EXEC_ARGS_FILE -ErrorAction SilentlyContinue).Count 'a running primary still executes the pending fixed schedule once'
 
     Start-TestGroup 'real runner: failed recovery never creates another read retry'
     $failedRoot = Join-Path $ws 'failed-recovery'

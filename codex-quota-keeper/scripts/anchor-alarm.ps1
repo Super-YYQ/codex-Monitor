@@ -35,8 +35,8 @@ function Get-AnchorAlarmPlan {
         $observation = if ($State.windowObservations) { $State.windowObservations[$key] } else { $null }
         if (Test-WindowRunning -Window $win -NowEpoch $nowEpoch -Observation $observation) { $targets += ([long]$win.resetsAt + 60) }
     }
-    # The idle guard needs observations at least 30 seconds apart. A minute
-    # leaves room for task registration and preserves the confirmation on read.
+    # A read-only retry cannot call a model. Recover a still-pending schedule
+    # through one separate normal check after a minute.
     $recoveryAt = $Now.AddMinutes(1)
     $recoveryEpoch = ConvertTo-EpochSeconds $recoveryAt
     if ($RecoverPendingSchedule -and @($aa.schedule).Count -gt 0) {

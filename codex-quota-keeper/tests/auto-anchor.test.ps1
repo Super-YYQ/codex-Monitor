@@ -125,7 +125,7 @@ try {
     Assert-Equal 0 $forced.exitCode "forced runner succeeds ($($forced.output))"
     Assert-Equal 1 (Load-KeeperState $forceRoot).anchors.attemptCount 'forced attempt counted'
 
-    Start-TestGroup 'schedule: due slot calls once only when primary is not running'
+    Start-TestGroup 'schedule: due slot calls once regardless of primary activity'
 
     $scheduleRoot = Join-Path $ws 'schedule'
     New-Item -ItemType Directory -Path $scheduleRoot -Force | Out-Null
@@ -137,6 +137,19 @@ try {
     Assert-Equal 1 (Load-KeeperState $scheduleRoot).anchors.attemptCount 'due schedule executes once'
     Assert-Equal 0 (Invoke-RunnerSub -KeeperRoot $scheduleRoot -ConfigFile $scheduleCfg).exitCode 'same slot repeat succeeds'
     Assert-Equal 1 (Load-KeeperState $scheduleRoot).anchors.attemptCount 'same schedule slot deduplicated'
+
+    $activeScheduleRoot = Join-Path $ws 'schedule-active'
+    New-Item -ItemType Directory -Path $activeScheduleRoot -Force | Out-Null
+    $activeScheduleCfg = Join-Path $activeScheduleRoot 'config.json'
+    Write-TestConfigFile $activeScheduleCfg (New-AutoAnchorConfig -Schedule @($slot)) | Out-Null
+    $activeScheduleExec = Join-Path $activeScheduleRoot 'exec.txt'
+    $env:CQK_MOCK_EXEC_ARGS_FILE = $activeScheduleExec
+    $env:CQK_MOCK_MODE = 'expiry-active'
+    Assert-Equal 0 (Invoke-RunnerSub -KeeperRoot $activeScheduleRoot -ConfigFile $activeScheduleCfg).exitCode 'scheduled runner succeeds with an active primary'
+    Assert-Equal 1 (Get-ExecCount $activeScheduleExec) 'active primary does not suppress the scheduled physical invocation'
+    Assert-Equal 1 (Load-KeeperState $activeScheduleRoot).anchors.successCount 'fixed-time invocation is counted as a success'
+    Assert-Equal 0 (Invoke-RunnerSub -KeeperRoot $activeScheduleRoot -ConfigFile $activeScheduleCfg).exitCode 'repeated active-window schedule succeeds'
+    Assert-Equal 1 (Get-ExecCount $activeScheduleExec) 'repeated wakeup cannot repeat the fixed-time invocation'
 
     Start-TestGroup 'merged expiry: two buckets claim twice but execute and audit once'
 
