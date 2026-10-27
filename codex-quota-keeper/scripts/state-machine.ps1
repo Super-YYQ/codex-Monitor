@@ -472,9 +472,9 @@ function Test-ShouldAnchor {
     $curMap = Get-BucketWindowMap @($State.buckets)
 
     # Trigger 1: daily schedule. Native Task Scheduler triggers call the same
-    # runner, and the poll remains a fallback. A late slot is consumed without a
-    # model call. If the primary window is already running, the slot has already
-    # achieved its purpose and is also consumed without a call.
+    # runner, and the poll remains a fallback. A configured time requests one
+    # invocation regardless of window activity. Only shared guards, dedup and
+    # the catch-up deadline can deny it; idle/running checks belong to expiry.
     $scheduleIds = @()
     $skipReasons = @()
     foreach ($slot in @($anchorCfg.schedule)) {
@@ -490,24 +490,6 @@ function Test-ShouldAnchor {
             $skipReasons += "schedule ${slot}: outside catch-up interval"
             continue
         }
-        $primaryWindows = @($curMap.Values | Where-Object { [string]$_.windowType -eq 'primary' })
-        if ($primaryWindows.Count -eq 0) { $skipReasons += "schedule ${slot}: primary unavailable"; continue }
-        $primaryRunning = $false
-        $uncertain = $false
-        foreach ($primary in $primaryWindows) {
-            $key = Get-WindowKey ([string]$primary.bucketId) 'primary'
-            $observation = if ($State.windowObservations) { $State.windowObservations[$key] } else { $null }
-            if (Test-WindowRunning -Window $primary -NowEpoch $nowEpoch -Observation $observation) {
-                if (Test-WindowIdlePrediction $primary $nowEpoch) { $uncertain = $true }
-                else { $primaryRunning = $true }
-            }
-        }
-        if ($primaryRunning) {
-            Add-ProcessedEvent -State $State -EventId $sid
-            $skipReasons += "schedule ${slot}: primary running"
-            continue
-        }
-        if ($uncertain) { $skipReasons += "schedule ${slot}: awaiting idle confirmation"; continue }
         $scheduleIds += $sid
     }
     if ($scheduleIds.Count -gt 0) {

@@ -85,7 +85,10 @@ param([string]$KeeperRoot, [string]$ConfigFile, [switch]$ForceAnchor,
             $diagnostic = if ($exited) { ($p.StandardOutput.ReadToEnd() + $p.StandardError.ReadToEnd()).Trim() } else { 'timeout' }
             Assert-True ($exited -and $p.ExitCode -eq 0) "WSH starts the harmless runner after the Store update ($diagnostic)"
             if ($exited -and $p.ExitCode -eq 0) {
-                for ($i = 0; $i -lt 100 -and -not (Test-Path -LiteralPath $marker); $i++) { Start-Sleep -Milliseconds 50 }
+                # WSH returns before its child is ready. A fresh hosted Windows
+                # runner can cold-start Windows PowerShell beyond five seconds;
+                # still require the real marker, with a bounded startup budget.
+                for ($i = 0; $i -lt 600 -and -not (Test-Path -LiteralPath $marker); $i++) { Start-Sleep -Milliseconds 50 }
             }
             Assert-True (Test-Path -LiteralPath $marker) 'runner actually executes, rather than only starting the WSH host'
             if (Test-Path -LiteralPath $marker) {

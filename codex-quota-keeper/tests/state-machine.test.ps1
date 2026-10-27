@@ -136,7 +136,7 @@ $nullAllow = Test-ShouldAnchor -Config $expiryCfg -State $nullWindow -Events @()
 Assert-True $nullAllow.should 'present window with empty resetsAt is not running'
 Assert-Contains $nullAllow.eventIds (Get-ExpiryAnchorEventId 'default' 'secondary' 0) 'first empty window uses zero fallback deterministically'
 
-Start-TestGroup 'schedule: native slot semantics, lateness bound, and running-window skip'
+Start-TestGroup 'schedule: fixed-time invocation, lateness bound, and dedup'
 
 $scheduleCfg = New-GuardConfig -Schedule @('09:30', '21:00')
 $scheduleNow = [DateTime]::Parse('2026-08-30 09:31:00')
@@ -149,9 +149,19 @@ Assert-Equal 'schedule' $scheduleAllow.triggerKind 'schedule trigger kind report
 Assert-Contains $scheduleAllow.eventIds $scheduleId 'daily schedule id returned'
 
 $runningAtSlot = New-GuardState -PrimaryResetsAt (ConvertTo-EpochSeconds $scheduleNow.AddHours(4))
-$runningDenied = Test-ShouldAnchor -Config $scheduleCfg -State $runningAtSlot -Events @() -IsLeader $true -Now $scheduleNow
-Assert-False $runningDenied.should 'already-running primary skips scheduled model call'
-Assert-Contains $runningAtSlot.processedEventIds $scheduleId 'skipped running-window slot is consumed'
+$runningAllowed = Test-ShouldAnchor -Config $scheduleCfg -State $runningAtSlot -Events @() -IsLeader $true -Now $scheduleNow
+Assert-True $runningAllowed.should 'due schedule invokes even when primary is already running'
+Assert-Contains $runningAllowed.eventIds $scheduleId 'running-window schedule returns its own slot id'
+Assert-False ($runningAtSlot.processedEventIds -contains $scheduleId) 'selection does not consume a slot before the invocation claim'
+$noPrimary = New-GuardState
+$noPrimary.buckets[0].windows = @($noPrimary.buckets[0].windows | Where-Object { $_.windowType -ne 'primary' })
+Assert-True (Test-ShouldAnchor $scheduleCfg $noPrimary @() $true $scheduleNow).should 'a valid snapshot without primary does not cancel an explicit schedule'
+$runningAtSlot.stale = $true
+Assert-False (Test-ShouldAnchor $scheduleCfg $runningAtSlot @() $true $scheduleNow).should 'fixed schedules still fail closed on a stale read'
+$runningAtSlot.stale = $false
+$runningAtSlot.anchors = @{ day = '2026-08-30'; attemptCount = 6 }
+Assert-False (Test-ShouldAnchor $scheduleCfg $runningAtSlot @() $true $scheduleNow).should 'fixed schedules still obey the daily cap'
+Assert-False (Test-ShouldAnchor $scheduleCfg (New-GuardState) @() $false $scheduleNow).should 'fixed schedules still require leadership'
 
 $lateState = New-GuardState -PrimaryResetsAt $scheduleExpired
 $lateNow = [DateTime]::Parse('2026-08-30 10:31:00')
@@ -240,6 +250,15 @@ $idleSlotId = Get-ScheduleEventId '2026-08-30' '09:30'
 $idleDecision = Test-ShouldAnchor -Config $idleCfg -State $idleState -Events @() -IsLeader $true -Now $idleNow
 Assert-True $idleDecision.should 'idle primary at a due slot anchors instead of being skipped'
 Assert-Contains $idleDecision.eventIds $idleSlotId 'idle slot returns its schedule event id'
+
+Start-TestGroup 'schedule: first idle observation does not delay a due invocation'
+
+$firstIdleState = ConvertTo-HashtableDeep $idleState
+$firstIdleState.windowObservations['default|primary'].idleConfirmed = $false
+$firstIdleDecision = Test-ShouldAnchor -Config $idleCfg -State $firstIdleState -Events @() -IsLeader $true -Now $idleNow
+Assert-True $firstIdleDecision.should 'a fixed schedule does not wait for idle confirmation'
+Assert-Contains $firstIdleDecision.eventIds $idleSlotId 'first zero usage returns the original schedule id'
+Assert-False ($firstIdleState.processedEventIds -contains $idleSlotId) 'schedule selection leaves the claim to the invocation path'
 
 $result = Get-TestResult
 if ($result.failures -gt 0) { Write-Host "state-machine.test.ps1: $($result.failures) failure(s)" -ForegroundColor Red; exit 1 }

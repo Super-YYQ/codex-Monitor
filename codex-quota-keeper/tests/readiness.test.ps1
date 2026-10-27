@@ -103,8 +103,20 @@ try {
     Start-TestGroup 'known claims are terminal, not repeated pending work'
     $takeover = New-KeeperState
     $takeover.stale = $false
-    $null = Invoke-AutoAnchorIfNeeded -Config $cfg -KeeperRoot $launchRoot -State $takeover -Events @() `
-        -IsLeader $true -Machine @{ machineId = 'test-machine' } -Election @{ localOnly = $true } -CodexPath $mock -ForceAnchor $true
+    $knownClaims = @(Get-ChildItem -LiteralPath (Get-AnchorClaimsDir $launchRoot) -Filter '*.json')
+    Assert-Equal 1 $knownClaims.Count 'the refused launch left exactly one durable claim to replay'
+    $savedForceEventId = ${function:Get-ForceAnchorEventId}
+    try {
+        # Force IDs are minute-based. Replay the actual stored ID so a wall
+        # clock minute change does not turn this takeover into a new event.
+        $script:ReadinessKnownClaimId = $knownClaims[0].BaseName
+        function Get-ForceAnchorEventId { param([datetime]$Now); return $script:ReadinessKnownClaimId }
+        $null = Invoke-AutoAnchorIfNeeded -Config $cfg -KeeperRoot $launchRoot -State $takeover -Events @() `
+            -IsLeader $true -Machine @{ machineId = 'test-machine' } -Election @{ localOnly = $true } -CodexPath $mock -ForceAnchor $true
+    } finally {
+        Set-Item Function:Get-ForceAnchorEventId $savedForceEventId
+        Remove-Variable ReadinessKnownClaimId -Scope Script -ErrorAction SilentlyContinue
+    }
     Assert-Equal 1 @($takeover.processedEventIds).Count 'existing durable claim removes trigger from pending work'
     Assert-Equal 0 $takeover.anchors.attemptCount 'takeover does not count another invocation'
 
